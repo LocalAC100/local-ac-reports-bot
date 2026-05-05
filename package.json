@@ -11,7 +11,7 @@
     "test:evening": "node scripts/run-once.js evening"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": "20.x"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
