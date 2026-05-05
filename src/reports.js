@@ -209,7 +209,7 @@ async function buildDispatcherSection({ from, to, hubstaffByUser }) {
       .getConversationMessages(conv.id)
       .catch(() => []);
     for (const m of msgs) {
-      if ((m.type || "").toUpperCase() !== "CALL") continue;
+      if (String(m.type ?? "").toUpperCase() !== "CALL") continue;
       const userId = m.userId || m.user || m.createdBy;
       const dispatcher = [...byDispatcher.values()].find(
         (d) => d.ghlUserId === userId
@@ -234,7 +234,7 @@ async function buildDispatcherSection({ from, to, hubstaffByUser }) {
       .searchOpportunities({ pipelineId: p.id, status: "open" })
       .catch(() => []);
     for (const o of opps) {
-      const stage = (o.pipelineStageName || "").toLowerCase();
+      const stage = String(o.pipelineStageName ?? "").toLowerCase();
       const updated = new Date(o.updatedAt || o.dateAdded);
       if (updated < new Date(fromIso) || updated > new Date(toIso)) continue;
       if (
@@ -269,8 +269,8 @@ async function buildDispatcherSection({ from, to, hubstaffByUser }) {
     if (conv) {
       const msgs = await ghl.getConversationMessages(conv.id).catch(() => []);
       const calls = msgs
-        .filter((m) => (m.type || "").toUpperCase() === "CALL")
-        .filter((m) => (m.direction || "").toLowerCase() === "outbound");
+        .filter((m) => String(m.type ?? "").toUpperCase() === "CALL")
+        .filter((m) => String(m.direction ?? "").toLowerCase() === "outbound");
       if (calls.length) {
         calls.sort((a, b) => new Date(a.dateAdded) - new Date(b.dateAdded));
         firstCallAt = new Date(calls[0].dateAdded);
