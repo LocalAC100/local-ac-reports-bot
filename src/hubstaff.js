@@ -50,7 +50,7 @@ async function getAccessToken() {
   ) {
     await refreshAccessToken();
   }
-  Return cachedAccessToken;
+  return cachedAccessToken;
 }
 
 async function get(path, params = {}) {
