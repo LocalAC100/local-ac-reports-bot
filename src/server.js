@@ -1,20 +1,32 @@
-// HTTP server: receives GHL webhooks and exposes a /healthz check.
+// HTTP server: webhook listener + dashboard + healthz.
 import express from "express";
+import cookieParser from "cookie-parser";
+import path from "path";
+import { fileURLToPath } from "url";
 import { config } from "./config.js";
 import { onNewLead } from "./alerts.js";
+import { buildSessionMiddleware } from "./auth.js";
+import { buildDashboardRouter } from "./dashboard.js";
+import { Alerts } from "./db.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export function buildServer() {
   const app = express();
-  app.use(express.json({ limit: "1mb" }));
 
+  // Trust Render's proxy so secure cookies + req.ip work correctly
+  app.set("trust proxy", 1);
+
+  // Health check (no auth, no body parsing — fast)
   app.get("/healthz", (req, res) => res.json({ ok: true }));
 
-  // GHL webhook: fired on contact.created, opportunity events, etc.
-  // Configure this URL inside GHL: Settings → Integrations → Webhooks (or
-  // attach an outbound webhook step inside a workflow that fires on new
-  // contact creation).
-  app.post("/webhooks/ghl", (req, res) => {
-    // Optional: shared-secret check via X-GHL-Signature or query param.
+  // Static assets (logo, css)
+  app.use(express.static(path.join(__dirname, "..", "public")));
+
+  // GHL webhook — needs JSON body parsing, but NOT session middleware
+  // (webhooks don't have sessions). Mount before session.
+  app.post("/webhooks/ghl", express.json({ limit: "1mb" }), (req, res) => {
     if (config.ghl.webhookSecret) {
       const provided =
         req.headers["x-webhook-secret"] || req.query.secret;
@@ -24,8 +36,6 @@ export function buildServer() {
     }
 
     const body = req.body || {};
-    // GHL workflow-style webhooks deliver a flat object with contact fields;
-    // contact-event webhooks wrap data differently. Be tolerant.
     const contactId =
       body.contact_id || body.contactId || body.id || body.contact?.id;
     const contactName =
@@ -41,19 +51,24 @@ export function buildServer() {
       new Date().toISOString();
     const eventType = body.type || body.event_type || "";
 
-    // We only act on new-lead-style events.
     if (
       !eventType ||
       eventType.toLowerCase().includes("contact") ||
       eventType.toLowerCase().includes("lead") ||
       eventType.toLowerCase().includes("create")
     ) {
+      // Log to dashboard immediately (so it appears in Alerts even before timer fires)
       onNewLead({ contactId, contactName, phone, leadAddedAt }).catch((e) =>
         console.error("[webhook] onNewLead failed", e?.message)
       );
     }
     return res.json({ ok: true });
   });
+
+  // Dashboard: session-based, requires login
+  app.use(cookieParser());
+  app.use(buildSessionMiddleware());
+  app.use(buildDashboardRouter());
 
   return app;
 }
