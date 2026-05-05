@@ -1,0 +1,25 @@
+{
+  "name": "local-ac-reports-bot",
+  "version": "1.0.0",
+  "description": "Automated daily reporting agent for Local AC: Hubstaff hours/activity + GoHighLevel dispatcher calls + live new-lead alerts.",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "test:creds": "node scripts/test-credentials.js",
+    "test:morning": "node scripts/run-once.js morning",
+    "test:evening": "node scripts/run-once.js evening"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "luxon": "^3.5.0",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.10.0",
+    "sharp": "^0.33.5"
+  }
+}
