@@ -1,7 +1,7 @@
 {
   "name": "local-ac-reports-bot",
-  "version": "1.0.0",
-  "description": "Automated daily reporting agent for Local AC: Hubstaff hours/activity + GoHighLevel dispatcher calls + live new-lead alerts.",
+  "version": "2.0.0",
+  "description": "Local AC Control Room — dashboard + automated daily reports + live alerts. Hubstaff + GoHighLevel + Jobber + Claude.",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
@@ -14,9 +14,14 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
     "axios": "^1.7.9",
+    "bcrypt": "^5.1.1",
+    "better-sqlite3": "^11.7.0",
+    "cookie-parser": "^1.4.7",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "express-session": "^1.18.1",
     "luxon": "^3.5.0",
     "node-cron": "^3.0.3",
     "nodemailer": "^6.10.0",
