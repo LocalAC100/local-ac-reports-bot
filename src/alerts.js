@@ -32,8 +32,8 @@ export async function onNewLead({ contactId, contactName, phone, leadAddedAt }) 
         const msgs = await ghl.getConversationMessages(conv.id).catch(() => []);
         const called = msgs.some(
           (m) =>
-            (m.type || "").toUpperCase() === "CALL" &&
-            (m.direction || "").toLowerCase() === "outbound"
+            String(m.type ?? "").toUpperCase() === "CALL" &&
+            String(m.direction ?? "").toLowerCase() === "outbound"
         );
         if (called) return;
       }
