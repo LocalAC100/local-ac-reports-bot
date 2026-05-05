@@ -6,10 +6,33 @@ import fs from "fs";
 import path from "path";
 import bcrypt from "bcrypt";
 
-const DB_DIR = process.env.RENDER ? "/var/data" : path.resolve("./data");
-const DB_PATH = path.join(DB_DIR, "control-room.db");
+// Pick a writable data dir: explicit override → Render persistent disk → local ./data → /tmp fallback
+function pickDataDir() {
+  const candidates = [
+    process.env.DATA_DIR,
+    process.env.RENDER ? "/var/data" : null,
+    path.resolve("./data"),
+    "/tmp/control-room",
+  ].filter(Boolean);
+  for (const dir of candidates) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      // Probe writability
+      fs.accessSync(dir, fs.constants.W_OK);
+      if (dir !== candidates[0]) {
+        console.warn(`[db] using ${dir} (preferred dir not writable)`);
+      }
+      return dir;
+    } catch (e) {
+      // try next candidate
+    }
+  }
+  throw new Error("No writable data directory found");
+}
 
-if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
+const DB_DIR = pickDataDir();
+const DB_PATH = path.join(DB_DIR, "control-room.db");
+console.log(`[db] storing data at ${DB_PATH}`);
 
 export const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
