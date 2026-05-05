@@ -38,7 +38,7 @@ export async function onNewLead({ contactId, contactName, phone, leadAddedAt }) 
       }
       const elapsed = Math.round((Date.now() - new Date(leadAddedAt).getTime()) / 60000);
       const html = renderLiveAlert({
-        leadName: contactName || "(nunnamed lead)",
+        leadName: contactName || "(unnamed lead)",
         phone: phone || "(no phone)",
         leadAddedAt: fmtDateTime(DateTime.fromJSDate(new Date(leadAddedAt))),
         minutesElapsed: elapsed,
