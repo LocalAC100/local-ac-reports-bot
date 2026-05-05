@@ -23,3 +23,90 @@ const http = axios.create({
 // ---------- Pipelines / Opportunities ----------
 
 export async function listPipelines() {
+  const r = await http.get("/opportunities/pipelines", {
+    params: { locationId: config.ghl.locationId },
+  });
+  return r.data?.pipelines ?? [];
+}
+
+export async function searchOpportunities({ pipelineId, status, limit = 100 }) {
+  const params = {
+    location_id: config.ghl.locationId,
+    limit,
+  };
+  if (pipelineId) params.pipeline_id = pipelineId;
+  if (status) params.status = status;
+  const r = await http.get("/opportunities/search", { params });
+  return r.data?.opportunities ?? [];
+}
+
+// ---------- Contacts (leads) ----------
+
+export async function searchContacts({ from, to, limit = 100 }) {
+  // GHL uses "dateAdded" filter in search. ISO strings expected.
+  const r = await http.post("/contacts/search", {
+    locationId: config.ghl.locationId,
+    pageLimit: limit,
+    filters: [
+      {
+        field: "dateAdded",
+        operator: "between",
+        value: [from, to],
+      },
+    ],
+  });
+  return r.data?.contacts ?? [];
+}
+
+export async function getContact(contactId) {
+  const r = await http.get(`/contacts/${contactId}`, {
+    params: { locationId: config.ghl.locationId },
+  });
+  return r.data?.contact;
+}
+
+// ---------- Conversations & Calls ----------
+// Calls in GHL are stored as messages of type CALL inside conversations.
+
+export async function searchConversations({ from, to, limit = 100 }) {
+  const r = await http.get("/conversations/search", {
+    params: {
+      locationId: config.ghl.locationId,
+      lastMessageDirection: "outbound",
+      limit,
+      // Conversation search supports dates via lastMessageDate filter
+      startDate: new Date(from).getTime(),
+      endDate: new Date(to).getTime(),
+    },
+  });
+  return r.data?.conversations ?? [];
+}
+
+export async function getConversationMessages(conversationId) {
+  const r = await http.get(`/conversations/${conversationId}/messages`, {
+    params: { locationId: config.ghl.locationId, limit: 100 },
+  });
+  return r.data?.messages?.messages ?? r.data?.messages ?? [];
+}
+
+// ---------- Calendar / Appointments ----------
+
+export async function listAppointments({ from, to }) {
+  const r = await http.get("/calendars/events/appointments", {
+    params: {
+      locationId: config.ghl.locationId,
+      startTime: new Date(from).getTime(),
+      endTime: new Date(to).getTime(),
+    },
+  });
+  return r.data?.events ?? [];
+}
+
+// ---------- Users ----------
+
+export async function listUsers() {
+  const r = await http.get("/users/", {
+    params: { locationId: config.ghl.locationId },
+  });
+  return r.data?.users ?? [];
+}
