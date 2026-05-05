@@ -1,9 +1,7 @@
 # Render blueprint — provisions a single web service that runs everything:
-# - HTTP server (for the GHL webhook endpoint and a /healthz check)
+# - HTTP server (dashboard, GHL webhook, /healthz)
 # - In-process node-cron jobs for the 12:00 PM and 7:30 PM ET reports
-#
-# To deploy: push this repo to GitHub, then in Render → New → Blueprint and
-# point it at the repo. Render will pick up this file automatically.
+# - SQLite database for users + alert/report archive (persistent disk)
 services:
   - type: web
     name: local-ac-reports-bot
@@ -13,6 +11,10 @@ services:
     buildCommand: npm install
     startCommand: node src/index.js
     healthCheckPath: /healthz
+    disk:
+      name: control-room-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: NODE_ENV
         value: production
@@ -22,7 +24,9 @@ services:
         value: 3000
       - key: LEAD_RESPONSE_THRESHOLD_MINUTES
         value: "3"
-      # Secrets below — fill these in via the Render dashboard, NOT here.
+      - key: RENDER
+        value: "true"
+      # Existing secrets — already configured via Render dashboard
       - key: HUBSTAFF_REFRESH_TOKEN
         sync: false
       - key: HUBSTAFF_ORG_ID
@@ -31,7 +35,7 @@ services:
         sync: false
       - key: GHL_LOCATION_ID
         sync: false
-      - key: GHL_WEBHOOK_SECRET
+      - key: GHL_WeBHOOK_SECRET
         sync: false
       - key: SMTP_HOST
         sync: false
@@ -46,4 +50,23 @@ services:
       - key: SMTP_FROM_ADDRESS
         sync: false
       - key: REPORT_RECIPIENT
+        sync: false
+      # Control Room — auth + bot identity
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      # Anthropic — for Ask Claude tab
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Jobber — for Ask Claude data access
+      - key: JOBBER_CLIENT_ID
+        sync: false
+      - key: JOBBER_CLIENT_SECRET
+        sync: false
+      - key: JOBBER_ACCESS_TOKEN
+        sync: false
+      - key: JOBBER_REFRESH_TOKEN
         sync: false
