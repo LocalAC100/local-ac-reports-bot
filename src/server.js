@@ -49,13 +49,13 @@ export function buildServer() {
       body.dateAdded ||
       body.contact?.dateAdded ||
       new Date().toISOString();
-    const eventType = body.type || body.event_type || "";
+    const eventType = String(body.type ?? body.event_type ?? "").toLowerCase();
 
     if (
       !eventType ||
-      eventType.toLowerCase().includes("contact") ||
-      eventType.toLowerCase().includes("lead") ||
-      eventType.toLowerCase().includes("create")
+      eventType.includes("contact") ||
+      eventType.includes("lead") ||
+      eventType.includes("create")
     ) {
       // Log to dashboard immediately (so it appears in Alerts even before timer fires)
       onNewLead({ contactId, contactName, phone, leadAddedAt }).catch((e) =>
