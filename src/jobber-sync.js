@@ -7,12 +7,15 @@
 // Both call into GpJobs.upsertFromInvoice which is idempotent on jobber_invoice_id.
 
 import crypto from "crypto";
-import { gql } from "./jobber.js";
+import { gql, tokenStatus } from "./jobber.js";
 import { GpJobs, GpAttachments } from "./gross-profit.js";
 
 // ---------- Configuration ----------
 export function isConfigured() {
-  return Boolean(process.env.JOBBER_REFRESH_TOKEN || process.env.JOBBER_ACCESS_TOKEN);
+  // jobber.js loads tokens from /var/data/jobber-tokens.json on boot,
+  // so check that cache (not just env vars).
+  const t = tokenStatus();
+  return t.has_access_token || t.has_refresh_token;
 }
 
 // ---------- GraphQL: fetch full invoice detail by id ----------
