@@ -63,6 +63,7 @@ function renderNav({ user, activeNav }) {
     { href: "/leads", label: "Leads", key: "leads" },
     { href: "/alerts", label: "Alerts", key: "alerts" },
     { href: "/reports", label: "Reports", key: "reports" },
+    { href: "/gross-profit", label: "Gross Profit", key: "gross-profit" },
     { href: "/ask", label: "Ask Claude", key: "ask" },
   ];
   if (user.role === "admin") nav.push({ href: "/settings/users", label: "Users", key: "users" });
@@ -155,7 +156,7 @@ export function todayPage({ user, snapshot }) {
   <h2>Recent live alerts</h2>
   ${recentAlerts.length === 0
     ? `<div class="empty-good">No live alerts in the last 7 days.</div>`
-    : `<ul class="alert-list">${recentAlerts.map(a => `<li><span class="badge badge-red">🔴 ${a.minutes_elapsed}m</span> <strong>${escape(a.contact_name || "(unnamed)")}</strong> · ${escape(a.phone || "")} · ${escape(a.fired_at_display || a.fired_at)}</li>`).join("")}</ul>`}
+    : `<ul class="alert-list">${recentAlerts.map(a => `<li><span class="badge badge-red">🔴 ${a.minutes_elapsed}m</span> <strong>${escape(a.contact_name || "(unnamed)")}</strong> · ${escape(a.phone || "")} · ${escape(a.fired_at)}</li>`).join("")}</ul>`}
 </section>`,
   });
 }
@@ -258,7 +259,194 @@ export function usersPage({ user, users, flash }) {
       </select>
     </label>
     <button type="submit" class="btn btn-primary">Create user</button>
-  </form>
+  </form
 </section>`,
+  });
+}
+
+// ---------- Gross Profit ----------
+function money(v) {
+  if (v == null || v === "") return "—";
+  const n = parseFloat(v);
+  if (!Number.isFinite(n)) return String(v);
+  return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function pct(v) {
+  if (v == null || v === "") return "—";
+  const n = parseFloat(v);
+  if (!Number.isFinite(n)) return "—";
+  return n.toFixed(1) + "%";
+}
+function gpClass(p) {
+  if (p == null) return "";
+  const n = parseFloat(p);
+  if (!Number.isFinite(n)) return "";
+  if (n >= 35) return "gp-good";
+  if (n >= 20) return "gp-ok";
+  return "gp-bad";
+}
+
+export function grossProfitPage({ user, jobs, unmatched, inventory, status, flash }) {
+  const empty = jobs.length === 0;
+  const rows = jobs.map((j) => {
+    const completeness = [
+      j.amount_paid != null ? "Jobber" : null,
+      j.salesperson_name || j.permit_required != null || j.sales_commission_amount != null ? "Sheet" : null,
+      j.equipment_materials_total != null ? "Suppliers" : null,
+    ].filter(Boolean);
+    return `<tr>
+      <td><a href="/gross-profit/${j.id}"><strong>${escape(j.customer_name || "(no name)")}</strong></a><br>
+        <span class="muted">${escape(j.address || "")}${j.city ? ", " + escape(j.city) : ""}</span></td>
+      <td>${escape(j.jobber_invoice_number || "—")}</td>
+      <td>${money(j.amount_paid)}</td>
+      <td>${money(j.equipment_materials_total)}</td>
+      <td>${money(j.total_labor_cost)}</td>
+      <td><strong>${money(j.gross_profit_dollars)}</strong></td>
+      <td><span class="gp-pct ${gpClass(j.gross_profit_percent)}">${pct(j.gross_profit_percent)}</span></td>
+      <td class="muted">${completeness.map(c => `<span class="badge badge-${c.toLowerCase()}">${escape(c)}</span>`).join(" ")}</td>
+    </tr>`;
+  }).join("");
+
+  const tableHtml = empty
+    ? `<div class="empty-good">No jobs yet — waiting for first Jobber invoice. Open the <a href="/gross-profit/setup">setup checklist</a> to wire up the integrations.</div>`
+    : `<table class="data-table">
+        <thead><tr>
+          <th>Customer / Address</th><th>Invoice #</th><th>Amount paid</th>
+          <th>Equip + Mat</th><th>Labor</th><th>GP $</th><th>GP %</th><th>Sources</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+
+  const unmatchedHtml = unmatched.length === 0 ? "" : `
+    <section class="panel panel-warn">
+      <h2>⚠ Unmatched Invoices — Review Manually</h2>
+      <table class="data-table">
+        <thead><tr><th>Supplier</th><th>PO / customer name</th><th>Total</th><th>Attachment</th><th>Received</th><th></th></tr></thead>
+        <tbody>${unmatched.map(u => `<tr>
+          <td>${escape(u.supplier)}</td>
+          <td>${escape(u.po_name || "—")}</td>
+          <td>${money(u.total_amount)}</td>
+          <td>${u.att_id ? `<a href="/gross-profit/attachment/${u.att_id}">${escape(u.filename || "PDF")}</a>` : "—"}</td>
+          <td class="muted">${escape((u.created_at || "").slice(0,16))}</td>
+          <td><a href="/gross-profit/unmatched/${u.id}/resolve">Resolve →</a></td>
+        </tr>`).join("")}</tbody>
+      </table>
+    </section>`;
+
+  const inventoryHtml = inventory.length === 0 ? "" : `
+    <section class="panel">
+      <h2>Inventory invoices (not tied to a job)</h2>
+      <table class="data-table">
+        <thead><tr><th>Supplier</th><th>Total</th><th>Attachment</th><th>Notes</th><th>Received</th></tr></thead>
+        <tbody>${inventory.map(i => `<tr>
+          <td>${escape(i.supplier)}</td>
+          <td>${money(i.total_amount)}</td>
+          <td>${escape(i.filename || "—")}</td>
+          <td class="muted">${escape(i.notes || "")}</td>
+          <td class="muted">${escape((i.created_at || "").slice(0,16))}</td>
+        </tr>`).join("")}</tbody>
+      </table>
+    </section>`;
+
+  // Status panel — shows whether each connector is wired up
+  const statusItem = (label, ok, hint) =>
+    `<li><span class="status-dot ${ok ? "ok" : "off"}"></span> <strong>${escape(label)}</strong> — ${ok ? "ready" : escape(hint || "not configured")}</li>`;
+
+  const yr = new Date().getFullYear();
+  const setupHtml = `
+    <section class="panel">
+      <h2>Integration status</h2>
+      <ul class="status-list">
+        ${statusItem("Jobber sync (invoices → rows)", status.jobber, "Set JOBBER_CLIENT_ID, CLIENT_SECRET, ACCESS_TOKEN, REFRESH_TOKEN")}
+        ${statusItem("Google Sheets (Chris's sheet → rows)", status.sheets && status.chrisSheetId, "Set GOOGLE_SA_JSON + CHRIS_SHEET_ID")}
+        ${statusItem("Mirror sheet (rows → Google Sheet)", status.sheets && status.mirrorSheetId, "Set GOOGLE_SA_JSON + MIRROR_SHEET_ID")}
+        ${statusItem("Gmail watcher (supplier invoices → rows)", status.gmail, "Set GOOGLE_SA_JSON + GMAIL_DELEGATED_USER (with domain-wide delegation)")}
+      </ul>
+      ${user.role === "admin" ? `
+      <div class="action-row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+        <form method="post" action="/gross-profit/sync/jobber"><button class="btn">Sync Jobber now</button></form>
+        <form method="post" action="/gross-profit/sync/sheets"><button class="btn">Scan Chris's sheet</button></form>
+        <form method="post" action="/gross-profit/sync/gmail"><button class="btn">Run Gmail watcher</button></form>
+        <form method="post" action="/gross-profit/sync/mirror"><button class="btn">Sync mirror sheet</button></form>
+        <form method="post" action="/gross-profit/sync/backfill" onsubmit="return confirm('Backfill every Jobber invoice issued since ${yr}-01-01? Safe to re-run; idempotent.')">
+          <input type="hidden" name="since" value="${yr}-01-01">
+          <button class="btn btn-primary">Backfill ${yr} invoices</button>
+        </form>
+      </div>` : ""}
+    </section>`;
+
+  return layout({
+    title: "Gross Profit", user, activeNav: "gross-profit", flash,
+    body: `
+<div class="page-head">
+  <h1>Gross Profit Tracker</h1>
+  <span class="page-sub">${jobs.length} job${jobs.length === 1 ? "" : "s"} on file</span>
+</div>
+${setupHtml}
+<section class="panel">
+  <h2>Jobs</h2>
+  ${tableHtml}
+</section>
+${unmatchedHtml}
+${inventoryHtml}
+`,
+  });
+}
+
+export function grossProfitJobPage({ user, job }) {
+  if (!job) {
+    return placeholderPage({ user, title: "Job not found", navKey: "gross-profit", body: "<p>That job doesn't exist.</p>" });
+  }
+  const li = (kind) => job.line_items.filter(x => x.kind === kind);
+  const itemsHtml = (rows) => rows.length === 0 ? `<p class="muted">—</p>` : `<table class="data-table"><tbody>${rows.map(r => `<tr><td>${escape(r.description || r.labor_name || "")}</td><td>${escape(r.labor_type || "")}</td><td class="num">${money(r.amount)}</td><td class="muted">${escape(r.source || "")}</td></tr>`).join("")}</tbody></table>`;
+
+  const att = job.attachments.map(a => `<li><a href="/gross-profit/attachment/${a.id}">${escape(a.filename)}</a> <span class="muted">${escape(a.source)}${a.supplier ? " · " + escape(a.supplier) : ""}</span></li>`).join("");
+
+  return layout({
+    title: `Job ${job.jobber_invoice_number || job.id}`, user, activeNav: "gross-profit",
+    body: `
+<div class="page-head">
+  <h1>${escape(job.customer_name || "(no name)")}</h1>
+  <span class="page-sub">Invoice ${escape(job.jobber_invoice_number || "—")} · ${escape(job.address || "")}${job.city ? ", " + escape(job.city) : ""} ${escape(job.zip || "")}</span>
+</div>
+<div class="kpi-grid">
+  <div class="kpi-card"><div class="kpi-label">Amount paid</div><div class="kpi-value">${money(job.amount_paid)}</div><div class="kpi-sub">${escape(job.payment_method || "—")}</div></div>
+  <div class="kpi-card"><div class="kpi-label">Equip + Materials</div><div class="kpi-value">${money(job.equipment_materials_total)}</div><div class="kpi-sub">Equip ${money(job.equipment_cost)} · Mat ${money(job.materials_cost)}</div></div>
+  <div class="kpi-card"><div class="kpi-label">Labor + Other</div><div class="kpi-value">${money((job.total_labor_cost || 0) + (job.total_other_expenses || 0))}</div><div class="kpi-sub">Labor ${money(job.total_labor_cost)} · Other ${money(job.total_other_expenses)}</div></div>
+  <div class="kpi-card ${gpClass(job.gross_profit_percent)}"><div class="kpi-label">Gross profit</div><div class="kpi-value">${money(job.gross_profit_dollars)}</div><div class="kpi-sub">${pct(job.gross_profit_percent)}</div></div>
+</div>
+
+<section class="panel">
+  <h2>Invoice line items (Jobber)</h2>
+  ${itemsHtml(li("invoice_item"))}
+</section>
+<section class="panel">
+  <h2>Products sold (Sheet)</h2>
+  ${itemsHtml(li("product_sold"))}
+</section>
+<section class="panel">
+  <h2>Labor (Sheet)</h2>
+  ${itemsHtml(li("labor"))}
+</section>
+<section class="panel">
+  <h2>Other expenses (Sheet)</h2>
+  ${itemsHtml(li("other_expense"))}
+</section>
+<section class="panel">
+  <h2>Sales / commissions / permit</h2>
+  <table class="data-table"><tbody>
+    <tr><td>Salesperson</td><td>${escape(job.salesperson_name || "—")}</td></tr>
+    <tr><td>Sales commission</td><td>${money(job.sales_commission_amount)} (${pct(job.sales_commission_rate)})</td></tr>
+    <tr><td>Sales manager</td><td>${escape(job.sales_manager_name || "—")} — ${money(job.sales_manager_fee)}</td></tr>
+    <tr><td>Permit</td><td>${job.permit_required == null ? "—" : (job.permit_required ? "Yes" : "No")} — ${money(job.permit_fee)}</td></tr>
+    <tr><td>Fee</td><td>${money(job.fee_amount)} (${escape(job.fee_type || "—")})</td></tr>
+  </tbody></table>
+</section>
+<section class="panel">
+  <h2>Attached docs</h2>
+  ${att ? `<ul class="alert-list">${att}</ul>` : `<p class="muted">No attachments yet.</p>`}
+</section>
+<p><a href="/gross-profit">← back to all jobs</a></p>
+`,
   });
 }
