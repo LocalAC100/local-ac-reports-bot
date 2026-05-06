@@ -3,7 +3,7 @@
 // One row per HVAC job. Data accumulates from three sources:
 //   1. Jobber invoice  (creates the row, anchors customer + amount paid)
 //   2. Chris's Google Sheet (labor, commissions, permits, other expenses)
-//   3. Supplier invoice emails Ã¢ÂÂ Gemaire, Goodman, Home Depot (equipment + materials)
+//   3. Supplier invoice emails ÃÂ¢ÃÂÃÂ Gemaire, Goodman, Home Depot (equipment + materials)
 // Once enough data is in place, GP $ and GP % are computed.
 //
 // The DB is the source of truth. A separate mirror writer (src/sheets.js)
@@ -363,7 +363,7 @@ export const GpJobs = {
     if (sheet.permitRequired != null) set("permit_required", sheet.permitRequired ? 1 : 0);
     set("permit_fee", sheet.permitFee);
 
-    // Labor entries Ã¢ÂÂ replace existing 'labor' kind from sheet to avoid duplicates
+    // Labor entries ÃÂ¢ÃÂÃÂ replace existing 'labor' kind from sheet to avoid duplicates
     if (Array.isArray(sheet.labor) && sheet.labor.length) {
       db.prepare("DELETE FROM gp_line_items WHERE job_id = ? AND kind = 'labor' AND source = 'sheet'").run(jobId);
       const ins = db.prepare(
@@ -444,7 +444,7 @@ export const GpJobs = {
       .all(...params, limit, offset);
   },
 
-  // Count rows matching the same filter â exposed so the page can show
+  // Count rows matching the same filter Ã¢ÂÂ exposed so the page can show
   // `N invoices` for the current view (compare against Jobber).
   count({ from = null, to = null } = {}) {
     const where = [];
@@ -463,6 +463,49 @@ export const GpJobs = {
     if (to)   { where.push("DATE(jobber_invoice_issued_at) <= DATE(?)"); params.push(to); }
     const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
     return db.prepare(`SELECT COALESCE(SUM(amount_paid), 0) AS s FROM gp_jobs ${whereSql}`).get(...params).s;
+  },
+
+  // Returns counts and totals for the report header. Differentiates between:
+  //   total       — every invoice in the date range (matches the table)
+  //   paid        — invoices with amount_paid > 0
+  //   info_complete — invoices that have data from all 3 sources
+  //                  (Jobber amount_paid + supplier equip+mat + sheet labor)
+  //   qualified   — paid AND info_complete (counts toward GP totals)
+  // Only "qualified" rows roll up into total_sales / gp_dollars / gp_percent —
+  // because a row missing labor cost would compute as 100% margin, which
+  // misleads. Those totals match what you'd get summing the rows by hand.
+  qualifiedSummary({ from = null, to = null } = {}) {
+    const where = [];
+    const params = [];
+    if (from) { where.push("DATE(jobber_invoice_issued_at) >= DATE(?)"); params.push(from); }
+    if (to)   { where.push("DATE(jobber_invoice_issued_at) <= DATE(?)"); params.push(to); }
+    const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+    // Quick boolean predicates inline as CASE expressions
+    const paidExpr = "(amount_paid IS NOT NULL AND amount_paid > 0)";
+    const infoExpr = "(amount_paid IS NOT NULL AND equipment_materials_total IS NOT NULL AND total_labor_cost IS NOT NULL)";
+    const qualExpr = `(${paidExpr} AND ${infoExpr})`;
+    const row = db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN ${paidExpr} THEN 1 ELSE 0 END) AS paid,
+        SUM(CASE WHEN ${infoExpr} THEN 1 ELSE 0 END) AS info_complete,
+        SUM(CASE WHEN ${qualExpr} THEN 1 ELSE 0 END) AS qualified,
+        COALESCE(SUM(CASE WHEN ${qualExpr} THEN amount_paid ELSE 0 END), 0) AS qualified_sales,
+        COALESCE(SUM(CASE WHEN ${qualExpr} THEN gross_profit_dollars ELSE 0 END), 0) AS qualified_gp_dollars
+      FROM gp_jobs
+      ${whereSql}
+    `).get(...params);
+    const sales = Number(row.qualified_sales || 0);
+    const gp = Number(row.qualified_gp_dollars || 0);
+    return {
+      total: Number(row.total || 0),
+      paid: Number(row.paid || 0),
+      info_complete: Number(row.info_complete || 0),
+      qualified: Number(row.qualified || 0),
+      qualified_sales: sales,
+      qualified_gp_dollars: gp,
+      qualified_gp_percent: sales > 0 ? (gp / sales) * 100 : null,
+    };
   },
 
   byId(id) {
