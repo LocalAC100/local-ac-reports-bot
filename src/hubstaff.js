@@ -9,15 +9,57 @@
 // To minimize rotation churn, we cache the access token in memory and only
 // hit the refresh endpoint when expired.
 import axios from "axios";
+import fs from "fs";
+import path from "path";
 import { config } from "./config.js";
 import { DateTime } from "luxon";
 
 const ACCOUNT_BASE = "https://account.hubstaff.com";
 const API_BASE = "https://api.hubstaff.com/v2";
 
+// Hubstaff rotates the refresh token on every exchange. Persisting the latest
+// to disk means redeploys/restarts pick up the freshest one instead of falling
+// back to the (potentially stale) env var, avoiding rate-limit lockout on the
+// env-var token.
+function pickRefreshTokenStorePath() {
+  const candidates = [
+    process.env.DATA_DIR ? path.join(process.env.DATA_DIR, "hubstaff-refresh.txt") : null,
+    process.env.RENDER ? "/var/data/hubstaff-refresh.txt" : null,
+    path.resolve("./data/hubstaff-refresh.txt"),
+  ].filter(Boolean);
+  for (const p of candidates) {
+    try {
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.accessSync(path.dirname(p), fs.constants.W_OK);
+      return p;
+    } catch {}
+  }
+  return null;
+}
+const REFRESH_TOKEN_PATH = pickRefreshTokenStorePath();
+
+function loadStoredRefreshToken() {
+  if (!REFRESH_TOKEN_PATH) return null;
+  try {
+    const t = fs.readFileSync(REFRESH_TOKEN_PATH, "utf8").trim();
+    return t || null;
+  } catch {
+    return null;
+  }
+}
+function saveRefreshToken(t) {
+  if (!REFRESH_TOKEN_PATH || !t) return;
+  try {
+    fs.writeFileSync(REFRESH_TOKEN_PATH, t, "utf8");
+  } catch (e) {
+    console.warn("[hubstaff] failed to persist refresh token:", e?.message);
+  }
+}
+
 let cachedAccessToken = null;
 let cachedExpiry = null; // luxon DateTime
-let currentRefreshToken = config.hubstaff.refreshToken;
+// Prefer stored token (rotated, fresh) over env var (original, possibly rate-limited)
+let currentRefreshToken = loadStoredRefreshToken() || config.hubstaff.refreshToken;
 
 async function refreshAccessToken() {
   const params = new URLSearchParams();
@@ -36,10 +78,13 @@ async function refreshAccessToken() {
   const { access_token, refresh_token, expires_in } = resp.data;
   cachedAccessToken = access_token;
   cachedExpiry = DateTime.now().plus({ seconds: (expires_in ?? 7200) - 60 });
-  // Hubstaff rotates refresh tokens. Keep the latest in memory; if the
-  // process restarts, we fall back to the env var (which the user would have
-  // updated if expired).
-  if (refresh_token) currentRefreshToken = refresh_token;
+  // Hubstaff rotates refresh tokens. Keep the latest in memory AND persist to
+  // disk so restarts/redeploys reuse the freshest one (the env-var fallback is
+  // only used the very first time before any rotation has happened).
+  if (refresh_token) {
+    currentRefreshToken = refresh_token;
+    saveRefreshToken(refresh_token);
+  }
 }
 
 async function getAccessToken() {
