@@ -1,4 +1,4 @@
-// Dashboard router Ã¢ÂÂ login, all pages, /api/ask endpoint, /logout.
+// Dashboard router ÃÂ¢ÃÂÃÂ login, all pages, /api/ask endpoint, /logout.
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -20,7 +20,7 @@ import fs from "fs";
 // SQLite stores CURRENT_TIMESTAMP as UTC strings ("YYYY-MM-DD HH:MM:SS").
 // Display them in America/New_York (Florida) so the website matches emails + clocks.
 function fmtET(iso) {
-  if (!iso) return "Ã¢ÂÂ";
+  if (!iso) return "ÃÂ¢ÃÂÃÂ";
   // SQLite format has no T separator; Luxon SQL parser handles it.
   const dt = String(iso).includes("T")
     ? DateTime.fromISO(iso, { zone: "utc" })
@@ -76,7 +76,7 @@ export function buildDashboardRouter() {
       discrepancies: [],
     };
 
-    // Best-effort live data Ã¢ÂÂ failures don't break the page
+    // Best-effort live data ÃÂ¢ÃÂÃÂ failures don't break the page
     try {
       const orgUsers = await hubstaff.listOrgUsers();
       // Mark anyone whose Hubstaff "last_activity" was within ~10 min as active
@@ -132,8 +132,8 @@ export function buildDashboardRouter() {
           <td>${e.hubstaffEmail}</td>
           <td>$${e.payRate}/hr</td>
           <td>${e.breakMinutesPerShift} min</td>
-          <td>${hu ? "Ã¢ÂÂ linked" : "<span class='badge badge-amber'>not in Hubstaff</span>"}</td>
-          <td class="muted">${hu?.last_activity ? new Date(hu.last_activity).toLocaleString("en-US", { timeZone: "America/New_York" }) : "Ã¢ÂÂ"}</td>
+          <td>${hu ? "ÃÂ¢ÃÂÃÂ linked" : "<span class='badge badge-amber'>not in Hubstaff</span>"}</td>
+          <td class="muted">${hu?.last_activity ? new Date(hu.last_activity).toLocaleString("en-US", { timeZone: "America/New_York" }) : "ÃÂ¢ÃÂÃÂ"}</td>
         </tr>`;
       }).join("");
       body = `<table class="data-table">
@@ -169,7 +169,7 @@ export function buildDashboardRouter() {
           return `<tr>
             <td><strong>${e.name}</strong></td>
             <td>${e.ghlEmail || e.hubstaffEmail}</td>
-            <td>${matched ? "Ã¢ÂÂ linked" : "<span class='badge badge-amber'>not in GHL</span>"}</td>
+            <td>${matched ? "ÃÂ¢ÃÂÃÂ linked" : "<span class='badge badge-amber'>not in GHL</span>"}</td>
             <td>${e.role}</td>
           </tr>`;
         })
@@ -199,7 +199,7 @@ export function buildDashboardRouter() {
         user: req.user,
         title: "Leads",
         navKey: "leads",
-        body: `<p class="muted">Recent leads from GoHighLevel will show here. Live alerts fire when a lead isn't contacted within 3 minutes Ã¢ÂÂ see the Alerts tab for that history.</p>`,
+        body: `<p class="muted">Recent leads from GoHighLevel will show here. Live alerts fire when a lead isn't contacted within 3 minutes ÃÂ¢ÃÂÃÂ see the Alerts tab for that history.</p>`,
       })
     );
   });
@@ -217,7 +217,7 @@ export function buildDashboardRouter() {
                 (a) => `<tr>
               <td class="muted">${fmtET(a.fired_at)}</td>
               <td><strong>${a.contact_name || "(unnamed)"}</strong></td>
-              <td>${a.phone || "Ã¢ÂÂ"}</td>
+              <td>${a.phone || "ÃÂ¢ÃÂÃÂ"}</td>
               <td class="muted">${fmtET(a.lead_added_at)}</td>
               <td><span class="badge badge-red">${a.minutes_elapsed || "?"}m</span></td>
             </tr>`
@@ -265,7 +265,7 @@ export function buildDashboardRouter() {
   router.get("/reports/:id", (req, res) => {
     const report = Reports.byId(req.params.id);
     if (!report) return res.status(404).send("Report not found.");
-    // Reports are stored as raw HTML Ã¢ÂÂ wrap in our layout
+    // Reports are stored as raw HTML ÃÂ¢ÃÂÃÂ wrap in our layout
     res.send(
       views.placeholderPage({
         user: req.user,
@@ -336,7 +336,7 @@ export function buildDashboardRouter() {
         from = d.toISOString().slice(0, 10);
         to = today.toISOString().slice(0, 10);
       }
-      // preset === "all" â leave from/to null
+      // preset === "all" Ã¢ÂÂ leave from/to null
     }
     const filter = { from, to };
     const jobs = GpJobs.list({ limit: 1000, ...filter });
@@ -344,6 +344,8 @@ export function buildDashboardRouter() {
     const totalPaid = GpJobs.sumAmountPaid(filter);
     const grandTotalCount = GpJobs.count({});
     const summary = GpJobs.qualifiedSummary(filter);
+    const totalInvoiced = GpJobs.sumInvoiceTotal(filter);
+    const totalDue = Math.max(0, totalInvoiced - totalPaid);
     const unmatched = GpUnmatched.list();
     const inventory = GpInventory.list();
     const status = {
@@ -359,7 +361,7 @@ export function buildDashboardRouter() {
         jobs, unmatched, inventory, status,
         flash: req.session.flash,
         filter: { ...filter, preset },
-        totalCount, totalPaid, grandTotalCount,
+        totalCount, totalPaid, totalInvoiced, totalDue, grandTotalCount,
         summary,
       })
     );
@@ -385,7 +387,7 @@ export function buildDashboardRouter() {
     }
   });
 
-  // Manual sync triggers (admin only) Ã¢ÂÂ useful before crons fire
+  // Manual sync triggers (admin only) ÃÂ¢ÃÂÃÂ useful before crons fire
   router.post("/gross-profit/sync/jobber", requireAdmin, async (req, res) => {
     try {
       const r = await jobberSync.pollOnce();
