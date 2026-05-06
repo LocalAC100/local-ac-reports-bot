@@ -202,92 +202,195 @@ export function renderHubstaffSection(hub) {
 // ---------- Section 2: Dispatcher Calls ----------
 
 export function renderDispatcherSection(dispatch) {
-  if (!dispatch) return sectionCard("Section 2 — Dispatcher Calls (GoHighLevel)", "<em>No data available.</em>");
+  if (!dispatch) return sectionCard("Dispatch Performance", "<em>No data available.</em>");
   const parts = [];
 
-  // Summary table — calls (≥25s) vs attempts (<25s) vs bookings
-  if (dispatch.byDispatcher?.length) {
-    parts.push(`<div style="font-size:13px;color:${C.textDim};margin:0 0 10px">
-      <strong style="color:${C.text}">Calls</strong> = conversations ≥25 seconds. <strong style="color:${C.text}">Attempts</strong> = under 25 seconds.
-    </div>`);
-    parts.push(tableOpen());
-    parts.push(thRow([
-      { label: "Dispatcher", align: "left" },
-      { label: "Calls", align: "right" },
-      { label: "Attempts", align: "right" },
-      { label: "Avg call", align: "right" },
-      { label: "Bookings", align: "right" },
-    ]));
-    let totCalls = 0, totAttempts = 0, totBookings = 0;
-    for (let i = 0; i < dispatch.byDispatcher.length; i++) {
-      const d = dispatch.byDispatcher[i];
-      const zebra = i % 2 === 1 ? `background:${C.zebra};` : "";
-      totCalls += d.calls || 0;
-      totAttempts += d.attempts || 0;
-      totBookings += d.bookings || 0;
-      parts.push(`<tr style="${zebra}">
-        ${td(`<strong>${d.name}</strong>`)}
-        ${td(d.calls ?? 0, "right")}
-        ${td(d.attempts ?? 0, "right", `color:${C.textDim}`)}
-        ${td(d.avgCallSec != null ? fmtSeconds(d.avgCallSec) : "—", "right")}
-        ${td(d.bookings ?? 0, "right", `color:${C.primary};font-weight:600`)}
-      </tr>`);
-    }
-    parts.push(`<tr style="font-weight:700;background:${C.cyanBg};color:${C.primaryDk}">
-      ${td("Total", "left", "border-bottom:none")}
-      ${td(totCalls, "right", "border-bottom:none")}
-      ${td(totAttempts, "right", "border-bottom:none")}
-      ${td("", "right", "border-bottom:none")}
-      ${td(totBookings, "right", "border-bottom:none")}
-    </tr>`);
-    parts.push("</table>");
+  // Pipeline scope label
+  if (dispatch.pipelineLabel) {
+    parts.push(`<div style="font-size:12px;color:${C.textDim};margin:0 0 12px">Pipeline scope: <strong style="color:${C.text}">${dispatch.pipelineLabel}</strong></div>`);
   }
 
-  // Per-dispatcher hourly breakdown
-  if (dispatch.byDispatcher?.some((d) => d.hourly?.length)) {
-    parts.push(`<h3 style="margin:18px 0 8px;font-size:13px;font-weight:600;color:${C.primaryDk};text-transform:uppercase;letter-spacing:.4px">Hourly breakdown</h3>`);
+  // Top KPI strip — totals across all dispatchers
+  if (dispatch.byDispatcher?.length) {
+    let real = 0, voicemail = 0, attempt = 0, sms = 0, phys = 0, ph = 0, xfer = 0;
     for (const d of dispatch.byDispatcher) {
-      if (!d.hourly?.length) continue;
-      parts.push(`<div style="margin:0 0 14px">
-        <div style="font-weight:600;color:${C.text};margin-bottom:6px">${d.name}</div>
-        ${tableOpen()}
-        ${thRow([
-          { label: "Hour", align: "left" },
-          { label: "Calls", align: "right" },
-          { label: "Attempts", align: "right" },
-        ])}`);
-      for (let i = 0; i < d.hourly.length; i++) {
-        const h = d.hourly[i];
-        const zebra = i % 2 === 1 ? `background:${C.zebra};` : "";
-        parts.push(`<tr style="${zebra}">
-          ${td(h.label, "left", `color:${C.textDim};font-variant-numeric:tabular-nums`)}
-          ${td(h.calls ?? 0, "right")}
-          ${td(h.attempts ?? 0, "right", `color:${C.textDim}`)}
-        </tr>`);
+      real += d.real || 0;
+      voicemail += d.voicemail || 0;
+      attempt += d.attempt || 0;
+      sms += d.sms || 0;
+      phys += d.physBookings || 0;
+      ph += d.phBookings || 0;
+      xfer += d.liveTransfers || 0;
+    }
+    const totalBookings = phys + ph;
+    const ratio = real >= 5 ? Math.round((totalBookings / real) * 100) : null;
+    parts.push(`<table style="width:100%;border-collapse:separate;border-spacing:8px 0;margin:0 0 14px">
+      <tr>
+        ${kpiCell("Real calls", real, "≥30 sec")}
+        ${kpiCell("Voicemails", voicemail, "5–30 sec")}
+        ${kpiCell("Attempts", attempt, "no answer / failed", C.textDim)}
+        ${kpiCell("Bookings", totalBookings, `${phys} phys · ${ph} PH`, C.green)}
+        ${kpiCell("Booking rate", ratio == null ? "—" : `${ratio}%`, ratio == null ? "need ≥5 real" : `${totalBookings} of ${real} real`, C.green)}
+      </tr>
+    </table>`);
+  }
+
+  // Hourly table — combined across all dispatchers, by hour, all the columns Alex asked for
+  const allHours = new Set();
+  for (const d of dispatch.byDispatcher || []) {
+    for (const h of d.hourly || []) allHours.add(h.label);
+  }
+  const sortedHours = [...allHours].sort((a, b) => hourSortKey(a) - hourSortKey(b));
+  if (sortedHours.length) {
+    parts.push(`<h3 style="margin:18px 0 8px;font-size:13px;font-weight:600;color:${C.primaryDk};text-transform:uppercase;letter-spacing:.4px">Hour by hour</h3>`);
+    parts.push(`<table style="width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums;font-family:${FONT}">`);
+    parts.push(`<thead><tr style="background:${C.cyanBg};color:${C.primaryDk}">
+      ${thMini("Hour", "left")}${thMini("Real", "right")}${thMini("VM", "right")}${thMini("Att", "right")}${thMini("Texts", "right")}${thMini("Live xfer", "right")}${thMini("PH bk", "right")}${thMini("Phys bk", "right")}
+    </tr></thead><tbody>`);
+    for (let i = 0; i < sortedHours.length; i++) {
+      const label = sortedHours[i];
+      let real = 0, vm = 0, att = 0, sms = 0;
+      for (const d of dispatch.byDispatcher) {
+        const h = (d.hourly || []).find((x) => x.label === label);
+        if (!h) continue;
+        real += h.real || 0;
+        vm += h.voicemail || 0;
+        att += h.attempt || 0;
+        sms += h.sms || 0;
       }
-      parts.push("</table></div>");
+      // We don't have hourly booking/transfer data yet — leave as "—" for now
+      const zebra = i % 2 === 1 ? `background:${C.zebra};` : "";
+      parts.push(`<tr style="${zebra}">
+        ${tdMini(label, "left", `color:${C.textDim}`)}
+        ${tdMini(real || "—", "right", real ? "font-weight:600" : `color:${C.textDim}`)}
+        ${tdMini(vm || "—", "right", vm ? "" : `color:${C.textDim}`)}
+        ${tdMini(att || "—", "right", `color:${C.textDim}`)}
+        ${tdMini(sms || "—", "right", sms ? "" : `color:${C.textDim}`)}
+        ${tdMini("—", "right", `color:${C.textDim}`)}
+        ${tdMini("—", "right", `color:${C.textDim}`)}
+        ${tdMini("—", "right", `color:${C.textDim}`)}
+      </tr>`);
+    }
+    parts.push(`</tbody></table>
+      <div style="font-size:11px;color:${C.textDim};margin-top:6px">Real ≥30s · VM 5–30s · Att = no answer/failed · PH bk = phone-sale booking · Phys bk = physical appointment. Booking/transfer columns are placeholder until Jobber integration ships.</div>`);
+  }
+
+  // Per-dispatcher cards
+  if (dispatch.byDispatcher?.length) {
+    parts.push(`<h3 style="margin:18px 0 8px;font-size:13px;font-weight:600;color:${C.primaryDk};text-transform:uppercase;letter-spacing:.4px">Per dispatcher</h3>`);
+    for (const d of dispatch.byDispatcher) {
+      const total = (d.real || 0) + (d.voicemail || 0) + (d.attempt || 0);
+      if (total === 0 && (d.sms || 0) === 0 && (d.physBookings || 0) === 0 && (d.phBookings || 0) === 0) continue;
+      const totalBookings = (d.physBookings || 0) + (d.phBookings || 0);
+      const ratio = d.bookingRatio;
+      const vonageBadge = (d.vonage && (d.vonage.real + d.vonage.voicemail + d.vonage.attempt > 0))
+        ? `<span style="background:${C.amberBg};color:${C.amber};padding:1px 6px;border-radius:6px;font-size:10px;font-weight:600;margin-left:6px">${d.vonage.real + d.vonage.voicemail + d.vonage.attempt} via Vonage notes</span>`
+        : "";
+      const apc = d.avgAttemptsPerContact;
+      const stageRows = (d.byStage || [])
+        .map((s, i) => {
+          const isZero = (s.total || 0) === 0;
+          const zebra = i % 2 === 1 ? `background:${C.zebra};` : "";
+          const dim = isZero ? `color:${C.textDim};` : "";
+          return `<tr style="${zebra}${dim}">
+            ${tdMini(s.stage, "left")}
+            ${tdMini(isZero ? "0" : s.real, "right", isZero ? `color:${C.textDim}` : "font-weight:600")}
+            ${tdMini(isZero ? "0" : s.voicemail, "right", isZero ? `color:${C.textDim}` : "")}
+            ${tdMini(isZero ? "0" : s.attempt, "right", `color:${C.textDim}`)}
+            ${tdMini(isZero ? "0" : s.total, "right", isZero ? `color:${C.textDim}` : "font-weight:600")}
+          </tr>`;
+        })
+        .join("");
+      const hourlyRows = (d.hourly || [])
+        .map((h, i) => {
+          const total = (h.real || 0) + (h.voicemail || 0) + (h.attempt || 0);
+          if (total === 0 && (h.sms || 0) === 0) return "";
+          const zebra = i % 2 === 1 ? `background:${C.zebra};` : "";
+          return `<tr style="${zebra}">
+            ${tdMini(h.label, "left", `color:${C.textDim}`)}
+            ${tdMini(h.real || "—", "right", h.real ? "font-weight:600" : `color:${C.textDim}`)}
+            ${tdMini(h.voicemail || "—", "right", h.voicemail ? "" : `color:${C.textDim}`)}
+            ${tdMini(h.attempt || "—", "right", `color:${C.textDim}`)}
+            ${tdMini(h.sms || "—", "right", h.sms ? "" : `color:${C.textDim}`)}
+          </tr>`;
+        })
+        .filter(Boolean)
+        .join("");
+      const leadAge = d.leadAge || {};
+      parts.push(`<div style="background:${C.white};border:1px solid ${C.border};border-radius:10px;padding:14px 16px;margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px">
+          <div style="font-size:15px;font-weight:600;color:${C.text}">${d.name} <span style="font-size:11px;color:${C.textDim};font-weight:400">${d.role || ""}</span>${vonageBadge}</div>
+          <div style="font-size:11px;color:${C.textDim}">${d.firstCallAt ? `first ${d.firstCallAt}` : ""}${d.firstCallAt && d.lastCallAt ? " · " : ""}${d.lastCallAt ? `last ${d.lastCallAt}` : ""}</div>
+        </div>
+
+        <table style="width:100%;border-collapse:separate;border-spacing:5px 0;font-size:12.5px;margin-bottom:10px">
+          <tr>
+            ${miniStat("Real", d.real || 0)}
+            ${miniStat("VM", d.voicemail || 0)}
+            ${miniStat("Att", d.attempt || 0, C.textDim)}
+            ${miniStat("Bookings", totalBookings, C.green)}
+            ${miniStat("Book rate", ratio == null ? "—" : `${ratio}%`, C.green)}
+            ${miniStat("Att/contact", apc == null ? "—" : apc)}
+          </tr>
+        </table>
+
+        <div style="font-size:12px;color:${C.textDim};margin-bottom:10px">
+          Texts <strong style="color:${C.text}">${d.sms || 0}</strong> ·
+          Live transfers <strong style="color:${C.text}">${d.liveTransfers || 0}</strong> ·
+          Phone-sale bookings <strong style="color:${C.text}">${d.phBookings || 0}</strong> ·
+          Physical bookings <strong style="color:${C.text}">${d.physBookings || 0}</strong> ·
+          Unique leads called <strong style="color:${C.text}">${d.uniqueLeads || 0}</strong>
+        </div>
+
+        <div style="font-size:11px;color:${C.textDim};text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">Lead age called</div>
+        <div style="font-size:12.5px;color:${C.text};margin-bottom:12px">
+          Today <strong>${leadAge.today || 0}</strong> &nbsp;·&nbsp;
+          1–3 days <strong>${leadAge["1to3"] || 0}</strong> &nbsp;·&nbsp;
+          4–7 days <strong>${leadAge["4to7"] || 0}</strong> &nbsp;·&nbsp;
+          8+ days <strong>${leadAge["8plus"] || 0}</strong>
+        </div>
+
+        ${stageRows ? `
+        <div style="font-size:11px;color:${C.textDim};text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">Orlando Pipeline · stages called</div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums;margin-bottom:12px">
+          <thead><tr style="background:${C.cyanBg};color:${C.primaryDk}">
+            ${thMini("Stage", "left")}${thMini("Real", "right")}${thMini("VM", "right")}${thMini("Att", "right")}${thMini("Total", "right")}
+          </tr></thead>
+          <tbody>${stageRows}</tbody>
+        </table>` : ""}
+
+        ${hourlyRows ? `
+        <div style="font-size:11px;color:${C.textDim};text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">Hour by hour</div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums">
+          <thead><tr style="background:${C.cyanBg};color:${C.primaryDk}">
+            ${thMini("Hour", "left")}${thMini("Real", "right")}${thMini("VM", "right")}${thMini("Att", "right")}${thMini("Txt", "right")}
+          </tr></thead>
+          <tbody>${hourlyRows}</tbody>
+        </table>` : ""}
+      </div>`);
     }
   }
 
   // Time-of-day buckets (evening report only)
   if (dispatch.timeOfDay?.length) {
     parts.push(`<h3 style="margin:18px 0 8px;font-size:13px;font-weight:600;color:${C.primaryDk};text-transform:uppercase;letter-spacing:.4px">Day in three parts</h3>`);
-    parts.push(`<div style="display:table;width:100%;border-collapse:separate;border-spacing:8px 0;table-layout:fixed">`);
+    parts.push(`<table style="width:100%;border-collapse:separate;border-spacing:8px 0;table-layout:fixed"><tr>`);
     for (const b of dispatch.timeOfDay) {
       const verdictColor = b.verdict === "good" ? C.green : b.verdict === "low" ? C.amber : C.text;
       const verdictBg = b.verdict === "good" ? C.greenBg : b.verdict === "low" ? C.amberBg : C.cyanBg;
-      parts.push(`<div style="display:table-cell;width:33.3%;background:${verdictBg};border-radius:10px;padding:14px 14px;vertical-align:top">
+      parts.push(`<td style="width:33.3%;background:${verdictBg};border-radius:10px;padding:14px 14px;vertical-align:top">
         <div style="font-size:11px;color:${verdictColor};font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">${b.label}</div>
         <div style="font-size:11px;color:${C.textDim};margin-bottom:10px">${b.hours}</div>
         <table style="width:100%;font-size:13px">
-          <tr><td style="color:${C.textDim};padding:2px 0">Calls</td><td style="text-align:right;padding:2px 0;font-weight:600">${b.calls ?? 0}</td></tr>
-          <tr><td style="color:${C.textDim};padding:2px 0">Attempts</td><td style="text-align:right;padding:2px 0">${b.attempts ?? 0}</td></tr>
+          <tr><td style="color:${C.textDim};padding:2px 0">Real</td><td style="text-align:right;padding:2px 0;font-weight:600">${b.real ?? 0}</td></tr>
+          <tr><td style="color:${C.textDim};padding:2px 0">Voicemails</td><td style="text-align:right;padding:2px 0">${b.voicemail ?? 0}</td></tr>
+          <tr><td style="color:${C.textDim};padding:2px 0">Attempts</td><td style="text-align:right;padding:2px 0">${b.attempt ?? 0}</td></tr>
           <tr><td style="color:${C.textDim};padding:2px 0">Bookings</td><td style="text-align:right;padding:2px 0;font-weight:600;color:${C.primary}">${b.bookings ?? 0}</td></tr>
         </table>
         ${b.note ? `<div style="font-size:11px;color:${verdictColor};margin-top:8px;font-weight:600">${b.note}</div>` : ""}
-      </div>`);
+      </td>`);
     }
-    parts.push(`</div>`);
+    parts.push(`</tr></table>`);
   }
 
   // New-lead response times
@@ -303,15 +406,48 @@ export function renderDispatcherSection(dispatch) {
 
   // Appointments booked
   if (dispatch.appointmentsBooked?.length) {
-    parts.push(`<h3 style="margin:18px 0 8px;font-size:13px;font-weight:600;color:${C.primaryDk};text-transform:uppercase;letter-spacing:.4px">Appointments booked / over-phone sales</h3>`);
+    parts.push(`<h3 style="margin:18px 0 8px;font-size:13px;font-weight:600;color:${C.primaryDk};text-transform:uppercase;letter-spacing:.4px">Bookings, transfers, phone sales</h3>`);
     parts.push("<ul style='margin:0;padding-left:18px;font-size:14px;line-height:1.7'>");
     for (const a of dispatch.appointmentsBooked) {
-      parts.push(`<li style="margin-bottom:4px"><strong>${a.leadName}</strong> @ ${a.time} — ${a.dispatcher} — <em style="color:${C.primary}">${a.stage}</em></li>`);
+      const tag = a.kind === "live_transfer" ? pill("live xfer", "amber") :
+                  a.kind === "phone_sale" ? pill("PH", "primary") :
+                  pill("phys", "green");
+      parts.push(`<li style="margin-bottom:4px">${tag}&nbsp; <strong>${a.leadName}</strong> @ ${a.time} — ${a.dispatcher} — <em style="color:${C.textDim}">${a.stage}</em></li>`);
     }
     parts.push("</ul>");
   }
 
-  return sectionCard("Section 2 — Dispatcher Calls (GoHighLevel)", parts.join("\n"));
+  return sectionCard("Section 2 — Dispatcher Performance", parts.join("\n"));
+}
+
+// Helpers for the new layout
+function kpiCell(label, value, sub, color) {
+  return `<td style="background:${C.cyanBg};border-radius:8px;padding:10px 12px;vertical-align:top">
+    <div style="font-size:10.5px;color:${C.textDim};text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px">${label}</div>
+    <div style="font-size:20px;font-weight:600;color:${color || C.primaryDk};line-height:1.1">${value}</div>
+    <div style="font-size:10.5px;color:${C.textDim};margin-top:2px">${sub}</div>
+  </td>`;
+}
+function miniStat(label, value, color) {
+  return `<td style="background:${C.zebra};border-radius:6px;padding:8px 10px;vertical-align:top">
+    <div style="font-size:10.5px;color:${C.textDim}">${label}</div>
+    <div style="font-size:16px;font-weight:600;color:${color || C.text};line-height:1.1">${value}</div>
+  </td>`;
+}
+function thMini(label, align) {
+  return `<th style="text-align:${align};padding:7px 8px;font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1.5px solid ${C.cyan}">${label}</th>`;
+}
+function tdMini(value, align, extra) {
+  return `<td style="padding:6px 8px;text-align:${align};border-bottom:1px solid ${C.border};${extra || ""}">${value}</td>`;
+}
+function hourSortKey(label) {
+  // "8 – 9 AM" or "12 – 1 PM" → minutes-of-day
+  const m = label.match(/^(\d+)\s*[–-]\s*\d+\s*(AM|PM)/i);
+  if (!m) return 0;
+  let h = parseInt(m[1], 10);
+  if (/PM/i.test(m[2]) && h !== 12) h += 12;
+  if (/AM/i.test(m[2]) && h === 12) h = 0;
+  return h * 60;
 }
 
 // ---------- Email shell ----------
