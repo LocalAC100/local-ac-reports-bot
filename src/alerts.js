@@ -73,16 +73,45 @@ function summarizeCalls(messages, leadAddedAt) {
   return { calls, longCalls, shortCalls, attempted };
 }
 
+// Vonage call note detector. Dispatchers add a GHL note starting with "Called"
+// any time they call via Vonage (which has no API on regular accounts).
+// We treat any such note from any user as a qualifying contact attempt.
+function isVonageCallNote(note) {
+  return /^\s*called\b/i.test(String(note?.body || ""));
+}
+
 async function getCallSummary(contactId, leadAddedAt) {
   try {
-    const conversations = await ghl.searchConversations({
-      from: new Date(leadAddedAt).toISOString(),
-      to: new Date().toISOString(),
-    });
+    const leadTime = new Date(leadAddedAt).getTime();
+    const [conversations, notes] = await Promise.all([
+      ghl
+        .searchConversations({
+          from: new Date(leadAddedAt).toISOString(),
+          to: new Date().toISOString(),
+        })
+        .catch(() => []),
+      ghl.getContactNotes(contactId).catch(() => []),
+    ]);
     const conv = conversations.find((c) => c.contactId === contactId);
-    if (!conv) return summarizeCalls([], leadAddedAt);
-    const msgs = await ghl.getConversationMessages(conv.id);
-    return summarizeCalls(msgs, leadAddedAt);
+    const msgs = conv
+      ? await ghl.getConversationMessages(conv.id).catch(() => [])
+      : [];
+    const summary = summarizeCalls(msgs, leadAddedAt);
+
+    // Fold Vonage notes in — any "Called" note added AFTER the lead arrived
+    // counts as a qualifying attempt (so we don't false-fire when dispatcher
+    // calls only via Vonage).
+    const vonageCallsAfterLead = (notes || []).filter((n) => {
+      if (!isVonageCallNote(n)) return false;
+      const ts = new Date(n.dateAdded || 0).getTime();
+      return ts >= leadTime;
+    }).length;
+
+    if (vonageCallsAfterLead > 0) {
+      summary.attempted = true;
+      summary.vonageCalls = vonageCallsAfterLead;
+    }
+    return summary;
   } catch (e) {
     console.error("[live-alert] GHL fetch failed", e?.message);
     return summarizeCalls([], leadAddedAt);
