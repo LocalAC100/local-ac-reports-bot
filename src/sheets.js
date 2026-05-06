@@ -1,255 +1,301 @@
-// Google Sheets integration.
+// Google Sheets integration - Chris's Pay Calculation Sheet.
 //
 // Two responsibilities:
-//   1. READ-ONLY scan of Chris's sheet (CHRIS_SHEET_ID) — pulls labor,
+//   1. READ-ONLY scan of Chris's sheet (CHRIS_SHEET_ID) - pulls labor,
 //      commissions, permits, other expenses; matches each row to a gp_jobs
-//      row by customer name + 7-10 day window.
-//   2. WRITE mirror to the Gross Profit Tracker sheet (MIRROR_SHEET_ID) —
+//      row by customer name + 30-day window.
+//   2. WRITE mirror to the Gross Profit Tracker sheet (MIRROR_SHEET_ID) -
 //      one row per gp_jobs row, kept in sync.
 //
 // Auth: a Google service account. Set GOOGLE_SA_JSON to the JSON key (as a
 // single-line string) or store the JSON at /etc/secrets/google-sa.json.
-// Share both sheets with the service account's client_email.
+// Share BOTH sheets with the service account's client_email.
 //
-// THE READER NEVER WRITES TO CHRIS'S SHEET. Strict rule.
+// THE READER NEVER WRITES TO CHRIS'S SHEET. Strict invariant.
+//
+// ----- Column layout (fixed, from user spec) -----
+// SALES tab columns (1-indexed):
+//   G  =  payment method (Cash / Check / Aqua Financing / Renew Financing)
+//   H  =  salesperson name
+//   K  =  financing or CC fee amount
+//   L  =  permit required (yes / no)
+//   BR =  other expenses cost (sum of all "other" expenses)
+//   BU =  commission rate (%)
+//   BW =  sales commission amount ($)
+//   BY =  sales manager fee ($)
+//   M, O, Q  =  product sold 1, 2, 3
+// JOBS tab columns:
+//   F  =  labor type (Sub / Employee)
+//   M  =  labor name
+//   P  =  labor cost
+//
+// Customer-name match: SALES tab is expected to have the customer name in
+// column B (override via SHEET_CUSTOMER_COL env var). JOBS tab same default
+// (override via JOBS_CUSTOMER_COL).
 
+import { google } from "googleapis";
 import fs from "fs";
-import { GpJobs, normalizeName } from "./gross-profit.js";
+import { GpJobs } from "./gross-profit.js";
 
-let googleClient = null;
-let sheetsClient = null;
+const CHRIS_SHEET_ID = process.env.CHRIS_SHEET_ID || "";
+const SALES_RANGE    = process.env.CHRIS_SALES_RANGE || "SALES!A1:CA";
+const JOBS_RANGE     = process.env.CHRIS_JOBS_RANGE  || "JOBS!A1:Z";
+const SALES_CUSTOMER_COL = (process.env.SHEET_CUSTOMER_COL || "B").toUpperCase();
+const JOBS_CUSTOMER_COL  = (process.env.JOBS_CUSTOMER_COL  || "B").toUpperCase();
+const MIRROR_SHEET_ID = process.env.MIRROR_SHEET_ID || "";
+const MIRROR_TAB      = process.env.MIRROR_SHEET_TAB || "GP Tracker";
 
-async function getSheetsClient() {
-  if (sheetsClient) return sheetsClient;
-  let creds;
-  if (process.env.GOOGLE_SA_JSON) {
-    try {
-      creds = JSON.parse(process.env.GOOGLE_SA_JSON);
-    } catch (e) {
-      throw new Error("GOOGLE_SA_JSON is not valid JSON");
-    }
-  } else if (fs.existsSync("/etc/secrets/google-sa.json")) {
-    creds = JSON.parse(fs.readFileSync("/etc/secrets/google-sa.json", "utf8"));
-  } else {
-    throw new Error("Google service account not configured (no GOOGLE_SA_JSON or /etc/secrets/google-sa.json)");
+// Convert column letter ("A", "Z", "AA", "BW") -> 0-indexed column number
+function col(letter) {
+  let n = 0;
+  for (const ch of String(letter).toUpperCase()) {
+    n = n * 26 + (ch.charCodeAt(0) - 64);
   }
-  // Lazy import so the dep is optional
-  const { google } = await import("googleapis");
-  const auth = new google.auth.JWT({
-    email: creds.client_email,
-    key: creds.private_key,
-    scopes: [
-      "https://www.googleapis.com/auth/spreadsheets",
-      "https://www.googleapis.com/auth/drive.readonly",
-    ],
+  return n - 1;
+}
+
+const SALES = {
+  customer:        col(SALES_CUSTOMER_COL),
+  paymentMethod:   col("G"),
+  salesperson:     col("H"),
+  fee:             col("K"),
+  permit:          col("L"),
+  product1:        col("M"),
+  product2:        col("O"),
+  product3:        col("Q"),
+  otherExpenses:   col("BR"),
+  commissionRate:  col("BU"),
+  commissionAmt:   col("BW"),
+  salesMgrFee:     col("BY"),
+};
+
+const JOBS = {
+  customer:   col(JOBS_CUSTOMER_COL),
+  laborType:  col("F"),
+  laborName:  col("M"),
+  laborCost:  col("P"),
+};
+
+// ---------- Auth ----------
+let cachedAuth = null;
+function getAuth() {
+  if (cachedAuth) return cachedAuth;
+  let credsJson = process.env.GOOGLE_SA_JSON;
+  if (!credsJson) {
+    try {
+      credsJson = fs.readFileSync("/etc/secrets/google-sa.json", "utf8");
+    } catch (e) { /* not present */ }
+  }
+  if (!credsJson) return null;
+  let parsed;
+  try { parsed = JSON.parse(credsJson); }
+  catch (e) {
+    console.warn("[sheets] GOOGLE_SA_JSON is not valid JSON:", e.message);
+    return null;
+  }
+  cachedAuth = new google.auth.JWT({
+    email: parsed.client_email,
+    key: parsed.private_key,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
-  await auth.authorize();
-  googleClient = google;
-  sheetsClient = google.sheets({ version: "v4", auth });
-  return sheetsClient;
+  return cachedAuth;
 }
 
 export function isConfigured() {
-  return Boolean(process.env.GOOGLE_SA_JSON || fs.existsSync("/etc/secrets/google-sa.json"));
+  return Boolean(getAuth() && CHRIS_SHEET_ID);
 }
 
 export function status() {
+  const auth = getAuth();
   return {
-    serviceAccount: isConfigured(),
-    chrisSheetId: process.env.CHRIS_SHEET_ID || null,
-    chrisSheetRange: process.env.CHRIS_SHEET_RANGE || "Sheet1!A1:Z",
-    mirrorSheetId: process.env.MIRROR_SHEET_ID || null,
+    sheets_auth: auth ? "service-account configured" : "GOOGLE_SA_JSON not set",
+    chris_sheet_id: CHRIS_SHEET_ID || "(unset)",
+    sales_range: SALES_RANGE,
+    jobs_range: JOBS_RANGE,
+    mirror_sheet_id: MIRROR_SHEET_ID || "(unset)",
   };
 }
 
-// ---------- Chris's sheet — READER ----------
-//
-// We deliberately don't hard-code the column layout yet. The first scan
-// pulls the header row and stores it; subsequent scans use it. When the
-// user is ready they'll share the sheet URL and we'll either:
-//   (a) accept a column map via env (CHRIS_SHEET_COLUMNS as JSON), or
-//   (b) infer it from header text (e.g. "Customer", "Salesperson").
-// Until then, scanChrisSheet() is a no-op that logs why.
-
-const DEFAULT_COLUMN_HINTS = {
-  customer:           ["customer", "client", "customer name"],
-  salesperson:        ["salesperson", "sales person", "sold by"],
-  salesCommissionAmount: ["sales commission", "commission $", "commission amount"],
-  salesCommissionRate:   ["commission rate", "commission %"],
-  salesManager:       ["sales manager", "manager"],
-  salesManagerFee:    ["sales manager fee", "manager fee"],
-  permitRequired:     ["permit", "permit required", "permit y/n"],
-  permitFee:          ["permit fee"],
-  // Repeating columns: laborName1/laborType1/laborCost1...laborName3/...
-  // and otherExpenseType1/otherExpenseCost1...
-};
-
-function inferColumnMap(headerRow) {
-  // Lowercase for matching
-  const lower = headerRow.map((h) => String(h || "").trim().toLowerCase());
-  const map = {};
-  for (const [key, hints] of Object.entries(DEFAULT_COLUMN_HINTS)) {
-    for (let i = 0; i < lower.length; i++) {
-      if (hints.some((h) => lower[i] === h || lower[i].includes(h))) {
-        map[key] = i;
-        break;
-      }
-    }
-  }
-  // Repeating columns
-  map.labor = []; // [{ nameCol, typeCol, costCol }]
-  for (let n = 1; n <= 5; n++) {
-    const nameCol = lower.findIndex((h) => h === `labor name ${n}` || h === `labor name${n}`);
-    const typeCol = lower.findIndex((h) => h === `labor type ${n}` || h === `labor type${n}`);
-    const costCol = lower.findIndex((h) => h === `labor cost ${n}` || h === `labor cost${n}`);
-    if (nameCol >= 0 || costCol >= 0) map.labor.push({ nameCol, typeCol, costCol });
-  }
-  map.otherExpense = [];
-  for (let n = 1; n <= 5; n++) {
-    const typeCol = lower.findIndex((h) => h === `other expenses type ${n}` || h === `other expense type ${n}`);
-    const costCol = lower.findIndex((h) => h === `other expenses cost ${n}` || h === `other expense cost ${n}`);
-    if (typeCol >= 0 || costCol >= 0) map.otherExpense.push({ typeCol, costCol });
-  }
-  map.productsSold = [];
-  for (let n = 1; n <= 5; n++) {
-    const c = lower.findIndex((h) => h === `product sold ${n}` || h === `product sold${n}`);
-    if (c >= 0) map.productsSold.push(c);
-  }
-  return map;
+// ---------- Helpers ----------
+function asMoney(v) {
+  if (v == null || v === "") return null;
+  const cleaned = String(v).replace(/[$,\s]/g, "");
+  const n = parseFloat(cleaned);
+  return isFinite(n) ? n : null;
+}
+function asYesNo(v) {
+  if (v == null || v === "") return null;
+  const s = String(v).trim().toLowerCase();
+  if (["yes", "y", "true", "1", "x"].includes(s)) return 1;
+  if (["no", "n", "false", "0"].includes(s)) return 0;
+  return null;
+}
+function asPercent(v) {
+  if (v == null || v === "") return null;
+  const cleaned = String(v).replace(/[%\s]/g, "");
+  const n = parseFloat(cleaned);
+  if (!isFinite(n)) return null;
+  return n;
 }
 
-function rowToSheetData(row, map) {
-  const get = (col) => (col != null && col >= 0 ? row[col] : null);
-  const num = (v) => {
-    if (v == null || v === "") return null;
-    const n = parseFloat(String(v).replace(/[^\d.\-]/g, ""));
-    return Number.isFinite(n) ? n : null;
-  };
+// ---------- Sheet reads ----------
+async function readRange(sheetId, range) {
+  const auth = getAuth();
+  if (!auth) throw new Error("Google service account not configured");
+  const sheets = google.sheets({ version: "v4", auth });
+  const r = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range });
+  return r.data.values || [];
+}
+
+function parseSalesRow(row) {
   return {
-    customerName: get(map.customer),
-    salespersonName: get(map.salesperson) || null,
-    salesCommissionAmount: num(get(map.salesCommissionAmount)),
-    salesCommissionRate: num(get(map.salesCommissionRate)),
-    salesManagerName: get(map.salesManager) || null,
-    salesManagerFee: num(get(map.salesManagerFee)),
-    permitRequired: (() => {
-      const v = String(get(map.permitRequired) || "").toLowerCase().trim();
-      if (!v) return null;
-      return ["yes", "y", "true", "1"].includes(v);
-    })(),
-    permitFee: num(get(map.permitFee)),
-    productsSold: (map.productsSold || []).map(get).filter((x) => x && String(x).trim()),
-    labor: (map.labor || [])
-      .map((l) => ({ name: get(l.nameCol), type: get(l.typeCol), cost: num(get(l.costCol)) }))
-      .filter((l) => l.name || l.cost != null),
-    otherExpenses: (map.otherExpense || [])
-      .map((o) => ({ type: get(o.typeCol), cost: num(get(o.costCol)) }))
-      .filter((o) => o.type || o.cost != null),
+    customerName:           row[SALES.customer] || null,
+    paymentMethod:          row[SALES.paymentMethod] || null,
+    salespersonName:        row[SALES.salesperson] || null,
+    feeAmount:              asMoney(row[SALES.fee]),
+    permitRequired:         asYesNo(row[SALES.permit]),
+    salesCommissionAmount:  asMoney(row[SALES.commissionAmt]),
+    salesCommissionRate:    asPercent(row[SALES.commissionRate]),
+    salesManagerFee:        asMoney(row[SALES.salesMgrFee]),
+    totalOtherExpenses:     asMoney(row[SALES.otherExpenses]),
+    productsSold: [
+      row[SALES.product1] || null,
+      row[SALES.product2] || null,
+      row[SALES.product3] || null,
+    ].filter(Boolean),
   };
 }
 
+function parseJobsRow(row) {
+  return {
+    customerName: row[JOBS.customer] || null,
+    laborType:    row[JOBS.laborType] || null,
+    laborName:    row[JOBS.laborName] || null,
+    laborCost:    asMoney(row[JOBS.laborCost]),
+  };
+}
+
+// ---------- Public scan ----------
+// Reads SALES + JOBS tabs, matches each row to a gp_jobs row by customer name
+// (with a rolling time window), and applies the parsed data via
+// GpJobs.applySheetData / GpJobs.applyLaborItems. Never writes to Chris's sheet.
 export async function scanChrisSheet() {
   if (!isConfigured()) {
-    return { skipped: true, reason: "service account not configured" };
+    return { skipped: true, reason: "GOOGLE_SA_JSON or CHRIS_SHEET_ID not set" };
   }
-  const sheetId = process.env.CHRIS_SHEET_ID;
-  if (!sheetId) {
-    return { skipped: true, reason: "CHRIS_SHEET_ID env var not set" };
-  }
-  const range = process.env.CHRIS_SHEET_RANGE || "A1:Z1000";
-  let rows;
+  const out = {
+    sales: { scanned: 0, matched: 0, unmatched: 0, ambiguous: 0, errors: 0 },
+    jobs:  { scanned: 0, matched: 0, unmatched: 0, errors: 0 },
+  };
+
+  // SALES tab
+  let salesRows;
   try {
-    const sheets = await getSheetsClient();
-    const r = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range });
-    rows = r.data.values || [];
+    salesRows = await readRange(CHRIS_SHEET_ID, SALES_RANGE);
   } catch (e) {
-    return { skipped: false, error: e.message };
+    return { error: `SALES read failed: ${e.message}` };
   }
-  if (rows.length < 2) return { skipped: false, scanned: 0, matched: 0 };
-  const header = rows[0];
-  const map = inferColumnMap(header);
-  if (map.customer == null) {
-    return { skipped: false, error: "couldn't find 'Customer' column in Chris's sheet header" };
-  }
-  let matched = 0, ambiguous = 0, unmatched = 0;
-  const ambiguousRows = [];
-  for (let i = 1; i < rows.length; i++) {
-    const data = rowToSheetData(rows[i], map);
+  // Skip header row (assume row 1 is headers)
+  for (let i = 1; i < salesRows.length; i++) {
+    const data = parseSalesRow(salesRows[i] || []);
     if (!data.customerName) continue;
-    const cands = GpJobs.findCandidatesByCustomer(data.customerName, { windowDays: 10, minSimilarity: 0.85 });
-    if (cands.length === 0) {
-      unmatched++;
-      continue;
-    }
-    if (cands.length > 1 && cands[0].sim - cands[1].sim < 0.05) {
-      ambiguous++;
-      ambiguousRows.push({ rowIndex: i + 1, customer: data.customerName, candidates: cands.slice(0, 3).map(c => ({ id: c.row.id, name: c.row.customer_name, sim: c.sim })) });
-      continue;
-    }
+    out.sales.scanned++;
+    const cands = GpJobs.findCandidatesByCustomer(data.customerName, { windowDays: 30, minSimilarity: 0.85 });
+    if (cands.length === 0) { out.sales.unmatched++; continue; }
+    if (cands.length > 1 && cands[0].sim - cands[1].sim < 0.05) { out.sales.ambiguous++; continue; }
     try {
-      GpJobs.applySheetData(cands[0].row.id, { ...data, sheetRowRef: `row ${i + 1}` });
-      matched++;
+      GpJobs.applySheetData(cands[0].row.id, {
+        sheetRowRef:           `SALES!A${i + 1}`,
+        salespersonName:       data.salespersonName,
+        salesCommissionAmount: data.salesCommissionAmount,
+        salesCommissionRate:   data.salesCommissionRate,
+        salesManagerFee:       data.salesManagerFee,
+        permitRequired:        data.permitRequired,
+        feeAmount:             data.feeAmount,
+        paymentMethod:         data.paymentMethod,
+        totalOtherExpenses:    data.totalOtherExpenses,
+      });
+      out.sales.matched++;
     } catch (e) {
-      console.warn(`[sheets] applySheetData failed for row ${i + 1}:`, e.message);
+      console.warn(`[sheets] SALES row ${i + 1} apply failed:`, e.message);
+      out.sales.errors++;
     }
   }
-  return { scanned: rows.length - 1, matched, ambiguous, unmatched, ambiguousRows };
+
+  // JOBS tab - labor lines. Multiple rows per customer is OK; we sum cost.
+  let jobsRows = [];
+  try {
+    jobsRows = await readRange(CHRIS_SHEET_ID, JOBS_RANGE);
+  } catch (e) {
+    out.jobs.error = `JOBS read failed: ${e.message}`;
+    return out;
+  }
+  const laborByCustomer = new Map();
+  for (let i = 1; i < jobsRows.length; i++) {
+    const d = parseJobsRow(jobsRows[i] || []);
+    if (!d.customerName) continue;
+    const arr = laborByCustomer.get(d.customerName) || [];
+    arr.push({ name: d.laborName, type: d.laborType, cost: d.laborCost, rowIndex: i + 1 });
+    laborByCustomer.set(d.customerName, arr);
+  }
+  for (const [customer, laborItems] of laborByCustomer) {
+    out.jobs.scanned++;
+    const cands = GpJobs.findCandidatesByCustomer(customer, { windowDays: 30, minSimilarity: 0.85 });
+    if (cands.length === 0) { out.jobs.unmatched++; continue; }
+    const totalLabor = laborItems.reduce((s, x) => s + (x.cost || 0), 0);
+    try {
+      GpJobs.applyLaborItems(cands[0].row.id, {
+        sheetRowRef: `JOBS!A${laborItems[0].rowIndex}`,
+        totalLaborCost: totalLabor,
+        items: laborItems.map((x) => ({
+          laborName: x.name,
+          laborType: x.type,
+          amount:    x.cost,
+        })),
+      });
+      out.jobs.matched++;
+    } catch (e) {
+      console.warn(`[sheets] JOBS apply failed for ${customer}:`, e.message);
+      out.jobs.errors++;
+    }
+  }
+  return out;
 }
 
 // ---------- Mirror writer ----------
-//
-// The Mirror sheet is a read-only export of gp_jobs rows. The portal owns
-// the schema: headers are written on first sync, then data rows are
-// updated/appended in mirror_row_index order.
-
-const MIRROR_HEADERS = [
-  "Job ID", "Invoice #", "Customer", "Address", "City", "Zip",
-  "Amount Paid", "Payment Method", "Fee", "Fee Type",
-  "Equipment Cost", "Materials Cost", "Equip+Mat Total",
-  "Salesperson", "Sales Comm $", "Sales Comm %",
-  "Sales Manager", "Sales Manager Fee",
-  "Permit", "Permit Fee",
-  "Total Labor", "Total Other",
-  "Gross Profit $", "Gross Profit %",
-  "Issued At", "Updated At",
-];
-
-function jobToMirrorRow(j) {
-  return [
-    j.id, j.jobber_invoice_number || "",
-    j.customer_name || "", j.address || "", j.city || "", j.zip || "",
-    j.amount_paid ?? "", j.payment_method || "",
-    j.fee_amount ?? "", j.fee_type || "",
-    j.equipment_cost ?? "", j.materials_cost ?? "", j.equipment_materials_total ?? "",
-    j.salesperson_name || "", j.sales_commission_amount ?? "", j.sales_commission_rate ?? "",
-    j.sales_manager_name || "", j.sales_manager_fee ?? "",
-    j.permit_required ? "Yes" : (j.permit_required === 0 ? "No" : ""), j.permit_fee ?? "",
-    j.total_labor_cost ?? "", j.total_other_expenses ?? "",
-    j.gross_profit_dollars ?? "", j.gross_profit_percent ?? "",
-    j.jobber_invoice_issued_at || "", j.updated_at || "",
-  ];
-}
-
 export async function syncMirror() {
-  if (!isConfigured()) {
-    return { skipped: true, reason: "service account not configured" };
+  if (!getAuth() || !MIRROR_SHEET_ID) {
+    return { skipped: true, reason: "GOOGLE_SA_JSON or MIRROR_SHEET_ID not set" };
   }
-  const sheetId = process.env.MIRROR_SHEET_ID;
-  if (!sheetId) {
-    return { skipped: true, reason: "MIRROR_SHEET_ID env var not set" };
-  }
-  const tabName = process.env.MIRROR_SHEET_TAB || "Jobs";
-
-  const sheets = await getSheetsClient();
   const jobs = GpJobs.list({ limit: 5000 });
-  const data = [MIRROR_HEADERS, ...jobs.map(jobToMirrorRow)];
-
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: sheetId,
-    range: `${tabName}!A1`,
-    valueInputOption: "RAW",
-    requestBody: { values: data },
+  const header = [
+    "Customer", "Address", "City", "Invoice #", "Issued",
+    "Amount Paid", "Invoice Total", "Pay Method", "Fee $", "Fee Type",
+    "Salesperson", "Commission $", "Commission %",
+    "Sales Mgr Fee", "Permit?", "Permit Fee",
+    "Equipment $", "Materials $", "Equip+Mat $",
+    "Labor $", "Other Expenses",
+    "GP $", "GP %",
+  ];
+  const rows = jobs.map((j) => [
+    j.customer_name || "", j.address || "", j.city || "", j.jobber_invoice_number || "", j.jobber_invoice_issued_at || "",
+    j.amount_paid ?? "", j.invoice_total ?? "", j.payment_method || "", j.fee_amount ?? "", j.fee_type || "",
+    j.salesperson_name || "", j.sales_commission_amount ?? "", j.sales_commission_rate ?? "",
+    j.sales_manager_fee ?? "", j.permit_required == null ? "" : (j.permit_required ? "Yes" : "No"), j.permit_fee ?? "",
+    j.equipment_cost ?? "", j.materials_cost ?? "", j.equipment_materials_total ?? "",
+    j.total_labor_cost ?? "", j.total_other_expenses ?? "",
+    j.gross_profit_dollars ?? "", j.gross_profit_percent == null ? "" : j.gross_profit_percent.toFixed(1) + "%",
+  ]);
+  const sheets = google.sheets({ version: "v4", auth: getAuth() });
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: MIRROR_SHEET_ID,
+    range: `${MIRROR_TAB}!A:Z`,
   });
-  // Optional: clear any rows below the new last row so deletes are reflected
-  return { synced: jobs.length };
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: MIRROR_SHEET_ID,
+    range: `${MIRROR_TAB}!A1`,
+    valueInputOption: "RAW",
+    requestBody: { values: [header, ...rows] },
+  });
+  return { rows: rows.length };
 }
