@@ -1,4 +1,4 @@
-// Dashboard router — login, all pages, /api/ask endpoint, /logout.
+// Dashboard router â login, all pages, /api/ask endpoint, /logout.
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -20,7 +20,7 @@ import fs from "fs";
 // SQLite stores CURRENT_TIMESTAMP as UTC strings ("YYYY-MM-DD HH:MM:SS").
 // Display them in America/New_York (Florida) so the website matches emails + clocks.
 function fmtET(iso) {
-  if (!iso) return "—";
+  if (!iso) return "â";
   // SQLite format has no T separator; Luxon SQL parser handles it.
   const dt = String(iso).includes("T")
     ? DateTime.fromISO(iso, { zone: "utc" })
@@ -76,7 +76,7 @@ export function buildDashboardRouter() {
       discrepancies: [],
     };
 
-    // Best-effort live data — failures don't break the page
+    // Best-effort live data â failures don't break the page
     try {
       const orgUsers = await hubstaff.listOrgUsers();
       // Mark anyone whose Hubstaff "last_activity" was within ~10 min as active
@@ -132,8 +132,8 @@ export function buildDashboardRouter() {
           <td>${e.hubstaffEmail}</td>
           <td>$${e.payRate}/hr</td>
           <td>${e.breakMinutesPerShift} min</td>
-          <td>${hu ? "✓ linked" : "<span class='badge badge-amber'>not in Hubstaff</span>"}</td>
-          <td class="muted">${hu?.last_activity ? new Date(hu.last_activity).toLocaleString("en-US", { timeZone: "America/New_York" }) : "—"}</td>
+          <td>${hu ? "â linked" : "<span class='badge badge-amber'>not in Hubstaff</span>"}</td>
+          <td class="muted">${hu?.last_activity ? new Date(hu.last_activity).toLocaleString("en-US", { timeZone: "America/New_York" }) : "â"}</td>
         </tr>`;
       }).join("");
       body = `<table class="data-table">
@@ -169,7 +169,7 @@ export function buildDashboardRouter() {
           return `<tr>
             <td><strong>${e.name}</strong></td>
             <td>${e.ghlEmail || e.hubstaffEmail}</td>
-            <td>${matched ? "✓ linked" : "<span class='badge badge-amber'>not in GHL</span>"}</td>
+            <td>${matched ? "â linked" : "<span class='badge badge-amber'>not in GHL</span>"}</td>
             <td>${e.role}</td>
           </tr>`;
         })
@@ -199,7 +199,7 @@ export function buildDashboardRouter() {
         user: req.user,
         title: "Leads",
         navKey: "leads",
-        body: `<p class="muted">Recent leads from GoHighLevel will show here. Live alerts fire when a lead isn't contacted within 3 minutes — see the Alerts tab for that history.</p>`,
+        body: `<p class="muted">Recent leads from GoHighLevel will show here. Live alerts fire when a lead isn't contacted within 3 minutes â see the Alerts tab for that history.</p>`,
       })
     );
   });
@@ -217,7 +217,7 @@ export function buildDashboardRouter() {
                 (a) => `<tr>
               <td class="muted">${fmtET(a.fired_at)}</td>
               <td><strong>${a.contact_name || "(unnamed)"}</strong></td>
-              <td>${a.phone || "—"}</td>
+              <td>${a.phone || "â"}</td>
               <td class="muted">${fmtET(a.lead_added_at)}</td>
               <td><span class="badge badge-red">${a.minutes_elapsed || "?"}m</span></td>
             </tr>`
@@ -265,7 +265,7 @@ export function buildDashboardRouter() {
   router.get("/reports/:id", (req, res) => {
     const report = Reports.byId(req.params.id);
     if (!report) return res.status(404).send("Report not found.");
-    // Reports are stored as raw HTML — wrap in our layout
+    // Reports are stored as raw HTML â wrap in our layout
     res.send(
       views.placeholderPage({
         user: req.user,
@@ -306,7 +306,43 @@ export function buildDashboardRouter() {
 
   // ----- Gross Profit -----
   router.get("/gross-profit", (req, res) => {
-    const jobs = GpJobs.list({ limit: 200 });
+    // Date-range filtering. Accepts:
+    //   ?preset=jan-2026 | feb-2026 | ... | year | last-30 | last-90 | all
+    //   ?from=YYYY-MM-DD&to=YYYY-MM-DD  (custom range; overrides preset)
+    const preset = String(req.query.preset || "all").toLowerCase();
+    let from = req.query.from || null;
+    let to = req.query.to || null;
+    if (!from && !to) {
+      const today = new Date();
+      const yyyymm = (y, m) => `${y}-${String(m + 1).padStart(2, "0")}`;
+      const monthRange = (y, m) => {
+        const first = `${yyyymm(y, m)}-01`;
+        const last = new Date(y, m + 1, 0); // last day of month
+        return [first, `${yyyymm(y, m)}-${String(last.getDate()).padStart(2, "0")}`];
+      };
+      const months2026 = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
+      const mIdx = months2026.indexOf(preset.replace("-2026", "").trim());
+      if (mIdx >= 0 && preset.endsWith("2026")) {
+        [from, to] = monthRange(2026, mIdx);
+      } else if (preset === "year") {
+        from = `${today.getFullYear()}-01-01`;
+        to = `${today.getFullYear()}-12-31`;
+      } else if (preset === "last-30") {
+        const d = new Date(today); d.setDate(d.getDate() - 30);
+        from = d.toISOString().slice(0, 10);
+        to = today.toISOString().slice(0, 10);
+      } else if (preset === "last-90") {
+        const d = new Date(today); d.setDate(d.getDate() - 90);
+        from = d.toISOString().slice(0, 10);
+        to = today.toISOString().slice(0, 10);
+      }
+      // preset === "all" → leave from/to null
+    }
+    const filter = { from, to };
+    const jobs = GpJobs.list({ limit: 1000, ...filter });
+    const totalCount = GpJobs.count(filter);
+    const totalPaid = GpJobs.sumAmountPaid(filter);
+    const grandTotalCount = GpJobs.count({});
     const unmatched = GpUnmatched.list();
     const inventory = GpInventory.list();
     const status = {
@@ -321,6 +357,8 @@ export function buildDashboardRouter() {
         user: req.user,
         jobs, unmatched, inventory, status,
         flash: req.session.flash,
+        filter: { ...filter, preset },
+        totalCount, totalPaid, grandTotalCount,
       })
     );
     delete req.session.flash;
@@ -345,7 +383,7 @@ export function buildDashboardRouter() {
     }
   });
 
-  // Manual sync triggers (admin only) — useful before crons fire
+  // Manual sync triggers (admin only) â useful before crons fire
   router.post("/gross-profit/sync/jobber", requireAdmin, async (req, res) => {
     try {
       const r = await jobberSync.pollOnce();
