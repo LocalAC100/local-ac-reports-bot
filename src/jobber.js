@@ -128,7 +128,7 @@ export async function gql(query, variables = {}) {
     {
       headers: {
         Authorization: `Bearer ${token}`,
-        "X-JOBBER-GRAPHQL-VERSION": "2024-04-29",
+        "X-JOBBER-GRAPHQL-VERSION": "2025-01-20",
         "Content-Type": "application/json",
       },
       timeout: 30000,
