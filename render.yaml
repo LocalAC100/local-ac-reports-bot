@@ -61,7 +61,7 @@ services:
       # Anthropic — for Ask Claude tab
       - key: ANTHROPIC_API_KEY
         sync: false
-      # Jobber — for Ask Claude data access
+      # Jobber — for Ask Claude data access AND Gross Profit invoice sync
       - key: JOBBER_CLIENT_ID
         sync: false
       - key: JOBBER_CLIENT_SECRET
@@ -70,3 +70,19 @@ services:
         sync: false
       - key: JOBBER_REFRESH_TOKEN
         sync: false
+      - key: JOBBER_WEBHOOK_SECRET
+        sync: false
+      # Google Sheets + Gmail — single service account, JSON key as a string
+      - key: GOOGLE_SA_JSON
+        sync: false
+      - key: CHRIS_SHEET_ID
+        sync: false
+      - key: CHRIS_SHEET_RANGE
+        sync: false
+      - key: MIRROR_SHEET_ID
+        sync: false
+      - key: MIRROR_SHEET_TAB
+        sync: false
+      # Gmail watcher — Workspace user the SA impersonates (domain-wide delegation)
+      - key: GMAIL_DELEGATED_USER
+        value: office@local-ac.com
