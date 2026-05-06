@@ -10,10 +10,55 @@ import * as ghl from "./ghl.js";
 import { analyzeScreenshots } from "./screenshots.js";
 import { sendMail } from "./mailer.js";
 import { renderEmail, renderHubstaffSection, renderDispatcherSection } from "./template.js";
+import { Reports } from "./db.js";
 import { DateTime } from "luxon";
 
-// Threshold above which a "call" is considered real conversation, below it's an "attempt".
-const CALL_THRESHOLD_SEC = 25;
+// Three buckets for outbound calls (Alex's spec):
+//   real     >= 30s — actual conversation with the lead
+//   voicemail 5..30s OR meta.call.status === "voicemail" — left a message
+//   attempt  < 5s OR status in {failed, no-answer, busy, canceled} — didn't connect
+const REAL_CALL_THRESHOLD_SEC = 30;
+const VOICEMAIL_MIN_SEC = 5;
+
+// Pipeline scope: dispatcher report only counts calls into leads that have an
+// opportunity in this pipeline. Other Orlando-named pipelines (Generator,
+// Water Filtration ×2) are inactive for now per Alex (May 6 2026). When other
+// pipelines become active, add their names here and the report widens automatically.
+const REPORTED_PIPELINE_NAMES = ["Orlando Pipeline"];
+
+function bucketCall(durationSec, status) {
+  const dur = Number(durationSec) || 0;
+  const st = String(status || "").toLowerCase();
+  if (st === "voicemail" || (dur >= VOICEMAIL_MIN_SEC && dur < REAL_CALL_THRESHOLD_SEC)) {
+    return "voicemail";
+  }
+  if (dur >= REAL_CALL_THRESHOLD_SEC) return "real";
+  return "attempt";
+}
+
+// GHL returns calls with type=1 (numeric) AND messageType="TYPE_CALL" (string).
+// Accept all three forms.
+function isCallMessage(m) {
+  return (
+    m.type === 1 ||
+    m.messageType === "TYPE_CALL" ||
+    /CALL/i.test(String(m.type ?? ""))
+  );
+}
+
+// Vonage call note: dispatchers write a note starting with "Called" whenever
+// they call via Vonage (since Vonage has no API for regular accounts).
+// Match strict prefix to avoid false positives. Suffix carries the result
+// ("- spoke", "- voicemail", "- no answer") which buckets the call.
+function parseVonageNote(noteBody) {
+  const body = String(noteBody || "").trim();
+  if (!/^called\b/i.test(body)) return null;
+  const lower = body.toLowerCase();
+  let bucket = "attempt"; // default if no qualifier — they tried, didn't connect
+  if (/spoke|talked|discussed|connected|booked/.test(lower)) bucket = "real";
+  else if (/voicemail|\bvm\b|left.*message/.test(lower)) bucket = "voicemail";
+  return { bucket, body };
+}
 
 // ---------- Hubstaff analysis ----------
 
@@ -227,105 +272,277 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
   const fromIso = from.toUTC().toISO();
   const toIso = to.toUTC().toISO();
 
-  const [pipelines, conversations, ghlUsers] = await Promise.all([
+  // Use listActiveConversations (paginated by lastMessageDate) — the old
+  // searchConversations(startDate,endDate) only returned conversations CREATED
+  // in the window, missing all activity on older leads.
+  const [pipelines, allConversations, ghlUsers] = await Promise.all([
     ghl.listPipelines().catch(() => []),
-    ghl.searchConversations({ from: fromIso, to: toIso, limit: 100 }).catch(() => []),
+    ghl.listActiveConversations({ from: fromIso, to: toIso }).catch(() => []),
     ghl.listUsers().catch(() => []),
   ]);
+
+  // Identify the reported pipeline(s) — currently just "Orlando Pipeline".
+  const reportedPipelines = pipelines.filter((p) =>
+    REPORTED_PIPELINE_NAMES.includes(p.name)
+  );
+  const reportedPipelineIds = new Set(reportedPipelines.map((p) => p.id));
+
+  // Build a map of contactId → { stageName, pipelineName } for every contact
+  // that has an opportunity in our reported pipeline(s). Calls to contacts NOT
+  // in this set are excluded from the dispatcher report.
+  const contactStage = new Map(); // contactId → { stage, pipeline, opportunityId }
+  for (const p of reportedPipelines) {
+    const stageById = new Map((p.stages || []).map((s) => [s.id, s.name]));
+    // Pull opportunities across all statuses (open, won, lost, abandoned)
+    const opps = [];
+    for (const status of ["open", "won", "lost", "abandoned"]) {
+      const got = await ghl
+        .searchOpportunities({ pipelineId: p.id, status, limit: 100 })
+        .catch(() => []);
+      opps.push(...got);
+    }
+    for (const o of opps) {
+      const cid = o.contactId || o.contact?.id;
+      if (!cid) continue;
+      // If a contact has multiple opportunities, keep the most recently updated.
+      const stage = stageById.get(o.pipelineStageId) || o.pipelineStageName || "(unknown stage)";
+      const existing = contactStage.get(cid);
+      if (!existing || new Date(o.updatedAt || 0) > new Date(existing.updatedAt || 0)) {
+        contactStage.set(cid, {
+          stage,
+          pipeline: p.name,
+          opportunityId: o.id,
+          updatedAt: o.updatedAt,
+        });
+      }
+    }
+  }
+
+  // Filter conversations to those whose contact has an Orlando Pipeline opportunity.
+  const conversations = allConversations.filter((c) =>
+    c.contactId && contactStage.has(c.contactId)
+  );
 
   const dispatcherEmployees = EMPLOYEES.filter(isDispatcher);
   const ghlByEmail = new Map(
     ghlUsers.map((u) => [(u.email || "").toLowerCase(), u])
   );
 
+  // Build dispatcher records with the v4 bucket shape.
+  function emptyHourSlot() {
+    return { real: 0, voicemail: 0, attempt: 0, sms: 0 };
+  }
+  function emptyLeadAge() {
+    return { today: 0, "1to3": 0, "4to7": 0, "8plus": 0 };
+  }
   const byDispatcher = new Map();
   for (const e of dispatcherEmployees) {
     const ghlEmail = (e.ghlEmail || e.hubstaffEmail || "").toLowerCase();
     const ghlUser = ghlByEmail.get(ghlEmail);
     byDispatcher.set(e.name, {
       name: e.name,
+      role: e.role,
       ghlUserId: ghlUser?.id,
-      calls: 0,
-      attempts: 0,
-      bookings: 0,
+      // Headline counts (post-Orlando-filter)
+      real: 0,
+      voicemail: 0,
+      attempt: 0,
+      vonage_real: 0,
+      vonage_voicemail: 0,
+      vonage_attempt: 0,
+      sms: 0,
       callDurationsSec: [],
+      firstCallAt: null,
+      lastCallAt: null,
       hourly: new Map(),
-      // bucket totals (evening only)
-      buckets: { morning: { calls: 0, attempts: 0 }, noon: { calls: 0, attempts: 0 }, afternoon: { calls: 0, attempts: 0 } },
+      // Per-stage call totals (Orlando Pipeline stages)
+      byStage: new Map(), // stageName -> { real, voicemail, attempt }
+      // Lead age breakdown — counted per outbound call+note
+      leadAge: emptyLeadAge(),
+      // Unique contacts called (for Avg-attempts-per-contact + Unique-leads metric)
+      uniqueContacts: new Set(),
+      buckets: includeTimeOfDay
+        ? {
+            morning: emptyHourSlot(),
+            noon: emptyHourSlot(),
+            afternoon: emptyHourSlot(),
+          }
+        : null,
     });
   }
 
-  // Bucket helper: which time-of-day bucket does a Date fall in (ET hour)
+  // Helper: classify lead age based on the contact's createdAt vs the report `to` time
+  function leadAgeBucket(leadAddedDate) {
+    if (!leadAddedDate) return null;
+    const ageDays = to.diff(DateTime.fromISO(leadAddedDate).setZone(TZ), "days").days;
+    if (ageDays < 1) return "today";
+    if (ageDays < 4) return "1to3";
+    if (ageDays < 8) return "4to7";
+    return "8plus";
+  }
+
   function bucketFor(dt) {
     const h = dt.setZone(TZ).hour;
     if (h < 12) return "morning";
     if (h < 16) return "noon";
     return "afternoon";
   }
+  function recordEvent(dispatcher, dt, kind) {
+    const hourKey = hourBucket(dt);
+    const slot = dispatcher.hourly.get(hourKey) || emptyHourSlot();
+    slot[kind] = (slot[kind] || 0) + 1;
+    dispatcher.hourly.set(hourKey, slot);
+    if (includeTimeOfDay && dispatcher.buckets) {
+      const b = bucketFor(dt);
+      dispatcher.buckets[b][kind] = (dispatcher.buckets[b][kind] || 0) + 1;
+    }
+  }
 
-  // Pull all messages from each conversation, count calls vs attempts, bucket per hour
-  // GHL's enum is "TYPE_CALL" / "TYPE_SMS" etc. — match with regex (substring "CALL")
-  // so both raw "CALL" and prefixed "TYPE_CALL" are picked up. Also require outbound
-  // direction since we're measuring calls dispatchers MADE, not inbound calls received.
+  // Walk every active conversation: count outbound calls (split by bucket) and outbound SMS.
   for (const conv of conversations) {
+    const leadAge = leadAgeBucket(conv.dateAdded);
     const msgs = await ghl.getConversationMessages(conv.id).catch(() => []);
     for (const m of msgs) {
-      if (!/CALL/i.test(String(m.type ?? ""))) continue;
-      if (String(m.direction ?? "").toLowerCase() !== "outbound") continue;
+      const dir = String(m.direction ?? "").toLowerCase();
+      if (dir !== "outbound") continue;
       const userId = m.userId || m.user || m.createdBy;
-      const dispatcher = [...byDispatcher.values()].find((d) => d.ghlUserId === userId);
+      const dispatcher = [...byDispatcher.values()].find(
+        (d) => d.ghlUserId === userId
+      );
       if (!dispatcher) continue;
-      const dur = m.callDuration ?? m.duration ?? 0;
-      const isCall = dur >= CALL_THRESHOLD_SEC;
-      if (isCall) {
-        dispatcher.calls += 1;
-        dispatcher.callDurationsSec.push(dur);
-      } else {
-        dispatcher.attempts += 1;
+      const dt = DateTime.fromISO(
+        m.dateAdded || m.createdAt || new Date().toISOString()
+      ).setZone(TZ);
+      // Restrict to the report window
+      if (dt < from || dt > to) continue;
+
+      if (isCallMessage(m)) {
+        const dur = Number(
+          m.meta?.call?.duration ?? m.callDuration ?? m.duration ?? 0
+        );
+        const status = m.meta?.call?.status;
+        const bk = bucketCall(dur, status);
+        dispatcher[bk] += 1;
+        if (bk === "real") dispatcher.callDurationsSec.push(dur);
+        recordEvent(dispatcher, dt, bk);
+        if (!dispatcher.firstCallAt || dt < dispatcher.firstCallAt)
+          dispatcher.firstCallAt = dt;
+        if (!dispatcher.lastCallAt || dt > dispatcher.lastCallAt)
+          dispatcher.lastCallAt = dt;
+        // Per-stage tally — use the contact's stage at report time
+        const stageInfo = contactStage.get(conv.contactId);
+        if (stageInfo) {
+          const sn = stageInfo.stage;
+          const slot = dispatcher.byStage.get(sn) || { real: 0, voicemail: 0, attempt: 0 };
+          slot[bk] += 1;
+          dispatcher.byStage.set(sn, slot);
+        }
+        // Track unique contact for per-dispatcher metrics
+        if (conv.contactId) dispatcher.uniqueContacts.add(conv.contactId);
+        // Lead-age bucket — counted on every call (so multiple calls to the
+        // same contact contribute multiple times — matches "calls by lead age")
+        if (leadAge) dispatcher.leadAge[leadAge] += 1;
+      } else if (m.type === 2 || m.messageType === "TYPE_SMS") {
+        // Skip workflow-bot auto-texts (no userId) — only count manual sends
+        if (!userId) continue;
+        dispatcher.sms += 1;
+        recordEvent(dispatcher, dt, "sms");
       }
+    }
 
-      const dt = DateTime.fromISO(m.dateAdded || m.createdAt || new Date().toISOString()).setZone(TZ);
-      const hourKey = hourBucket(dt);
-      const slot = dispatcher.hourly.get(hourKey) || { calls: 0, attempts: 0 };
-      if (isCall) slot.calls += 1;
-      else slot.attempts += 1;
-      dispatcher.hourly.set(hourKey, slot);
-
-      if (includeTimeOfDay) {
-        const b = bucketFor(dt);
-        if (isCall) dispatcher.buckets[b].calls += 1;
-        else dispatcher.buckets[b].attempts += 1;
+    // Vonage notes: any note from a known dispatcher starting with "Called"
+    // counts as a call, with bucket inferred from the suffix.
+    if (conv.contactId) {
+      const notes = await ghl.getContactNotes(conv.contactId).catch(() => []);
+      for (const n of notes) {
+        const parsed = parseVonageNote(n.body);
+        if (!parsed) continue;
+        const dispatcher = [...byDispatcher.values()].find(
+          (d) => d.ghlUserId === n.userId
+        );
+        if (!dispatcher) continue;
+        const dt = DateTime.fromISO(
+          n.dateAdded || new Date().toISOString()
+        ).setZone(TZ);
+        if (dt < from || dt > to) continue;
+        // Tally Vonage separately so we can show a "V" badge in the UI later
+        const vKey =
+          parsed.bucket === "real"
+            ? "vonage_real"
+            : parsed.bucket === "voicemail"
+              ? "vonage_voicemail"
+              : "vonage_attempt";
+        dispatcher[vKey] += 1;
+        // Also fold into the main bucket totals so the headline numbers are honest
+        dispatcher[parsed.bucket] += 1;
+        recordEvent(dispatcher, dt, parsed.bucket);
+        if (!dispatcher.firstCallAt || dt < dispatcher.firstCallAt)
+          dispatcher.firstCallAt = dt;
+        if (!dispatcher.lastCallAt || dt > dispatcher.lastCallAt)
+          dispatcher.lastCallAt = dt;
+        // Per-stage tally
+        const stageInfo = contactStage.get(conv.contactId);
+        if (stageInfo) {
+          const sn = stageInfo.stage;
+          const slot = dispatcher.byStage.get(sn) || { real: 0, voicemail: 0, attempt: 0 };
+          slot[parsed.bucket] += 1;
+          dispatcher.byStage.set(sn, slot);
+        }
+        if (conv.contactId) dispatcher.uniqueContacts.add(conv.contactId);
+        if (leadAge) dispatcher.leadAge[leadAge] += 1;
       }
     }
   }
 
-  // Appointments booked / Over Phone Sale
+  // Initialize per-dispatcher booking counters (new shape).
+  for (const d of byDispatcher.values()) {
+    d.physBookings = 0; // appointment booked, physical visit
+    d.phBookings = 0;   // over phone sale (booked phone appointment)
+    d.liveTransfers = 0; // transferred to phone sales rep in real-time
+  }
+
+  // Appointments booked / Over Phone Sale / Live transfer
+  // Recognized stages (Orlando Pipeline naming):
+  //   - "Appt. Booked" / "Appointment Booked"  → physical booking
+  //   - "Over Phone Booked" / "Over Phone Sale" → phone-sale booking (PH appointment)
+  //   - "Live Transfer"                         → transferred immediately to sales
   const appointmentsBooked = [];
   const bucketBookings = { morning: 0, noon: 0, afternoon: 0 };
-  for (const p of pipelines) {
+  for (const p of reportedPipelines) {
     const opps = await ghl
       .searchOpportunities({ pipelineId: p.id, status: "open" })
       .catch(() => []);
     for (const o of opps) {
       const stage = String(o.pipelineStageName ?? "").toLowerCase();
-      const updated = DateTime.fromISO(o.updatedAt || o.dateAdded || new Date().toISOString()).setZone(TZ);
+      const updated = DateTime.fromISO(
+        o.updatedAt || o.dateAdded || new Date().toISOString()
+      ).setZone(TZ);
       if (updated < from || updated > to) continue;
-      if (stage.includes("appointment booked") || stage.includes("over phone sale")) {
-        const dispatcher =
-          [...byDispatcher.values()].find((d) => d.ghlUserId === o.assignedTo) || { name: "—" };
-        if (dispatcher.bookings != null) dispatcher.bookings += 1;
-        appointmentsBooked.push({
-          leadName: o.contact?.name || o.name || "(unnamed)",
-          time: fmtTime(updated),
-          dispatcher: dispatcher.name,
-          stage: o.pipelineStageName,
-        });
-        if (includeTimeOfDay) bucketBookings[bucketFor(updated)] += 1;
-      }
+      const isPhys = stage.includes("appointment booked") || stage.includes("appt. booked") || stage.includes("appt booked");
+      const isPh = stage.includes("over phone sale") || stage.includes("over phone booked") || stage.includes("phone sale");
+      const isXfer = stage.includes("live transfer");
+      if (!isPhys && !isPh && !isXfer) continue;
+      const dispatcher =
+        [...byDispatcher.values()].find((d) => d.ghlUserId === o.assignedTo) || {
+          name: "—",
+        };
+      if (isPhys && dispatcher.physBookings != null) dispatcher.physBookings += 1;
+      if (isPh && dispatcher.phBookings != null) dispatcher.phBookings += 1;
+      if (isXfer && dispatcher.liveTransfers != null)
+        dispatcher.liveTransfers += 1;
+      appointmentsBooked.push({
+        leadName: o.contact?.name || o.name || "(unnamed)",
+        time: fmtTime(updated),
+        dispatcher: dispatcher.name,
+        stage: o.pipelineStageName,
+        kind: isPhys ? "physical" : isPh ? "phone_sale" : "live_transfer",
+      });
+      if (includeTimeOfDay) bucketBookings[bucketFor(updated)] += 1;
     }
   }
 
-  // New-lead response time
+  // New-lead response time — only NEW leads in the window. Use isCallMessage
+  // (handles numeric type=1) and also consider Vonage notes as a "first call".
   const newLeads = await ghl
     .searchContacts({ from: fromIso, to: toIso, limit: 100 })
     .catch(() => []);
@@ -338,13 +555,31 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
     if (conv) {
       const msgs = await ghl.getConversationMessages(conv.id).catch(() => []);
       const calls = msgs
-        .filter((m) => /CALL/i.test(String(m.type ?? "")))
-        .filter((m) => String(m.direction ?? "").toLowerCase() === "outbound");
+        .filter(isCallMessage)
+        .filter(
+          (m) => String(m.direction ?? "").toLowerCase() === "outbound"
+        );
       if (calls.length) {
         calls.sort((a, b) => new Date(a.dateAdded) - new Date(b.dateAdded));
         firstCallAt = DateTime.fromISO(calls[0].dateAdded).setZone(TZ);
         const userId = calls[0].userId;
-        firstCallBy = [...byDispatcher.values()].find((d) => d.ghlUserId === userId)?.name;
+        firstCallBy = [...byDispatcher.values()].find(
+          (d) => d.ghlUserId === userId
+        )?.name;
+      }
+      // Also check Vonage notes — earliest "Called -" note from a dispatcher
+      const notes = await ghl.getContactNotes(c.id).catch(() => []);
+      for (const n of notes) {
+        if (!parseVonageNote(n.body)) continue;
+        const noteAt = DateTime.fromISO(n.dateAdded || "").setZone(TZ);
+        if (!noteAt.isValid) continue;
+        if (noteAt < created) continue;
+        if (!firstCallAt || noteAt < firstCallAt) {
+          firstCallAt = noteAt;
+          firstCallBy = [...byDispatcher.values()].find(
+            (d) => d.ghlUserId === n.userId
+          )?.name;
+        }
       }
     }
     const delayMinutes = firstCallAt
@@ -363,53 +598,111 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
     });
   }
 
-  // Build per-dispatcher final shape (sorted hourly, with avg call duration)
+  // Build per-dispatcher final shape using the new bucket model.
   const byDispatcherOut = [];
   for (const d of byDispatcher.values()) {
     const hourly = [...d.hourly.entries()].sort().map(([k, v]) => ({
       label: formatHourLabel(k),
-      calls: v.calls,
-      attempts: v.attempts,
+      real: v.real || 0,
+      voicemail: v.voicemail || 0,
+      attempt: v.attempt || 0,
+      sms: v.sms || 0,
+      // Backward-compat aliases for old template
+      calls: (v.real || 0) + (v.voicemail || 0),
+      attempts: v.attempt || 0,
     }));
     const avgCallSec = d.callDurationsSec.length
       ? d.callDurationsSec.reduce((a, b) => a + b, 0) / d.callDurationsSec.length
       : null;
+    const totalBookings = d.physBookings + d.phBookings;
+    // Booking ratio = bookings ÷ real calls (only). Suppress when too few real
+    // calls to avoid 1/1 = 100% headlines that mislead.
+    const bookingRatio =
+      d.real >= 5 ? Math.round((totalBookings / d.real) * 100) : null;
+    const totalDials = d.real + d.voicemail + d.attempt;
+    const uniqueLeads = d.uniqueContacts.size;
+    const avgAttemptsPerContact = uniqueLeads > 0
+      ? Math.round((totalDials / uniqueLeads) * 10) / 10
+      : null;
+    // Build per-stage table in pipeline order (so all 11 Orlando stages appear,
+    // even with zero counts — keeps the table consistent across dispatchers).
+    const stageOrder = reportedPipelines.flatMap((p) => (p.stages || []).map((s) => s.name));
+    const seen = new Set();
+    const byStage = [];
+    for (const sn of stageOrder) {
+      if (seen.has(sn)) continue;
+      seen.add(sn);
+      const slot = d.byStage.get(sn) || { real: 0, voicemail: 0, attempt: 0 };
+      byStage.push({
+        stage: sn,
+        real: slot.real,
+        voicemail: slot.voicemail,
+        attempt: slot.attempt,
+        total: slot.real + slot.voicemail + slot.attempt,
+      });
+    }
     byDispatcherOut.push({
       name: d.name,
-      calls: d.calls,
-      attempts: d.attempts,
-      bookings: d.bookings,
+      role: d.role,
+      // Headline counts — new bucket shape
+      real: d.real,
+      voicemail: d.voicemail,
+      attempt: d.attempt,
+      // Backward-compat aliases for the old template
+      calls: d.real + d.voicemail,
+      attempts: d.attempt,
+      bookings: d.physBookings + d.phBookings,
+      vonage: {
+        real: d.vonage_real,
+        voicemail: d.vonage_voicemail,
+        attempt: d.vonage_attempt,
+      },
+      sms: d.sms,
+      physBookings: d.physBookings,
+      phBookings: d.phBookings,
+      liveTransfers: d.liveTransfers,
+      bookingRatio,
       avgCallSec,
+      firstCallAt: d.firstCallAt ? d.firstCallAt.toFormat("h:mm a") : null,
+      lastCallAt: d.lastCallAt ? d.lastCallAt.toFormat("h:mm a") : null,
       hourly,
+      // v4 metrics
+      uniqueLeads,
+      avgAttemptsPerContact,
+      leadAge: { ...d.leadAge },
+      byStage,
     });
   }
 
-  // Time-of-day summary (evening only)
+  // Time-of-day summary (evening only) — same buckets but new shape
   let timeOfDay;
   if (includeTimeOfDay) {
     timeOfDay = BUCKETS.map((b) => {
-      let calls = 0, attempts = 0;
+      let real = 0,
+        voicemail = 0,
+        attempt = 0;
       for (const d of byDispatcher.values()) {
-        calls += d.buckets[b.key].calls;
-        attempts += d.buckets[b.key].attempts;
+        real += d.buckets[b.key].real || 0;
+        voicemail += d.buckets[b.key].voicemail || 0;
+        attempt += d.buckets[b.key].attempt || 0;
       }
       const bookings = bucketBookings[b.key];
-      // Verdict heuristic
       let verdict, note;
-      if (calls === 0 && attempts === 0) {
+      if (real + voicemail + attempt === 0) {
         verdict = "low";
         note = "No call activity";
-      } else if (calls < attempts) {
-        verdict = "low";
-        note = "More attempts than calls";
-      } else if (calls >= attempts && bookings > 0) {
+      } else if (bookings > 0) {
         verdict = "good";
         note = `${bookings} booking${bookings === 1 ? "" : "s"}`;
+      } else if (real === 0) {
+        verdict = "low";
+        note = "No real conversations";
       } else {
         verdict = "ok";
         note = null;
       }
-      return { ...b, calls, attempts, bookings, verdict, note };
+      // Include legacy aliases so old template renders without crash
+      return { ...b, real, voicemail, attempt, bookings, verdict, note, calls: real + voicemail, attempts: attempt };
     });
   }
 
@@ -418,6 +711,22 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
     responseTimeAlerts,
     appointmentsBooked,
     timeOfDay,
+    // v4: pipeline scope label so the email header can show it
+    pipelineLabel: REPORTED_PIPELINE_NAMES.join(" + "),
+    // Stage order across reported pipelines — used to render consistent stage tables
+    stageOrder: (() => {
+      const arr = [];
+      const seen = new Set();
+      for (const p of reportedPipelines) {
+        for (const s of p.stages || []) {
+          if (!seen.has(s.name)) {
+            seen.add(s.name);
+            arr.push(s.name);
+          }
+        }
+      }
+      return arr;
+    })(),
   };
 }
 
@@ -447,7 +756,7 @@ export async function runMorningReport() {
     const d = dispatcherByName.get(f.employee);
     if (!d) continue;
     const hourly = d.hourly.find((h) => formatHourLabel(f.hour) === h.label);
-    if (hourly && hourly.calls + hourly.attempts <= 1) f.alsoLowCalls = true;
+    if (hourly && (hourly.real + hourly.voicemail + hourly.attempt) <= 1) f.alsoLowCalls = true;
   }
 
   const html = renderEmail({
@@ -455,6 +764,19 @@ export async function runMorningReport() {
     generatedAt,
     sections: [renderHubstaffSection(hub), renderDispatcherSection(dispatch)],
   });
+
+  // Archive to DB so the website /reports page can show this report later.
+  // Summary JSON keeps the structured data so we can re-render with a
+  // different layout/template without losing the underlying numbers.
+  try {
+    Reports.log({
+      kind: "morning",
+      html,
+      summary: { hub, dispatch },
+    });
+  } catch (e) {
+    console.error("[report] db archive failed", e?.message);
+  }
 
   await sendMail({
     subject: `Local AC — Morning Snapshot (${generatedAt.toFormat("LLL d")})`,
@@ -474,7 +796,7 @@ export async function runEveningReport() {
     const d = dispatcherByName.get(f.employee);
     if (!d) continue;
     const hourly = d.hourly.find((h) => formatHourLabel(f.hour) === h.label);
-    if (hourly && hourly.calls + hourly.attempts <= 1) f.alsoLowCalls = true;
+    if (hourly && (hourly.real + hourly.voicemail + hourly.attempt) <= 1) f.alsoLowCalls = true;
   }
 
   const html = renderEmail({
@@ -482,6 +804,16 @@ export async function runEveningReport() {
     generatedAt,
     sections: [renderHubstaffSection(hub), renderDispatcherSection(dispatch)],
   });
+
+  try {
+    Reports.log({
+      kind: "evening",
+      html,
+      summary: { hub, dispatch },
+    });
+  } catch (e) {
+    console.error("[report] db archive failed", e?.message);
+  }
 
   await sendMail({
     subject: `Local AC — Full Day Summary (${generatedAt.toFormat("LLL d")})`,
@@ -533,27 +865,49 @@ function sampleHub() {
 
 function sampleDispatch() {
   const sampleHourly = (base) => [
-    { label: "8 – 9 AM", calls: base + 1, attempts: 2 },
-    { label: "9 – 10 AM", calls: base + 3, attempts: 4 },
-    { label: "10 – 11 AM", calls: base + 2, attempts: 3 },
-    { label: "11 – 12 PM", calls: base + 4, attempts: 1 },
-    { label: "12 – 1 PM", calls: base, attempts: 2 },
-    { label: "1 – 2 PM", calls: base + 1, attempts: 2 },
-    { label: "2 – 3 PM", calls: base + 2, attempts: 1 },
-    { label: "3 – 4 PM", calls: base + 1, attempts: 3 },
-    { label: "4 – 5 PM", calls: base + 2, attempts: 2 },
-    { label: "5 – 6 PM", calls: base + 1, attempts: 1 },
+    { label: "8 – 9 AM", real: base, voicemail: 1, attempt: 4, sms: 1 },
+    { label: "9 – 10 AM", real: base + 1, voicemail: 2, attempt: 5, sms: 0 },
+    { label: "10 – 11 AM", real: base, voicemail: 1, attempt: 3, sms: 1 },
+    { label: "11 – 12 PM", real: base + 2, voicemail: 1, attempt: 6, sms: 2 },
+    { label: "12 – 1 PM", real: 0, voicemail: 1, attempt: 4, sms: 1 },
+    { label: "1 – 2 PM", real: base, voicemail: 0, attempt: 3, sms: 0 },
+    { label: "2 – 3 PM", real: base + 1, voicemail: 1, attempt: 2, sms: 1 },
+    { label: "3 – 4 PM", real: 0, voicemail: 0, attempt: 4, sms: 0 },
   ];
   return {
     byDispatcher: [
-      { name: "Frank", calls: 32, attempts: 18, bookings: 6, avgCallSec: 142, hourly: sampleHourly(2) },
-      { name: "Ellie", calls: 21, attempts: 14, bookings: 4, avgCallSec: 168, hourly: sampleHourly(1) },
-      { name: "Angel", calls: 14, attempts: 11, bookings: 2, avgCallSec: 119, hourly: sampleHourly(1) },
+      {
+        name: "Frank", role: "dispatcher_manager",
+        real: 4, voicemail: 6, attempt: 39,
+        vonage: { real: 0, voicemail: 0, attempt: 0 },
+        sms: 3, physBookings: 2, phBookings: 0, liveTransfers: 0,
+        bookingRatio: 50, avgCallSec: 142,
+        firstCallAt: "8:14 AM", lastCallAt: "12:55 PM",
+        hourly: sampleHourly(1),
+      },
+      {
+        name: "Ellie", role: "dispatcher",
+        real: 2, voicemail: 14, attempt: 206,
+        vonage: { real: 0, voicemail: 0, attempt: 0 },
+        sms: 31, physBookings: 1, phBookings: 1, liveTransfers: 1,
+        bookingRatio: null, avgCallSec: 168,
+        firstCallAt: "8:02 AM", lastCallAt: "12:43 PM",
+        hourly: sampleHourly(0),
+      },
+      {
+        name: "Mark", role: "dispatcher_training",
+        real: 15, voicemail: 21, attempt: 84,
+        vonage: { real: 0, voicemail: 0, attempt: 0 },
+        sms: 8, physBookings: 2, phBookings: 1, liveTransfers: 2,
+        bookingRatio: 20, avgCallSec: 119,
+        firstCallAt: "8:11 AM", lastCallAt: "1:47 PM",
+        hourly: sampleHourly(2),
+      },
     ],
     timeOfDay: [
-      { label: "Morning", hours: "until 12 PM", calls: 28, attempts: 14, bookings: 5, verdict: "good", note: "5 bookings" },
-      { label: "Noon", hours: "12 PM – 4 PM", calls: 22, attempts: 12, bookings: 4, verdict: "good", note: "4 bookings" },
-      { label: "Afternoon", hours: "4 PM – 9 PM", calls: 17, attempts: 17, bookings: 3, verdict: "low", note: "More attempts than calls" },
+      { label: "Morning", hours: "until 12 PM", real: 8, voicemail: 12, attempt: 130, bookings: 3, verdict: "good", note: "3 bookings" },
+      { label: "Noon", hours: "12 PM – 4 PM", real: 7, voicemail: 8, attempt: 80, bookings: 3, verdict: "good", note: "3 bookings" },
+      { label: "Afternoon", hours: "4 PM – 9 PM", real: 6, voicemail: 18, attempt: 122, bookings: 1, verdict: "ok", note: null },
     ],
     responseTimeAlerts: [
       { leadName: "Maria Sanchez", dispatcher: "Frank", delayMinutes: 1.5, late: false },
@@ -561,9 +915,9 @@ function sampleDispatch() {
       { leadName: "Carlos Ruiz", dispatcher: "Ellie", delayMinutes: 2.1, late: false },
     ],
     appointmentsBooked: [
-      { leadName: "Maria Sanchez", time: "9:14 AM", dispatcher: "Frank", stage: "Appointment Booked" },
-      { leadName: "Carlos Ruiz", time: "11:42 AM", dispatcher: "Ellie", stage: "Over Phone Sale" },
-      { leadName: "Jennifer Park", time: "2:08 PM", dispatcher: "Frank", stage: "Appointment Booked" },
+      { leadName: "Maria Sanchez", time: "9:14 AM", dispatcher: "Frank", stage: "Appointment Booked", kind: "physical" },
+      { leadName: "Carlos Ruiz", time: "11:42 AM", dispatcher: "Ellie", stage: "Over Phone Sale", kind: "phone_sale" },
+      { leadName: "Jennifer Park", time: "2:08 PM", dispatcher: "Mark", stage: "Live Transfer", kind: "live_transfer" },
     ],
   };
 }
