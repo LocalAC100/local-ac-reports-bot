@@ -9,7 +9,20 @@ import * as hubstaff from "./hubstaff.js";
 import * as ghl from "./ghl.js";
 import * as claude from "./claude.js";
 import { EMPLOYEES, isDispatcher, expectedShiftFor } from "./employees.js";
-import { now } from "./time.js";
+import { now, TZ } from "./time.js";
+import { DateTime } from "luxon";
+
+// SQLite stores CURRENT_TIMESTAMP as UTC strings ("YYYY-MM-DD HH:MM:SS").
+// Display them in America/New_York (Florida) so the website matches emails + clocks.
+function fmtET(iso) {
+  if (!iso) return "—";
+  // SQLite format has no T separator; Luxon SQL parser handles it.
+  const dt = String(iso).includes("T")
+    ? DateTime.fromISO(iso, { zone: "utc" })
+    : DateTime.fromSQL(iso, { zone: "utc" });
+  if (!dt.isValid) return iso;
+  return dt.setZone(TZ).toFormat("LLL d, h:mm a") + " ET";
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -197,10 +210,10 @@ export function buildDashboardRouter() {
             <tbody>${alerts
               .map(
                 (a) => `<tr>
-              <td class="muted">${a.fired_at}</td>
+              <td class="muted">${fmtET(a.fired_at)}</td>
               <td><strong>${a.contact_name || "(unnamed)"}</strong></td>
               <td>${a.phone || "—"}</td>
-              <td class="muted">${a.lead_added_at || "—"}</td>
+              <td class="muted">${fmtET(a.lead_added_at)}</td>
               <td><span class="badge badge-red">${a.minutes_elapsed || "?"}m</span></td>
             </tr>`
               )
@@ -227,7 +240,7 @@ export function buildDashboardRouter() {
             <tbody>${reports
               .map(
                 (r) => `<tr>
-              <td>${r.generated_at}</td>
+              <td>${fmtET(r.generated_at)}</td>
               <td><span class="badge badge-${r.kind === "morning" ? "manager" : "admin"}">${r.kind}</span></td>
               <td><a href="/reports/${r.id}">View report</a></td>
             </tr>`
@@ -253,7 +266,7 @@ export function buildDashboardRouter() {
         user: req.user,
         title: `${report.kind} report`,
         navKey: "reports",
-        body: `<div class="muted" style="margin-bottom:14px">${report.generated_at}</div><div>${report.html_body || ""}</div>`,
+        body: `<div class="muted" style="margin-bottom:14px">${fmtET(report.generated_at)}</div><div>${report.html_body || ""}</div>`,
       })
     );
   });
