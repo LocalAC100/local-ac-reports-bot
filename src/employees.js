@@ -90,13 +90,14 @@ export const EMPLOYEES = [
   },
   {
     name: "Mark",
-    fullName: "Mark (TBD)",
+    fullName: "Mark Jay Vergara",
     role: "dispatcher_training",
     payRate: 3,
-    // NOTE: Mark is not in Hubstaff or GHL yet (in-training).
-    // Add him to both systems and fill in these emails before he can be tracked.
+    // Mark joined GHL and is making calls. Hubstaff still TBD — fill in
+    // his hubstaffEmail once he's added there. GHL email confirmed via the
+    // location's user roster (May 6 2026).
     hubstaffEmail: "",
-    ghlEmail: "",
+    ghlEmail: "markjayvergara@gmail.com",
     schedule: {
       0: null, // Sun OFF
       1: { start: "08:00", end: "16:00" }, // Mon
@@ -107,6 +108,30 @@ export const EMPLOYEES = [
       6: null, // Sat OFF
     },
     breakMinutesPerShift: 30, // 2 × 15 min
+  },
+  {
+    // Sales manager — receives live transfers + handles phone-sale appointments.
+    // Not a dispatcher: excluded from dispatcher call/booking metrics, but kept
+    // here so we can attribute live transfers TO him correctly.
+    name: "Sal",
+    fullName: "Salvatore Albano",
+    role: "sales_manager",
+    payRate: null,
+    hubstaffEmail: "",
+    ghlEmail: "salbano45@gmail.com",
+    schedule: null,
+    breakMinutesPerShift: 0,
+  },
+  {
+    // Service manager — back-office, not measured on dispatcher metrics.
+    name: "Christopher",
+    fullName: "Christopher DiPrimo",
+    role: "service_manager",
+    payRate: null,
+    hubstaffEmail: "",
+    ghlEmail: "Cdprimo@local-ac.com",
+    schedule: null,
+    breakMinutesPerShift: 0,
   },
 ];
 
