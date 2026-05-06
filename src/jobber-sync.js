@@ -1,4 +1,4 @@
-// Jobber → Gross Profit sync.
+// Jobber â Gross Profit sync.
 //
 // Two paths into the same upsert:
 //   1. Webhook  POST /webhooks/jobber  (real-time, when JOBBER_WEBHOOK_SECRET is set)
@@ -73,7 +73,7 @@ async function fetchInvoiceDetail(invoiceId) {
       );
       invoice.property = p?.property;
     } catch (e) {
-      // ignore — address will be null
+      // ignore â address will be null
     }
   }
   return invoice;
@@ -102,7 +102,7 @@ function paymentMethodFrom(invoice) {
 
 function feeFrom(invoice) {
   // The spec mentions "Financing or CC Fee". Jobber doesn't expose this on
-  // a structured field — usually it shows up as a line-item adjustment.
+  // a structured field â usually it shows up as a line-item adjustment.
   // We make a best-effort: any line item whose name matches /fee/i is treated
   // as the fee. Returns { amount, type } or { amount: null, type: null }.
   const items = invoice.lineItems?.nodes || [];
@@ -147,7 +147,8 @@ export async function upsertInvoice(invoiceId) {
     address: addr.street,
     city: addr.city,
     zip: addr.postalCode,
-    amountPaid: inv.paymentsTotal ?? inv.total,
+    amountPaid: inv.paymentsTotal ?? 0,
+    invoiceTotal: inv.total,
     paymentMethod: paymentMethodFrom(inv),
     feeAmount: fee.amount,
     feeType: fee.type,
@@ -155,7 +156,7 @@ export async function upsertInvoice(invoiceId) {
   });
 
   // Try to attach the invoice PDF. Jobber's PDF download isn't part of the
-  // GraphQL API — we'd need a separate REST endpoint. For now, log a TODO
+  // GraphQL API â we'd need a separate REST endpoint. For now, log a TODO
   // so we can wire that up once we confirm the URL pattern.
   // TODO: download PDF via Jobber's invoice PDF endpoint and call GpAttachments.save
 
@@ -182,7 +183,7 @@ export function verifyWebhookSignature(rawBody, signatureHeader) {
 // ---------- Backfill (paginated, year-scoped) ----------
 //
 // One-time pull of every invoice issued on or after a given date. Uses
-// Jobber's relay-style pagination — keeps requesting next pages until
+// Jobber's relay-style pagination â keeps requesting next pages until
 // either we run out of data or hit a reasonable cap.
 async function listInvoicesPage({ first = 100, after = null, issuedAfter }) {
   const data = await gql(
@@ -214,10 +215,12 @@ export async function backfillSince(isoDate, { hardCap = 5000 } = {}) {
     if (nodes.length === 0) break;
     for (const node of nodes) {
       scanned++;
+      // Skip only if the row exists AND already has invoice_total. Allows re-running
+      // backfill to populate new fields on previously-synced rows.
       const have = db
-        .prepare("SELECT 1 AS x FROM gp_jobs WHERE jobber_invoice_id = ?")
+        .prepare("SELECT invoice_total FROM gp_jobs WHERE jobber_invoice_id = ?")
         .get(node.id);
-      if (have) continue;
+      if (have && have.invoice_total != null) continue;
       try {
         await upsertInvoice(node.id);
         synced++;
