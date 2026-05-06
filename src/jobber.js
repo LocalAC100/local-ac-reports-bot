@@ -3,27 +3,68 @@
 // Auth: Jobber uses OAuth 2.0. Access tokens expire every 60 minutes; we
 // refresh using the client secret + a long-lived refresh token.
 //
-// Env vars required:
+// Token sources (checked in order on boot):
+//   1. /var/data/jobber-tokens.json  (persistent disk; written by /jobber/callback
+//      and updated on every refresh)
+//   2. JOBBER_ACCESS_TOKEN / JOBBER_REFRESH_TOKEN env vars (fallback)
+//
+// Env vars required for refresh:
 //   JOBBER_CLIENT_ID
 //   JOBBER_CLIENT_SECRET
-//   JOBBER_ACCESS_TOKEN   (initial, will be refreshed)
-//   JOBBER_REFRESH_TOKEN  (for auto-refresh; obtained during OAuth flow)
-//
-// Without the refresh token we'll fall back to the static access token and
-// fail gracefully with a clear "Jobber token expired" message when it dies.
+
 import axios from "axios";
+import fs from "fs";
 
 const GRAPHQL_URL = "https://api.getjobber.com/api/graphql";
 const TOKEN_URL = "https://api.getjobber.com/api/oauth/token";
+const TOKEN_FILE = process.env.RENDER ? "/var/data/jobber-tokens.json" : "./data/jobber-tokens.json";
 
-let cachedAccessToken = process.env.JOBBER_ACCESS_TOKEN || null;
+let cachedAccessToken = null;
 let cachedExpiry = null; // ms since epoch
-let cachedRefreshToken = process.env.JOBBER_REFRESH_TOKEN || null;
+let cachedRefreshToken = null;
+
+// Boot: prefer disk-persisted tokens (from OAuth callback or last refresh)
+function loadTokensFromDisk() {
+  try {
+    if (fs.existsSync(TOKEN_FILE)) {
+      const j = JSON.parse(fs.readFileSync(TOKEN_FILE, "utf8"));
+      if (j.access_token) cachedAccessToken = j.access_token;
+      if (j.refresh_token) cachedRefreshToken = j.refresh_token;
+      if (j.obtained_at && j.expires_in) {
+        cachedExpiry = new Date(j.obtained_at).getTime() + (j.expires_in * 1000) - 60_000;
+      }
+      console.log(`[jobber] loaded tokens from ${TOKEN_FILE}`);
+      return true;
+    }
+  } catch (e) {
+    console.warn(`[jobber] failed to load tokens from disk:`, e.message);
+  }
+  return false;
+}
+loadTokensFromDisk();
+// Env vars are the fallback
+if (!cachedAccessToken && process.env.JOBBER_ACCESS_TOKEN) cachedAccessToken = process.env.JOBBER_ACCESS_TOKEN;
+if (!cachedRefreshToken && process.env.JOBBER_REFRESH_TOKEN) cachedRefreshToken = process.env.JOBBER_REFRESH_TOKEN;
+
+function persistTokens() {
+  try {
+    const dir = TOKEN_FILE.split("/").slice(0, -1).join("/") || ".";
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(TOKEN_FILE, JSON.stringify({
+      access_token: cachedAccessToken,
+      refresh_token: cachedRefreshToken,
+      expires_in: cachedExpiry ? Math.floor((cachedExpiry - Date.now()) / 1000) : null,
+      obtained_at: new Date().toISOString(),
+    }, null, 2));
+  } catch (e) {
+    console.warn(`[jobber] failed to persist tokens:`, e.message);
+  }
+}
 
 async function refreshAccessToken() {
   if (!cachedRefreshToken) {
     throw new Error(
-      "Jobber refresh token not configured — access token has expired and can't be refreshed automatically. Set JOBBER_REFRESH_TOKEN in Render env vars (obtained during OAuth)."
+      "Jobber refresh token not configured — access token has expired and can't be refreshed automatically. Run the OAuth flow at /jobber/callback or set JOBBER_REFRESH_TOKEN in env."
     );
   }
   const clientId = process.env.JOBBER_CLIENT_ID;
@@ -43,6 +84,7 @@ async function refreshAccessToken() {
   cachedAccessToken = resp.data.access_token;
   if (resp.data.refresh_token) cachedRefreshToken = resp.data.refresh_token;
   cachedExpiry = Date.now() + (resp.data.expires_in ?? 3600) * 1000 - 60_000;
+  persistTokens();
   return cachedAccessToken;
 }
 
@@ -53,14 +95,32 @@ async function getAccessToken() {
   if (cachedRefreshToken) {
     return await refreshAccessToken();
   }
-  // No refresh available — just return the static token; if expired the API call will fail.
+  // No refresh available — return the static token; if expired the API call will fail
   return cachedAccessToken;
+}
+
+// Used by /jobber/callback after a fresh OAuth — pushes tokens into the cache
+// so the running process picks them up immediately (no restart needed).
+export function setTokens({ access_token, refresh_token, expires_in }) {
+  if (access_token) cachedAccessToken = access_token;
+  if (refresh_token) cachedRefreshToken = refresh_token;
+  if (expires_in) cachedExpiry = Date.now() + expires_in * 1000 - 60_000;
+  persistTokens();
+}
+
+export function tokenStatus() {
+  return {
+    has_access_token: Boolean(cachedAccessToken),
+    has_refresh_token: Boolean(cachedRefreshToken),
+    expires_in_seconds: cachedExpiry ? Math.floor((cachedExpiry - Date.now()) / 1000) : null,
+    source: fs.existsSync(TOKEN_FILE) ? "disk" : (process.env.JOBBER_ACCESS_TOKEN ? "env" : "none"),
+  };
 }
 
 export async function gql(query, variables = {}) {
   const token = await getAccessToken();
   if (!token) {
-    throw new Error("No Jobber access token available. Add JOBBER_ACCESS_TOKEN to env.");
+    throw new Error("No Jobber access token available. Run OAuth at /jobber/callback or set JOBBER_ACCESS_TOKEN in env.");
   }
   const resp = await axios.post(
     GRAPHQL_URL,
