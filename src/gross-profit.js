@@ -3,7 +3,7 @@
 // One row per HVAC job. Data accumulates from three sources:
 //   1. Jobber invoice  (creates the row, anchors customer + amount paid)
 //   2. Chris's Google Sheet (labor, commissions, permits, other expenses)
-//   3. Supplier invoice emails ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ Gemaire, Goodman, Home Depot (equipment + materials)
+//   3. Supplier invoice emails ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ Gemaire, Goodman, Home Depot (equipment + materials)
 // Once enough data is in place, GP $ and GP % are computed.
 //
 // The DB is the source of truth. A separate mirror writer (src/sheets.js)
@@ -134,14 +134,6 @@ CREATE TABLE IF NOT EXISTS gp_inventory_invoices (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-// Schema migrations: ALTER TABLE for additive changes. Wrap each in try/catch
-// because better-sqlite3 throws if the column already exists. Idempotent.
-function safeAlter(sql) {
-  try { db.exec(sql); } catch (e) { /* column already exists - OK */ }
-}
-safeAlter("ALTER TABLE gp_jobs ADD COLUMN invoice_total REAL");
-
-
 CREATE INDEX IF NOT EXISTS idx_gp_jobs_customer ON gp_jobs(customer_name);
 CREATE INDEX IF NOT EXISTS idx_gp_jobs_invoice ON gp_jobs(jobber_invoice_id);
 CREATE INDEX IF NOT EXISTS idx_gp_jobs_issued ON gp_jobs(jobber_invoice_issued_at);
@@ -187,7 +179,14 @@ function levenshtein(a, b) {
   return dp[b.length];
 }
 
-export function nameSimilarity(a, b) {
+export // Schema migrations: ALTER TABLE for additive changes. Wrap each in try/catch
+// because better-sqlite3 throws if the column already exists. Idempotent.
+function safeAlter(sql) {
+  try { db.exec(sql); } catch (e) { /* column already exists - OK */ }
+}
+safeAlter("ALTER TABLE gp_jobs ADD COLUMN invoice_total REAL");
+
+function nameSimilarity(a, b) {
   const na = normalizeName(a);
   const nb = normalizeName(b);
   if (!na || !nb) return 0;
@@ -373,7 +372,7 @@ export const GpJobs = {
     if (sheet.permitRequired != null) set("permit_required", sheet.permitRequired ? 1 : 0);
     set("permit_fee", sheet.permitFee);
 
-    // Labor entries ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ replace existing 'labor' kind from sheet to avoid duplicates
+    // Labor entries ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ replace existing 'labor' kind from sheet to avoid duplicates
     if (Array.isArray(sheet.labor) && sheet.labor.length) {
       db.prepare("DELETE FROM gp_line_items WHERE job_id = ? AND kind = 'labor' AND source = 'sheet'").run(jobId);
       const ins = db.prepare(
@@ -454,7 +453,7 @@ export const GpJobs = {
       .all(...params, limit, offset);
   },
 
-  // Count rows matching the same filter ÃÂ¢ÃÂÃÂ exposed so the page can show
+  // Count rows matching the same filter ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ exposed so the page can show
   // `N invoices` for the current view (compare against Jobber).
   count({ from = null, to = null } = {}) {
     const where = [];
@@ -488,12 +487,12 @@ export const GpJobs = {
   },
 
   // Returns counts and totals for the report header. Differentiates between:
-  //   total       â every invoice in the date range (matches the table)
-  //   paid        â invoices with amount_paid > 0
-  //   info_complete â invoices that have data from all 3 sources
+  //   total       Ã¢ÂÂ every invoice in the date range (matches the table)
+  //   paid        Ã¢ÂÂ invoices with amount_paid > 0
+  //   info_complete Ã¢ÂÂ invoices that have data from all 3 sources
   //                  (Jobber amount_paid + supplier equip+mat + sheet labor)
-  //   qualified   â paid AND info_complete (counts toward GP totals)
-  // Only "qualified" rows roll up into total_sales / gp_dollars / gp_percent â
+  //   qualified   Ã¢ÂÂ paid AND info_complete (counts toward GP totals)
+  // Only "qualified" rows roll up into total_sales / gp_dollars / gp_percent Ã¢ÂÂ
   // because a row missing labor cost would compute as 100% margin, which
   // misleads. Those totals match what you'd get summing the rows by hand.
   qualifiedSummary({ from = null, to = null } = {}) {
