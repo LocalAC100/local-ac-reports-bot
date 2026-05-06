@@ -155,7 +155,7 @@ export function todayPage({ user, snapshot }) {
   <h2>Recent live alerts</h2>
   ${recentAlerts.length === 0
     ? `<div class="empty-good">No live alerts in the last 7 days.</div>`
-    : `<ul class="alert-list">${recentAlerts.map(a => `<li><span class="badge badge-red">🔴 ${a.minutes_elapsed}m</span> <strong>${escape(a.contact_name || "(unnamed)")}</strong> · ${escape(a.phone || "")} · ${escape(a.fired_at)}</li>`).join("")}</ul>`}
+    : `<ul class="alert-list">${recentAlerts.map(a => `<li><span class="badge badge-red">🔴 ${a.minutes_elapsed}m</span> <strong>${escape(a.contact_name || "(unnamed)")}</strong> · ${escape(a.phone || "")} · ${escape(a.fired_at_display || a.fired_at)}</li>`).join("")}</ul>`}
 </section>`,
   });
 }
@@ -258,7 +258,7 @@ export function usersPage({ user, users, flash }) {
       </select>
     </label>
     <button type="submit" class="btn btn-primary">Create user</button>
-  </form
+  </form>
 </section>`,
   });
 }
