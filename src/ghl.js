@@ -48,11 +48,8 @@ export async function searchContacts({ from, to, limit = 100 }) {
     locationId: config.ghl.locationId,
     pageLimit: limit,
     filters: [
-      {
-        field: "dateAdded",
-        operator: "between",
-        value: [from, to],
-      },
+      { field: "dateAdded", operator: "gte", value: from },
+      { field: "dateAdded", operator: "lte", value: to },
     ],
   });
   return r.data?.contacts ?? [];
