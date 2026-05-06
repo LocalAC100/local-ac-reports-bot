@@ -3,7 +3,7 @@
 // One row per HVAC job. Data accumulates from three sources:
 //   1. Jobber invoice  (creates the row, anchors customer + amount paid)
 //   2. Chris's Google Sheet (labor, commissions, permits, other expenses)
-//   3. Supplier invoice emails — Gemaire, Goodman, Home Depot (equipment + materials)
+//   3. Supplier invoice emails â Gemaire, Goodman, Home Depot (equipment + materials)
 // Once enough data is in place, GP $ and GP % are computed.
 //
 // The DB is the source of truth. A separate mirror writer (src/sheets.js)
@@ -363,7 +363,7 @@ export const GpJobs = {
     if (sheet.permitRequired != null) set("permit_required", sheet.permitRequired ? 1 : 0);
     set("permit_fee", sheet.permitFee);
 
-    // Labor entries — replace existing 'labor' kind from sheet to avoid duplicates
+    // Labor entries â replace existing 'labor' kind from sheet to avoid duplicates
     if (Array.isArray(sheet.labor) && sheet.labor.length) {
       db.prepare("DELETE FROM gp_line_items WHERE job_id = ? AND kind = 'labor' AND source = 'sheet'").run(jobId);
       const ins = db.prepare(
@@ -428,12 +428,41 @@ export const GpJobs = {
     applyComputed(jobId);
   },
 
-  list({ limit = 200, offset = 0 } = {}) {
+  list({ limit = 500, offset = 0, from = null, to = null } = {}) {
+    // from/to are inclusive ISO date strings (YYYY-MM-DD or full ISO).
+    // Filter by jobber_invoice_issued_at; rows with no issue date are kept only
+    // when no filter is applied so they don't ghost-vanish from totals.
+    const where = [];
+    const params = [];
+    if (from) { where.push("DATE(jobber_invoice_issued_at) >= DATE(?)"); params.push(from); }
+    if (to)   { where.push("DATE(jobber_invoice_issued_at) <= DATE(?)"); params.push(to); }
+    const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
     return db
       .prepare(
-        `SELECT * FROM gp_jobs ORDER BY COALESCE(jobber_invoice_issued_at, created_at) DESC LIMIT ? OFFSET ?`
+        `SELECT * FROM gp_jobs ${whereSql} ORDER BY COALESCE(jobber_invoice_issued_at, created_at) DESC LIMIT ? OFFSET ?`
       )
-      .all(limit, offset);
+      .all(...params, limit, offset);
+  },
+
+  // Count rows matching the same filter — exposed so the page can show
+  // `N invoices` for the current view (compare against Jobber).
+  count({ from = null, to = null } = {}) {
+    const where = [];
+    const params = [];
+    if (from) { where.push("DATE(jobber_invoice_issued_at) >= DATE(?)"); params.push(from); }
+    if (to)   { where.push("DATE(jobber_invoice_issued_at) <= DATE(?)"); params.push(to); }
+    const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+    return db.prepare(`SELECT COUNT(*) AS n FROM gp_jobs ${whereSql}`).get(...params).n;
+  },
+
+  // Sum amount_paid for the same filter, used in the page header.
+  sumAmountPaid({ from = null, to = null } = {}) {
+    const where = [];
+    const params = [];
+    if (from) { where.push("DATE(jobber_invoice_issued_at) >= DATE(?)"); params.push(from); }
+    if (to)   { where.push("DATE(jobber_invoice_issued_at) <= DATE(?)"); params.push(to); }
+    const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+    return db.prepare(`SELECT COALESCE(SUM(amount_paid), 0) AS s FROM gp_jobs ${whereSql}`).get(...params).s;
   },
 
   byId(id) {
