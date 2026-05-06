@@ -44,10 +44,17 @@ function summarizeCalls(messages, leadAddedAt) {
   const leadTime = new Date(leadAddedAt).getTime();
   const calls = [];
   for (const m of messages || []) {
-    const type = String(m.type ?? "");
+    // GHL returns calls with type=1 (numeric) AND messageType="TYPE_CALL" (string).
+    // Some endpoints/payloads may also return the bare string "CALL".
+    // We match on ALL THREE forms because none alone is reliable —
+    // earlier we missed every call because we only checked /CALL/i against
+    // a stringified numeric type.
+    const isCall =
+      m.type === 1 ||
+      m.messageType === "TYPE_CALL" ||
+      /CALL/i.test(String(m.type ?? ""));
+    if (!isCall) continue;
     const dir = String(m.direction ?? "").toLowerCase();
-    // Match "CALL" and "TYPE_CALL" — GHL's enum varies between endpoints.
-    if (!/CALL/i.test(type)) continue;
     if (dir !== "outbound") continue;
     const ts = new Date(m.dateAdded ?? m.createdAt ?? 0).getTime();
     if (ts < leadTime) continue;
