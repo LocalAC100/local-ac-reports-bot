@@ -40,7 +40,7 @@ import { GpJobs } from "./gross-profit.js";
 const CHRIS_SHEET_ID = process.env.CHRIS_SHEET_ID || "";
 const SALES_RANGE    = process.env.CHRIS_SALES_RANGE || "SALES!A1:CA";
 const JOBS_RANGE     = process.env.CHRIS_JOBS_RANGE  || "JOBS!A1:Z";
-const SALES_CUSTOMER_COL = (process.env.SHEET_CUSTOMER_COL || "B").toUpperCase();
+const SALES_CUSTOMER_COL = (process.env.SALES_CUSTOMER_COL || process.env.SHEET_CUSTOMER_COL || "B").toUpperCase();
 const JOBS_CUSTOMER_COL  = (process.env.JOBS_CUSTOMER_COL  || "B").toUpperCase();
 const MIRROR_SHEET_ID = process.env.MIRROR_SHEET_ID || "";
 const MIRROR_TAB      = process.env.MIRROR_SHEET_TAB || "GP Tracker";
