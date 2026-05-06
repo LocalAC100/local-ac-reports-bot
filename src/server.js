@@ -8,6 +8,7 @@ import { onNewLead } from "./alerts.js";
 import { buildSessionMiddleware } from "./auth.js";
 import { buildDashboardRouter } from "./dashboard.js";
 import { Alerts } from "./db.js";
+import * as jobberSync from "./jobber-sync.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -60,6 +61,32 @@ export function buildServer() {
       // Log to dashboard immediately (so it appears in Alerts even before timer fires)
       onNewLead({ contactId, contactName, phone, leadAddedAt }).catch((e) =>
         console.error("[webhook] onNewLead failed", e?.message)
+      );
+    }
+    return res.json({ ok: true });
+  });
+
+  // Jobber webhook â INVOICE_CREATE (and other topics). Mount before session.
+  // Jobber posts a small envelope; we fetch full invoice detail in the handler.
+  app.post("/webhooks/jobber", express.raw({ type: "application/json", limit: "1mb" }), async (req, res) => {
+    const rawBody = req.body; // Buffer because of express.raw
+    const sig = req.headers["x-jobber-hmac-sha256"] || req.headers["x-jobber-signature"];
+    if (!jobberSync.verifyWebhookSignature(rawBody, sig)) {
+      return res.status(401).json({ error: "bad signature" });
+    }
+    let body;
+    try { body = JSON.parse(rawBody.toString("utf8")); }
+    catch { return res.status(400).json({ error: "bad json" }); }
+
+    // Jobber webhook envelope: { data: { webHookEvent: { topic, itemId, accountId, occurredAt } } }
+    const evt = body?.data?.webHookEvent || body?.webHookEvent || body;
+    const topic = String(evt?.topic || "").toUpperCase();
+    const itemId = evt?.itemId || evt?.item?.id;
+
+    if (topic.includes("INVOICE") && itemId) {
+      // Async; respond fast so Jobber doesn't retry
+      jobberSync.upsertInvoice(itemId).catch((e) =>
+        console.error("[jobber-webhook] upsertInvoice failed", e?.message)
       );
     }
     return res.json({ ok: true });
