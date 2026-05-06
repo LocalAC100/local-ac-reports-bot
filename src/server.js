@@ -9,6 +9,8 @@ import { buildSessionMiddleware } from "./auth.js";
 import { buildDashboardRouter } from "./dashboard.js";
 import { Alerts } from "./db.js";
 import * as jobberSync from "./jobber-sync.js";
+import axios from "axios";
+import fs from "fs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -90,6 +92,58 @@ export function buildServer() {
       );
     }
     return res.json({ ok: true });
+  });
+
+  // Jobber OAuth callback. Exchanges the auth code for access + refresh tokens
+  // and persists them to /var/data/jobber-tokens.json. Mount before session.
+  // One-time setup; remove or restrict after first use.
+  app.get("/jobber/callback", async (req, res) => {
+    const code = req.query.code;
+    if (!code) return res.status(400).send("missing ?code in callback URL");
+    const clientId = process.env.JOBBER_CLIENT_ID;
+    const clientSecret = process.env.JOBBER_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      return res.status(500).send("JOBBER_CLIENT_ID / JOBBER_CLIENT_SECRET not in env");
+    }
+    try {
+      const params = new URLSearchParams();
+      params.append("grant_type", "authorization_code");
+      params.append("code", code);
+      params.append("client_id", clientId);
+      params.append("client_secret", clientSecret);
+      params.append("redirect_uri", "https://local-ac-reports-bot.onrender.com/jobber/callback");
+      const r = await axios.post(
+        "https://api.getjobber.com/api/oauth/token",
+        params.toString(),
+        { headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 15000 }
+      );
+      const { access_token, refresh_token, expires_in } = r.data;
+      // Persist for the running process AND for restarts
+      const dataDir = process.env.RENDER ? "/var/data" : "./data";
+      try { fs.mkdirSync(dataDir, { recursive: true }); } catch {}
+      const path = `${dataDir}/jobber-tokens.json`;
+      fs.writeFileSync(path, JSON.stringify({
+        access_token, refresh_token, expires_in,
+        obtained_at: new Date().toISOString(),
+      }, null, 2));
+      // Also push into process.env so jobber.js picks them up immediately
+      process.env.JOBBER_ACCESS_TOKEN = access_token;
+      if (refresh_token) process.env.JOBBER_REFRESH_TOKEN = refresh_token;
+      res.send(`<html><body style="font-family:monospace;padding:24px">
+        <h2>Jobber tokens captured ✓</h2>
+        <p>Saved to ${path} and pushed to process.env. The app can now use Jobber.</p>
+        <p>For persistence across restarts, also paste these into Render env vars:</p>
+        <pre style="background:#f5f5f5;padding:12px;overflow:auto">
+JOBBER_ACCESS_TOKEN=${access_token}
+JOBBER_REFRESH_TOKEN=${refresh_token || "(rotation off; reuse access token)"}
+        </pre>
+        <p>Expires in: ${expires_in}s</p>
+        <p><a href="/gross-profit">→ go to Gross Profit page</a></p>
+      </body></html>`);
+    } catch (e) {
+      const detail = e.response?.data ? JSON.stringify(e.response.data) : e.message;
+      res.status(500).send(`Token exchange failed: ${detail}`);
+    }
   });
 
   // Dashboard: session-based, requires login
