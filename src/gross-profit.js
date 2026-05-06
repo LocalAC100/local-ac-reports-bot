@@ -3,7 +3,7 @@
 // One row per HVAC job. Data accumulates from three sources:
 //   1. Jobber invoice  (creates the row, anchors customer + amount paid)
 //   2. Chris's Google Sheet (labor, commissions, permits, other expenses)
-//   3. Supplier invoice emails â Gemaire, Goodman, Home Depot (equipment + materials)
+//   3. Supplier invoice emails Ã¢ÂÂ Gemaire, Goodman, Home Depot (equipment + materials)
 // Once enough data is in place, GP $ and GP % are computed.
 //
 // The DB is the source of truth. A separate mirror writer (src/sheets.js)
@@ -363,7 +363,7 @@ export const GpJobs = {
     if (sheet.permitRequired != null) set("permit_required", sheet.permitRequired ? 1 : 0);
     set("permit_fee", sheet.permitFee);
 
-    // Labor entries â replace existing 'labor' kind from sheet to avoid duplicates
+    // Labor entries Ã¢ÂÂ replace existing 'labor' kind from sheet to avoid duplicates
     if (Array.isArray(sheet.labor) && sheet.labor.length) {
       db.prepare("DELETE FROM gp_line_items WHERE job_id = ? AND kind = 'labor' AND source = 'sheet'").run(jobId);
       const ins = db.prepare(
@@ -444,7 +444,7 @@ export const GpJobs = {
       .all(...params, limit, offset);
   },
 
-  // Count rows matching the same filter — exposed so the page can show
+  // Count rows matching the same filter â exposed so the page can show
   // `N invoices` for the current view (compare against Jobber).
   count({ from = null, to = null } = {}) {
     const where = [];
@@ -477,9 +477,6 @@ export const GpJobs = {
     return job;
   },
 
-  count() {
-    return db.prepare("SELECT COUNT(*) AS n FROM gp_jobs").get().n;
-  },
 };
 
 // ---------- Attachments ----------
