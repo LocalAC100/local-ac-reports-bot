@@ -20,6 +20,9 @@ export function isConfigured() {
 
 // ---------- GraphQL: fetch full invoice detail by id ----------
 async function fetchInvoiceDetail(invoiceId) {
+  // Jobber's 2025 schema: amountPaid/amountOutstanding/property/payments
+  // were removed/renamed. We fetch what's still available and infer the
+  // rest. property.address has to be re-fetched via the property ID.
   const data = await gql(
     `query InvoiceDetail($id: EncodedId!) {
       invoice(id: $id) {
@@ -27,11 +30,10 @@ async function fetchInvoiceDetail(invoiceId) {
         invoiceNumber
         subject
         total
-        amountOutstanding
-        amountPaid
         invoiceStatus
         issuedDate
         createdAt
+        paymentsTotal
         client {
           id
           name
@@ -39,9 +41,7 @@ async function fetchInvoiceDetail(invoiceId) {
           lastName
           companyName
         }
-        property {
-          address { street, city, postalCode, province }
-        }
+        propertyIds
         lineItems {
           nodes {
             id
@@ -49,23 +49,34 @@ async function fetchInvoiceDetail(invoiceId) {
             description
             quantity
             totalPrice
-            unitCost
-          }
-        }
-        payments {
-          nodes {
-            id
-            paymentType
-            amount
-            paymentDate
-            details
+            unitPrice
           }
         }
       }
     }`,
     { id: invoiceId }
   );
-  return data?.invoice || null;
+  const invoice = data?.invoice;
+  if (!invoice) return null;
+  // Best-effort property fetch (address) using first propertyId.
+  const propId = invoice.propertyIds?.[0];
+  if (propId) {
+    try {
+      const p = await gql(
+        `query Prop($id: EncodedId!) {
+          property(id: $id) {
+            id
+            address { street, city, postalCode, province }
+          }
+        }`,
+        { id: propId }
+      );
+      invoice.property = p?.property;
+    } catch (e) {
+      // ignore — address will be null
+    }
+  }
+  return invoice;
 }
 
 // ---------- List recent invoices for polling ----------
@@ -83,18 +94,10 @@ async function listRecentInvoiceIds({ first = 50 } = {}) {
 
 // ---------- Upsert one invoice into GP ----------
 function paymentMethodFrom(invoice) {
-  const p = invoice.payments?.nodes?.[0];
-  if (!p) return null;
-  // Jobber payment types: CASH, CHECK, CREDIT_CARD, OTHER, etc.
-  // Map a few common patterns to the spec's canonical names.
-  const t = (p.paymentType || "").toUpperCase();
-  const d = (p.details || "").toLowerCase();
-  if (t === "CASH") return "Cash";
-  if (t === "CHECK") return "Check";
-  if (t === "CREDIT_CARD" || t === "CARD") return "Credit Card";
-  if (d.includes("aqua")) return "Aqua Financing";
-  if (d.includes("renew")) return "Renew Financing";
-  return p.paymentType || null;
+  // Jobber 2025 schema removed invoice.payments. Until we wire up a
+  // separate payment query, leave payment_method null. The total paid
+  // amount is in invoice.paymentsTotal (a number).
+  return null;
 }
 
 function feeFrom(invoice) {
@@ -144,7 +147,7 @@ export async function upsertInvoice(invoiceId) {
     address: addr.street,
     city: addr.city,
     zip: addr.postalCode,
-    amountPaid: inv.amountPaid ?? (parseFloat(inv.total) - parseFloat(inv.amountOutstanding || 0)),
+    amountPaid: inv.paymentsTotal ?? inv.total,
     paymentMethod: paymentMethodFrom(inv),
     feeAmount: fee.amount,
     feeType: fee.type,
