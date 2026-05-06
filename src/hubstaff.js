@@ -66,8 +66,36 @@ async function get(path, params = {}) {
 // ---------- Public helpers ----------
 
 export async function listOrgUsers() {
-  const data = await get(`/organizations/${config.hubstaff.orgId}/members`);
-  return data?.members ?? data?.users ?? [];
+  // Hubstaff /members returns membership records keyed by user_id (no email/name).
+  // We sideload the user records via ?include=users so each returned object
+  // has BOTH the membership info AND id/name/email/last_activity merged.
+  const data = await get(`/organizations/${config.hubstaff.orgId}/members`, {
+    include: "users",
+  });
+  const members = data?.members ?? [];
+  const users = data?.users ?? [];
+  const userById = new Map(users.map((u) => [u.id, u]));
+  return members.map((m) => {
+    const u = userById.get(m.user_id) || {};
+    return {
+      // user-level fields (what callers expect)
+      id: u.id ?? m.user_id,
+      name: u.name,
+      first_name: u.first_name,
+      last_name: u.last_name,
+      email: u.email,
+      time_zone: u.time_zone,
+      status: u.status,
+      last_activity: u.last_activity ?? m.last_client_activity ?? null,
+      // membership-level fields preserved
+      user_id: m.user_id,
+      membership_role: m.membership_role,
+      membership_status: m.membership_status,
+      pay_period: m.pay_period,
+      trackable: m.trackable,
+      effective_role: m.effective_role,
+    };
+  });
 }
 
 // activities: per-user time entries with activity %, broken into 10-min slots
