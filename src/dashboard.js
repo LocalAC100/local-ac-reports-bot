@@ -11,6 +11,11 @@ import * as claude from "./claude.js";
 import { EMPLOYEES, isDispatcher, expectedShiftFor } from "./employees.js";
 import { now, TZ } from "./time.js";
 import { DateTime } from "luxon";
+import { GpJobs, GpAttachments, GpUnmatched, GpInventory } from "./gross-profit.js";
+import * as jobberSync from "./jobber-sync.js";
+import * as sheets from "./sheets.js";
+import * as gmail from "./gmail.js";
+import fs from "fs";
 
 // SQLite stores CURRENT_TIMESTAMP as UTC strings ("YYYY-MM-DD HH:MM:SS").
 // Display them in America/New_York (Florida) so the website matches emails + clocks.
@@ -67,12 +72,7 @@ export function buildDashboardRouter() {
       callsToday: 0,
       leadsToday: 0,
       alertsToday: Alerts.todayCount(),
-      // Pre-format alert timestamps in ET so the Today widget doesn't show raw UTC
-      recentAlerts: Alerts.recent(10).map((a) => ({
-        ...a,
-        fired_at_display: fmtET(a.fired_at),
-        lead_added_display: fmtET(a.lead_added_at),
-      })),
+      recentAlerts: Alerts.recent(10),
       discrepancies: [],
     };
 
@@ -88,42 +88,26 @@ export function buildDashboardRouter() {
         })
         .map((u) => u.name || u.email);
 
-      // Discrepancies: only flag people whose shift is CURRENTLY in progress
-      // but who have no recent Hubstaff activity. Skip anyone whose shift
-      // hasn't started yet OR has already ended — those aren't discrepancies.
-      const nowDt = today; // Luxon DateTime in ET
+      // Discrepancies: scheduled today but no recent activity
       for (const e of EMPLOYEES) {
         if (!e.hubstaffEmail) continue;
         const shift = expectedShiftFor(e, today);
         if (!shift) continue;
-        // Parse shift start/end as Luxon DateTimes for today
-        const [sh, sm] = shift.start.split(":").map(Number);
-        const [eh, em] = shift.end.split(":").map(Number);
-        const shiftStart = nowDt.set({ hour: sh, minute: sm, second: 0, millisecond: 0 });
-        const shiftEnd = nowDt.set({ hour: eh, minute: em, second: 0, millisecond: 0 });
-        // Skip if shift hasn't started or already ended
-        if (nowDt < shiftStart || nowDt > shiftEnd) continue;
         const hu = orgUsers.find(
           (u) => (u.email || "").toLowerCase() === e.hubstaffEmail.toLowerCase()
         );
         if (!hu) continue;
         const lastT = new Date(hu.last_activity || 0).getTime();
         if (lastT < Date.now() - 60 * 60 * 1000) {
-          // Format times nicely (12-hour AM/PM)
-          const fmtHHMM = (hhmm) => {
-            const [h, m] = hhmm.split(":").map(Number);
-            const ampm = h < 12 ? "AM" : "PM";
-            const h12 = h % 12 === 0 ? 12 : h % 12;
-            return `${h12}:${String(m).padStart(2, "0")} ${ampm}`;
-          };
-          const lastActivityDisplay = hu.last_activity
-            ? DateTime.fromISO(hu.last_activity)
-                .setZone(TZ)
-                .toFormat("LLL d, h:mm a") + " ET"
-            : "never";
           snapshot.discrepancies.push({
             employee: e.name,
-            detail: `scheduled ${fmtHHMM(shift.start)}–${fmtHHMM(shift.end)}, last activity ${lastActivityDisplay}`,
+            detail: `scheduled ${shift.start}, last activity ${
+              hu.last_activity
+                ? new Date(hu.last_activity).toLocaleString("en-US", {
+                    timeZone: "America/New_York",
+                  })
+                : "never"
+            }`,
           });
         }
       }
@@ -318,6 +302,97 @@ export function buildDashboardRouter() {
       console.error("[ask] failed", e);
       res.json({ error: e.message || "Claude request failed." });
     }
+  });
+
+  // ----- Gross Profit -----
+  router.get("/gross-profit", (req, res) => {
+    const jobs = GpJobs.list({ limit: 200 });
+    const unmatched = GpUnmatched.list();
+    const inventory = GpInventory.list();
+    const status = {
+      jobber: jobberSync.isConfigured(),
+      sheets: sheets.isConfigured(),
+      gmail: gmail.isConfigured(),
+      ...sheets.status(),
+      ...gmail.status(),
+    };
+    res.send(
+      views.grossProfitPage({
+        user: req.user,
+        jobs, unmatched, inventory, status,
+        flash: req.session.flash,
+      })
+    );
+    delete req.session.flash;
+  });
+
+  router.get("/gross-profit/:id(\\d+)", (req, res) => {
+    const job = GpJobs.byId(parseInt(req.params.id, 10));
+    res.send(views.grossProfitJobPage({ user: req.user, job }));
+  });
+
+  // Serve attachment PDFs (PDFs only, served inline)
+  router.get("/gross-profit/attachment/:id(\\d+)", (req, res) => {
+    const att = GpAttachments.byId(parseInt(req.params.id, 10));
+    if (!att) return res.status(404).send("Not found");
+    try {
+      const bytes = fs.readFileSync(att.storage_path);
+      res.setHeader("Content-Type", att.mime_type || "application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename="${att.filename.replace(/"/g, "")}"`);
+      res.send(bytes);
+    } catch (e) {
+      res.status(500).send("attachment file missing on disk");
+    }
+  });
+
+  // Manual sync triggers (admin only) — useful before crons fire
+  router.post("/gross-profit/sync/jobber", requireAdmin, async (req, res) => {
+    try {
+      const r = await jobberSync.pollOnce();
+      req.session.flash = { type: "ok", message: `Jobber sync: ${JSON.stringify(r)}` };
+    } catch (e) {
+      req.session.flash = { type: "error", message: `Jobber sync failed: ${e.message}` };
+    }
+    res.redirect("/gross-profit");
+  });
+  // Backfill: pull every Jobber invoice issued on/after a given date.
+  // Defaults to Jan 1 of the current year.
+  router.post("/gross-profit/sync/backfill", requireAdmin, async (req, res) => {
+    const since = (req.body?.since || `${new Date().getFullYear()}-01-01`).trim();
+    try {
+      const r = await jobberSync.backfillSince(since);
+      req.session.flash = { type: "ok", message: `Backfill since ${since}: ${JSON.stringify(r)}` };
+    } catch (e) {
+      req.session.flash = { type: "error", message: `Backfill failed: ${e.message}` };
+    }
+    res.redirect("/gross-profit");
+  });
+  router.post("/gross-profit/sync/sheets", requireAdmin, async (req, res) => {
+    try {
+      const r = await sheets.scanChrisSheet();
+      req.session.flash = { type: "ok", message: `Sheets scan: ${JSON.stringify(r)}` };
+    } catch (e) {
+      req.session.flash = { type: "error", message: `Sheets scan failed: ${e.message}` };
+    }
+    res.redirect("/gross-profit");
+  });
+  router.post("/gross-profit/sync/gmail", requireAdmin, async (req, res) => {
+    try {
+      const r = await gmail.pollOnce();
+      req.session.flash = { type: "ok", message: `Gmail watcher: ${JSON.stringify(r)}` };
+    } catch (e) {
+      req.session.flash = { type: "error", message: `Gmail watcher failed: ${e.message}` };
+    }
+    res.redirect("/gross-profit");
+  });
+  router.post("/gross-profit/sync/mirror", requireAdmin, async (req, res) => {
+    try {
+      const r = await sheets.syncMirror();
+      req.session.flash = { type: "ok", message: `Mirror sync: ${JSON.stringify(r)}` };
+    } catch (e) {
+      req.session.flash = { type: "error", message: `Mirror sync failed: ${e.message}` };
+    }
+    res.redirect("/gross-profit");
   });
 
   // ----- Settings/Users (admin only) -----
