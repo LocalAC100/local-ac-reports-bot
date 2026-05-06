@@ -9,6 +9,7 @@ import { buildSessionMiddleware } from "./auth.js";
 import { buildDashboardRouter } from "./dashboard.js";
 import { Alerts } from "./db.js";
 import * as jobberSync from "./jobber-sync.js";
+import * as jobber from "./jobber.js";
 import axios from "axios";
 import fs from "fs";
 
@@ -126,9 +127,11 @@ export function buildServer() {
         access_token, refresh_token, expires_in,
         obtained_at: new Date().toISOString(),
       }, null, 2));
-      // Also push into process.env so jobber.js picks them up immediately
+      // Also push into process.env (for any code that re-reads env later)
       process.env.JOBBER_ACCESS_TOKEN = access_token;
       if (refresh_token) process.env.JOBBER_REFRESH_TOKEN = refresh_token;
+      // Hot-update the running jobber.js cache so we don't need to restart
+      jobber.setTokens({ access_token, refresh_token, expires_in });
       res.send(`<html><body style="font-family:monospace;padding:24px">
         <h2>Jobber tokens captured ✓</h2>
         <p>Saved to ${path} and pushed to process.env. The app can now use Jobber.</p>
