@@ -343,7 +343,55 @@ export function renderEmail({ title, generatedAt, sections }) {
 
 // ---------- Live alert ----------
 
-export function renderLiveAlert({ leadName, phone, leadAddedAt, minutesElapsed }) {
+export function renderLiveAlert({
+  leadName,
+  phone,
+  leadAddedAt,
+  minutesElapsed,
+  level = 1,
+  callSummary = null,
+}) {
+  const escalation = level >= 2;
+  const dots = escalation ? "🔴🔴🔴" : "🔴";
+  const tag = escalation ? "Escalation" : "Live alert";
+  const headline = escalation
+    ? `${dots} STILL not contacted after ${minutesElapsed} min`
+    : `${dots} New lead not contacted in ${minutesElapsed} min`;
+
+  // ----- Build the "what we saw" block -----
+  let whatWeSaw;
+  const calls = callSummary?.calls ?? [];
+  if (calls.length === 0) {
+    whatWeSaw = `<div style="color:${C.red};font-weight:600;font-size:14px">No outbound calls placed.</div>
+        <div style="color:${C.textDim};font-size:12px;margin-top:4px">Automated texts don't count as a contact attempt.</div>`;
+  } else {
+    const list = calls
+      .map((c) => {
+        const dur = Math.max(0, Math.round(Number(c.duration) || 0));
+        const isShort = dur < 20;
+        const badge = isShort
+          ? `<span style="color:${C.red};font-weight:600">short</span>`
+          : `<span style="color:${C.green};font-weight:600">qualifying</span>`;
+        const timeStr = c.at
+          ? new Date(c.at).toLocaleTimeString("en-US", {
+              hour: "numeric",
+              minute: "2-digit",
+              timeZone: "America/New_York",
+            })
+          : "—";
+        const status = c.status ? ` · ${c.status}` : "";
+        return `<li style="margin:3px 0">${dur}s — ${timeStr} ET ${badge}${status}</li>`;
+      })
+      .join("");
+    const lead =
+      callSummary.longCalls.length === 0 && callSummary.shortCalls.length === 1
+        ? `<div style="color:${C.red};font-weight:600;font-size:14px">1 short call only — no qualifying attempt yet.</div>`
+        : `<div style="color:${C.red};font-weight:600;font-size:14px">No qualifying call attempt detected.</div>`;
+    whatWeSaw = `${lead}
+        <ul style="margin:8px 0 0 0;padding-left:18px;color:${C.text};font-size:13px">${list}</ul>
+        <div style="color:${C.textDim};font-size:11px;margin-top:8px">A "qualifying attempt" is one call ≥ 20 sec, or two+ short calls.</div>`;
+  }
+
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"></head>
 <body style="margin:0;padding:0;background:${C.redBg};font-family:${FONT};color:${C.text}">
@@ -352,8 +400,8 @@ export function renderLiveAlert({ leadName, phone, leadAddedAt, minutesElapsed }
       <tr>
         <td style="padding:14px 18px;vertical-align:middle;width:54px">${LOGO_SVG.replace('width="36"','width="32"').replace('height="44"','height="40"')}</td>
         <td style="padding:14px 18px 14px 0;vertical-align:middle;color:${C.white}">
-          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;opacity:.85">Live alert</div>
-          <div style="font-size:18px;font-weight:700;line-height:1.2">🔴 New lead not contacted in ${minutesElapsed} min</div>
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;opacity:.85">${tag}</div>
+          <div style="font-size:18px;font-weight:700;line-height:1.2">${headline}</div>
         </td>
       </tr>
     </table>
@@ -362,8 +410,11 @@ export function renderLiveAlert({ leadName, phone, leadAddedAt, minutesElapsed }
         ${row("Lead", `<strong style="font-size:16px">${leadName}</strong>`)}
         ${row("Phone", `<a href="tel:${phone}" style="color:${C.red};font-weight:700;text-decoration:none">${phone}</a>`)}
         ${row("Lead came in", leadAddedAt)}
-        ${row("Elapsed with no call", `<strong style="color:${C.red}">${minutesElapsed} minutes</strong>`)}
+        ${row("Elapsed", `<strong style="color:${C.red}">${minutesElapsed} minutes</strong>`)}
       </table>
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid ${C.border}">
+        ${whatWeSaw}
+      </div>
     </div>
     <p style="color:${C.textDim};font-size:12px;margin-top:14px;text-align:center">Local AC Reports Bot · live alert · <a href="https://controlroom.local-ac.com/alerts" style="color:${C.primary}">view all alerts</a></p>
   </div>
