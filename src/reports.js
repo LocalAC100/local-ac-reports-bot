@@ -180,7 +180,7 @@ async function buildHubstaffSection({ from, to, includeTotals }) {
       for (const f of flags) {
         manipulationFlags.push({
           employee: slot.employee.name,
-          windowLabel: `${fmtTime(DateTime.fromISO(f.windowStart))} – ${fmtTime(DateTime.fromISO(f.windowEnd))}`,
+          windowLabel: `${fmtTime(DateTime.fromISO(f.windowStart))} â ${fmtTime(DateTime.fromISO(f.windowEnd))}`,
           reason: f.reason,
         });
       }
@@ -219,8 +219,8 @@ async function buildHubstaffSection({ from, to, includeTotals }) {
 // Morning until 12 PM, Noon 12-4 PM, Afternoon 4-9 PM (all ET).
 const BUCKETS = [
   { key: "morning", label: "Morning", hours: "until 12 PM", startHour: 0, endHour: 12 },
-  { key: "noon", label: "Noon", hours: "12 PM – 4 PM", startHour: 12, endHour: 16 },
-  { key: "afternoon", label: "Afternoon", hours: "4 PM – 9 PM", startHour: 16, endHour: 21 },
+  { key: "noon", label: "Noon", hours: "12 PM â 4 PM", startHour: 12, endHour: 16 },
+  { key: "afternoon", label: "Afternoon", hours: "4 PM â 9 PM", startHour: 16, endHour: 21 },
 ];
 
 async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
@@ -267,7 +267,7 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
   for (const conv of conversations) {
     const msgs = await ghl.getConversationMessages(conv.id).catch(() => []);
     for (const m of msgs) {
-      if (String(m.type ?? "").toUpperCase() !== "CALL") continue;
+      if (!String(m.type ?? "").toUpperCase().includes("CALL")) continue;
       const userId = m.userId || m.user || m.createdBy;
       const dispatcher = [...byDispatcher.values()].find((d) => d.ghlUserId === userId);
       if (!dispatcher) continue;
@@ -308,7 +308,7 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
       if (updated < from || updated > to) continue;
       if (stage.includes("appointment booked") || stage.includes("over phone sale")) {
         const dispatcher =
-          [...byDispatcher.values()].find((d) => d.ghlUserId === o.assignedTo) || { name: "—" };
+          [...byDispatcher.values()].find((d) => d.ghlUserId === o.assignedTo) || { name: "â" };
         if (dispatcher.bookings != null) dispatcher.bookings += 1;
         appointmentsBooked.push({
           leadName: o.contact?.name || o.name || "(unnamed)",
@@ -334,7 +334,7 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
     if (conv) {
       const msgs = await ghl.getConversationMessages(conv.id).catch(() => []);
       const calls = msgs
-        .filter((m) => String(m.type ?? "").toUpperCase() === "CALL")
+        .filter((m) => String(m.type ?? "").toUpperCase().includes("CALL"))
         .filter((m) => String(m.direction ?? "").toLowerCase() === "outbound");
       if (calls.length) {
         calls.sort((a, b) => new Date(a.dateAdded) - new Date(b.dateAdded));
@@ -418,14 +418,14 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
 }
 
 function formatHourLabel(hh00) {
-  // "08:00" → "8 – 9 AM", "13:00" → "1 – 2 PM"
+  // "08:00" â "8 â 9 AM", "13:00" â "1 â 2 PM"
   const h = parseInt(hh00.split(":")[0], 10);
   const start = h % 12 === 0 ? 12 : h % 12;
   const endH = (h + 1) % 24;
   const end = endH % 12 === 0 ? 12 : endH % 12;
   const ampmStart = h < 12 ? "AM" : "PM";
   const ampmEnd = endH < 12 ? "AM" : "PM";
-  return ampmStart === ampmEnd ? `${start} – ${end} ${ampmStart}` : `${start} ${ampmStart} – ${end} ${ampmEnd}`;
+  return ampmStart === ampmEnd ? `${start} â ${end} ${ampmStart}` : `${start} ${ampmStart} â ${end} ${ampmEnd}`;
 }
 
 // ---------- Top-level orchestrators ----------
@@ -453,7 +453,7 @@ export async function runMorningReport() {
   });
 
   await sendMail({
-    subject: `Local AC — Morning Snapshot (${generatedAt.toFormat("LLL d")})`,
+    subject: `Local AC â Morning Snapshot (${generatedAt.toFormat("LLL d")})`,
     html,
   });
 }
@@ -480,7 +480,7 @@ export async function runEveningReport() {
   });
 
   await sendMail({
-    subject: `Local AC — Full Day Summary (${generatedAt.toFormat("LLL d")})`,
+    subject: `Local AC â Full Day Summary (${generatedAt.toFormat("LLL d")})`,
     html,
   });
 }
@@ -500,7 +500,7 @@ export async function runTestReport() {
   });
 
   await sendMail({
-    subject: `Local AC — TEST report preview (${generatedAt.toFormat("LLL d, h:mm a")})`,
+    subject: `Local AC â TEST report preview (${generatedAt.toFormat("LLL d, h:mm a")})`,
     html,
   });
 }
@@ -529,16 +529,16 @@ function sampleHub() {
 
 function sampleDispatch() {
   const sampleHourly = (base) => [
-    { label: "8 – 9 AM", calls: base + 1, attempts: 2 },
-    { label: "9 – 10 AM", calls: base + 3, attempts: 4 },
-    { label: "10 – 11 AM", calls: base + 2, attempts: 3 },
-    { label: "11 – 12 PM", calls: base + 4, attempts: 1 },
-    { label: "12 – 1 PM", calls: base, attempts: 2 },
-    { label: "1 – 2 PM", calls: base + 1, attempts: 2 },
-    { label: "2 – 3 PM", calls: base + 2, attempts: 1 },
-    { label: "3 – 4 PM", calls: base + 1, attempts: 3 },
-    { label: "4 – 5 PM", calls: base + 2, attempts: 2 },
-    { label: "5 – 6 PM", calls: base + 1, attempts: 1 },
+    { label: "8 â 9 AM", calls: base + 1, attempts: 2 },
+    { label: "9 â 10 AM", calls: base + 3, attempts: 4 },
+    { label: "10 â 11 AM", calls: base + 2, attempts: 3 },
+    { label: "11 â 12 PM", calls: base + 4, attempts: 1 },
+    { label: "12 â 1 PM", calls: base, attempts: 2 },
+    { label: "1 â 2 PM", calls: base + 1, attempts: 2 },
+    { label: "2 â 3 PM", calls: base + 2, attempts: 1 },
+    { label: "3 â 4 PM", calls: base + 1, attempts: 3 },
+    { label: "4 â 5 PM", calls: base + 2, attempts: 2 },
+    { label: "5 â 6 PM", calls: base + 1, attempts: 1 },
   ];
   return {
     byDispatcher: [
@@ -548,8 +548,8 @@ function sampleDispatch() {
     ],
     timeOfDay: [
       { label: "Morning", hours: "until 12 PM", calls: 28, attempts: 14, bookings: 5, verdict: "good", note: "5 bookings" },
-      { label: "Noon", hours: "12 PM – 4 PM", calls: 22, attempts: 12, bookings: 4, verdict: "good", note: "4 bookings" },
-      { label: "Afternoon", hours: "4 PM – 9 PM", calls: 17, attempts: 17, bookings: 3, verdict: "low", note: "More attempts than calls" },
+      { label: "Noon", hours: "12 PM â 4 PM", calls: 22, attempts: 12, bookings: 4, verdict: "good", note: "4 bookings" },
+      { label: "Afternoon", hours: "4 PM â 9 PM", calls: 17, attempts: 17, bookings: 3, verdict: "low", note: "More attempts than calls" },
     ],
     responseTimeAlerts: [
       { leadName: "Maria Sanchez", dispatcher: "Frank", delayMinutes: 1.5, late: false },
