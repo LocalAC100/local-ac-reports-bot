@@ -147,9 +147,18 @@ async function readRange(sheetId, range) {
   return r.data.values || [];
 }
 
+// Some sheet entries use "Name - Address" to disambiguate (e.g.
+// "Jorge Diaz - Benbow Ct"). gp_jobs only has "Name" from Jobber, so
+// strip the trailing " - ..." part before matching.
+function trimCustomerName(name) {
+  if (!name) return null;
+  const split = String(name).split(/\s-\s/);
+  return split[0].trim() || null;
+}
+
 function parseSalesRow(row) {
   return {
-    customerName:           row[SALES.customer] || null,
+    customerName:           trimCustomerName(row[SALES.customer]),
     paymentMethod:          row[SALES.paymentMethod] || null,
     salespersonName:        row[SALES.salesperson] || null,
     feeAmount:              asMoney(row[SALES.fee]),
@@ -168,7 +177,7 @@ function parseSalesRow(row) {
 
 function parseJobsRow(row) {
   return {
-    customerName: row[JOBS.customer] || null,
+    customerName: trimCustomerName(row[JOBS.customer]),
     laborType:    row[JOBS.laborType] || null,
     laborName:    row[JOBS.laborName] || null,
     laborCost:    asMoney(row[JOBS.laborCost]),
