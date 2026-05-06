@@ -67,7 +67,12 @@ export function buildDashboardRouter() {
       callsToday: 0,
       leadsToday: 0,
       alertsToday: Alerts.todayCount(),
-      recentAlerts: Alerts.recent(10),
+      // Pre-format alert timestamps in ET so the Today widget doesn't show raw UTC
+      recentAlerts: Alerts.recent(10).map((a) => ({
+        ...a,
+        fired_at_display: fmtET(a.fired_at),
+        lead_added_display: fmtET(a.lead_added_at),
+      })),
       discrepancies: [],
     };
 
