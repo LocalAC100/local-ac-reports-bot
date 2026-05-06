@@ -395,6 +395,19 @@ export function buildDashboardRouter() {
     res.redirect("/gross-profit");
   });
 
+  // ----- GHL diagnostic probe (admin only) -----
+  // Hits several GHL endpoints and returns raw responses so we can see
+  // exactly why the calls report shows zero. Safe to leave in place.
+  router.get("/admin/ghl-debug", requireAdmin, async (req, res) => {
+    try {
+      const out = await ghl.probe();
+      res.setHeader("Content-Type", "application/json");
+      res.send(JSON.stringify(out, null, 2));
+    } catch (e) {
+      res.status(500).send(`probe failed: ${e.message}`);
+    }
+  });
+
   // ----- Settings/Users (admin only) -----
   router.get("/settings/users", requireAdmin, (req, res) => {
     res.send(
@@ -418,6 +431,7 @@ export function buildDashboardRouter() {
           throw new Error("Email and password (min 8 chars) required.");
         }
         if (Users.findByEmail(email)) throw new Error("Email already exists.");
+        Users.create({ email, name, password, role: role === "admin" ? "admin" : "manager" });
         Users.create({ email, name, password, role: role === "admin" ? "admin" : "manager" });
         req.session.flash = { type: "ok", message: `User ${email} created.` };
       } catch (e) {
