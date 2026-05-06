@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS alerts_history (
   lead_added_at TEXT,
   fired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   minutes_elapsed INTEGER,
-  resolved INTEGER NOT NULL DEFAULT 0
+  resolved INTEGER NOT NULL DEFAULT 0,
+  level INTEGER NOT NULL DEFAULT 1 -- 1 = warning (3 min), 2 = escalation (10 min)
 );
 
 CREATE TABLE IF NOT EXISTS reports_history (
@@ -80,6 +81,16 @@ CREATE INDEX IF NOT EXISTS idx_alerts_fired_at ON alerts_history(fired_at);
 CREATE INDEX IF NOT EXISTS idx_reports_generated_at ON reports_history(generated_at);
 CREATE INDEX IF NOT EXISTS idx_chat_user_created ON chat_history(user_id, created_at);
 `);
+
+// ---------- Idempotent migrations (for DBs created before a column existed) ----------
+function addColumnIfMissing(table, column, definition) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    console.log(`[db] migrated: added ${table}.${column}`);
+  }
+}
+addColumnIfMissing("alerts_history", "level", "INTEGER NOT NULL DEFAULT 1");
 
 // ---------- Seed admin if no users exist ----------
 const userCount = db.prepare("SELECT COUNT(*) AS n FROM users").get().n;
@@ -139,9 +150,16 @@ export const Alerts = {
   log: (a) =>
     db
       .prepare(
-        `INSERT INTO alerts_history (contact_id, contact_name, phone, lead_added_at, minutes_elapsed) VALUES (?, ?, ?, ?, ?)`
+        `INSERT INTO alerts_history (contact_id, contact_name, phone, lead_added_at, minutes_elapsed, level) VALUES (?, ?, ?, ?, ?, ?)`
       )
-      .run(a.contactId, a.contactName, a.phone, a.leadAddedAt, a.minutesElapsed),
+      .run(
+        a.contactId,
+        a.contactName,
+        a.phone,
+        a.leadAddedAt,
+        a.minutesElapsed,
+        a.level ?? 1
+      ),
   recent: (limit = 50) =>
     db
       .prepare("SELECT * FROM alerts_history ORDER BY fired_at DESC LIMIT ?")
