@@ -3,7 +3,7 @@
 // One row per HVAC job. Data accumulates from three sources:
 //   1. Jobber invoice  (creates the row, anchors customer + amount paid)
 //   2. Chris's Google Sheet (labor, commissions, permits, other expenses)
-//   3. Supplier invoice emails ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ Gemaire, Goodman, Home Depot (equipment + materials)
+//   3. Supplier invoice emails ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ Gemaire, Goodman, Home Depot (equipment + materials)
 // Once enough data is in place, GP $ and GP % are computed.
 //
 // The DB is the source of truth. A separate mirror writer (src/sheets.js)
@@ -371,8 +371,11 @@ export const GpJobs = {
     set("sales_manager_fee", sheet.salesManagerFee);
     if (sheet.permitRequired != null) set("permit_required", sheet.permitRequired ? 1 : 0);
     set("permit_fee", sheet.permitFee);
+    set("payment_method", sheet.paymentMethod);
+    set("fee_amount", sheet.feeAmount);
+    set("total_other_expenses", sheet.totalOtherExpenses);
 
-    // Labor entries ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ replace existing 'labor' kind from sheet to avoid duplicates
+    // Labor entries ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ replace existing 'labor' kind from sheet to avoid duplicates
     if (Array.isArray(sheet.labor) && sheet.labor.length) {
       db.prepare("DELETE FROM gp_line_items WHERE job_id = ? AND kind = 'labor' AND source = 'sheet'").run(jobId);
       const ins = db.prepare(
@@ -411,6 +414,29 @@ export const GpJobs = {
     ).run(sheet.sheetRowRef || null, jobId);
 
     applyComputed(jobId);
+  },
+
+  // Apply labor items from Chris's JOBS tab. Replaces any existing labor lines
+  // and updates total_labor_cost. The JOBS tab can have multiple rows per
+  // customer; sheets.js groups them and passes them here as one apply call.
+  applyLaborItems(jobId, { sheetRowRef = null, totalLaborCost, items = [] }) {
+    const job = db.prepare("SELECT id FROM gp_jobs WHERE id = ?").get(jobId);
+    if (!job) throw new Error(`gp_jobs ${jobId} not found`);
+    db.prepare("DELETE FROM gp_line_items WHERE job_id = ? AND kind = 'labor'").run(jobId);
+    const insLine = db.prepare(`INSERT INTO gp_line_items
+      (job_id, kind, position, description, labor_name, labor_type, amount, source)
+      VALUES (?, 'labor', ?, ?, ?, ?, ?, 'sheet')`);
+    items.forEach((it, idx) => {
+      insLine.run(jobId, idx + 1, it.laborName || null, it.laborName || null, it.laborType || null, it.amount ?? null);
+    });
+    db.prepare(`UPDATE gp_jobs SET
+        total_labor_cost = ?,
+        sheet_matched_at = CURRENT_TIMESTAMP,
+        sheet_row_ref = COALESCE(?, sheet_row_ref),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?`).run(totalLaborCost ?? 0, sheetRowRef, jobId);
+    GpJobs._recomputeProfit(jobId);
+    return jobId;
   },
 
   // Part 3: a supplier invoice was parsed and matched to this job.
@@ -453,7 +479,7 @@ export const GpJobs = {
       .all(...params, limit, offset);
   },
 
-  // Count rows matching the same filter ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ exposed so the page can show
+  // Count rows matching the same filter ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ exposed so the page can show
   // `N invoices` for the current view (compare against Jobber).
   count({ from = null, to = null } = {}) {
     const where = [];
@@ -486,13 +512,33 @@ export const GpJobs = {
     return db.prepare(`SELECT COALESCE(SUM(invoice_total), 0) AS s FROM gp_jobs ${whereSql}`).get(...params).s;
   },
 
+  // Recompute gross_profit_dollars + gross_profit_percent from current cost
+  // fields. Called after any source updates the row.
+  _recomputeProfit(jobId) {
+    const job = db.prepare("SELECT * FROM gp_jobs WHERE id = ?").get(jobId);
+    if (!job) return;
+    const sales = Number(job.amount_paid || 0);
+    const equipMat = Number(job.equipment_materials_total || 0);
+    const labor = Number(job.total_labor_cost || 0);
+    const fee = Number(job.fee_amount || 0);
+    const commission = Number(job.sales_commission_amount || 0);
+    const mgrFee = Number(job.sales_manager_fee || 0);
+    const permitFee = Number(job.permit_fee || 0);
+    const otherExp = Number(job.total_other_expenses || 0);
+    const totalCost = equipMat + labor + fee + commission + mgrFee + permitFee + otherExp;
+    const gpDollars = sales - totalCost;
+    const gpPercent = sales > 0 ? (gpDollars / sales) * 100 : null;
+    db.prepare(`UPDATE gp_jobs SET gross_profit_dollars = ?, gross_profit_percent = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .run(gpDollars, gpPercent, jobId);
+  },
+
   // Returns counts and totals for the report header. Differentiates between:
-  //   total       Ã¢ÂÂ every invoice in the date range (matches the table)
-  //   paid        Ã¢ÂÂ invoices with amount_paid > 0
-  //   info_complete Ã¢ÂÂ invoices that have data from all 3 sources
+  //   total       ÃÂ¢ÃÂÃÂ every invoice in the date range (matches the table)
+  //   paid        ÃÂ¢ÃÂÃÂ invoices with amount_paid > 0
+  //   info_complete ÃÂ¢ÃÂÃÂ invoices that have data from all 3 sources
   //                  (Jobber amount_paid + supplier equip+mat + sheet labor)
-  //   qualified   Ã¢ÂÂ paid AND info_complete (counts toward GP totals)
-  // Only "qualified" rows roll up into total_sales / gp_dollars / gp_percent Ã¢ÂÂ
+  //   qualified   ÃÂ¢ÃÂÃÂ paid AND info_complete (counts toward GP totals)
+  // Only "qualified" rows roll up into total_sales / gp_dollars / gp_percent ÃÂ¢ÃÂÃÂ
   // because a row missing labor cost would compute as 100% margin, which
   // misleads. Those totals match what you'd get summing the rows by hand.
   qualifiedSummary({ from = null, to = null } = {}) {
