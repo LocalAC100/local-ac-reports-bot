@@ -48,8 +48,11 @@ export async function searchContacts({ from, to, limit = 100 }) {
     locationId: config.ghl.locationId,
     pageLimit: limit,
     filters: [
-      { field: "dateAdded", operator: "gte", value: from },
-      { field: "dateAdded", operator: "lte", value: to },
+      {
+        field: "dateAdded",
+        operator: "between",
+        value: [from, to],
+      },
     ],
   });
   return r.data?.contacts ?? [];
@@ -70,16 +73,73 @@ export async function searchConversations({ from, to, limit = 100 }) {
   // conversations whose MOST RECENT message is outbound, which silently drops any
   // conversation where the lead replied last (very common). For both reports and
   // alerts we need the full conversation set in the window.
+  //
+  // Important: tested empirically May 6 2026 — startDate/endDate parameters here
+  // filter on conversation CREATION date, not last_message_date. So passing
+  // today's window only returned 2 conversations (the 2 leads CREATED today),
+  // missing 69 other conversations that had activity today from older leads.
+  // Use listActiveConversations() instead for "what was worked on today".
+  // Keeping this single-call signature for callers that just want the bare search.
   const r = await http.get("/conversations/search", {
     params: {
       locationId: config.ghl.locationId,
       limit,
-      // Conversation search supports dates via lastMessageDate filter
       startDate: new Date(from).getTime(),
       endDate: new Date(to).getTime(),
     },
   });
   return r.data?.conversations ?? [];
+}
+
+// Pull every conversation whose LAST MESSAGE falls in [from, to].
+// Pages through GHL by descending lastMessageDate, stopping once the batch
+// dips below the `from` floor. This is the function dispatcher reports + the
+// per-contact alert lookup should use — it surfaces conversations from older
+// leads that had activity today, not just brand-new leads.
+export async function listActiveConversations({ from, to, maxPages = 10 }) {
+  const fromMs = new Date(from).getTime();
+  const toMs = new Date(to).getTime();
+  let cursor = toMs + 1;
+  const all = [];
+  for (let i = 0; i < maxPages; i++) {
+    const r = await http.get("/conversations/search", {
+      params: {
+        locationId: config.ghl.locationId,
+        limit: 100,
+        sortBy: "last_message_date",
+        sort: "desc",
+        lastMessageDate: cursor,
+      },
+    });
+    const batch = r.data?.conversations ?? [];
+    if (batch.length === 0) break;
+    const inWindow = batch.filter((c) => {
+      const t = new Date(c.lastMessageDate || 0).getTime();
+      return t >= fromMs && t <= toMs;
+    });
+    all.push(...inWindow);
+    // Stop paginating when this batch goes past our floor
+    const oldestInBatch = new Date(
+      batch[batch.length - 1].lastMessageDate || 0
+    ).getTime();
+    if (oldestInBatch < fromMs) break;
+    cursor = oldestInBatch;
+  }
+  return all;
+}
+
+// Notes on a specific contact. Used to detect "Vonage call" notes —
+// dispatchers add a note that starts with "Called" any time they call via
+// Vonage (since Vonage doesn't expose an API on regular accounts). Treats
+// those notes as call records for both alerts and reports.
+export async function getContactNotes(contactId) {
+  try {
+    const r = await http.get(`/contacts/${contactId}/notes`);
+    return r.data?.notes ?? [];
+  } catch (e) {
+    // Some accounts don't have notes scope — fail soft, no notes returned.
+    return [];
+  }
 }
 
 export async function getConversationMessages(conversationId) {
