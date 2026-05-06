@@ -83,26 +83,42 @@ export function buildDashboardRouter() {
         })
         .map((u) => u.name || u.email);
 
-      // Discrepancies: scheduled today but no recent activity
+      // Discrepancies: only flag people whose shift is CURRENTLY in progress
+      // but who have no recent Hubstaff activity. Skip anyone whose shift
+      // hasn't started yet OR has already ended — those aren't discrepancies.
+      const nowDt = today; // Luxon DateTime in ET
       for (const e of EMPLOYEES) {
         if (!e.hubstaffEmail) continue;
         const shift = expectedShiftFor(e, today);
         if (!shift) continue;
+        // Parse shift start/end as Luxon DateTimes for today
+        const [sh, sm] = shift.start.split(":").map(Number);
+        const [eh, em] = shift.end.split(":").map(Number);
+        const shiftStart = nowDt.set({ hour: sh, minute: sm, second: 0, millisecond: 0 });
+        const shiftEnd = nowDt.set({ hour: eh, minute: em, second: 0, millisecond: 0 });
+        // Skip if shift hasn't started or already ended
+        if (nowDt < shiftStart || nowDt > shiftEnd) continue;
         const hu = orgUsers.find(
           (u) => (u.email || "").toLowerCase() === e.hubstaffEmail.toLowerCase()
         );
         if (!hu) continue;
         const lastT = new Date(hu.last_activity || 0).getTime();
         if (lastT < Date.now() - 60 * 60 * 1000) {
+          // Format times nicely (12-hour AM/PM)
+          const fmtHHMM = (hhmm) => {
+            const [h, m] = hhmm.split(":").map(Number);
+            const ampm = h < 12 ? "AM" : "PM";
+            const h12 = h % 12 === 0 ? 12 : h % 12;
+            return `${h12}:${String(m).padStart(2, "0")} ${ampm}`;
+          };
+          const lastActivityDisplay = hu.last_activity
+            ? DateTime.fromISO(hu.last_activity)
+                .setZone(TZ)
+                .toFormat("LLL d, h:mm a") + " ET"
+            : "never";
           snapshot.discrepancies.push({
             employee: e.name,
-            detail: `scheduled ${shift.start}, last activity ${
-              hu.last_activity
-                ? new Date(hu.last_activity).toLocaleString("en-US", {
-                    timeZone: "America/New_York",
-                  })
-                : "never"
-            }`,
+            detail: `scheduled ${fmtHHMM(shift.start)}–${fmtHHMM(shift.end)}, last activity ${lastActivityDisplay}`,
           });
         }
       }
