@@ -41,7 +41,7 @@ export function layout({ title, body, user, flash, activeNav = "" }) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${escape(title)} ÃÂÃÂÃÂÃÂ· Control Room</title>
+  <title>${escape(title)} ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ· Control Room</title>
   <link rel="icon" href="${FAVICON_DATA_URL}">
   <link rel="stylesheet" href="/styles.css">
 </head>
@@ -81,7 +81,7 @@ function renderNav({ user, activeNav }) {
     <a href="/logout" class="logout-link">Sign out</a>
   </div>
 </header>
-<button class="mobile-nav-toggle" onclick="document.querySelector('.primary-nav').classList.toggle('open')" aria-label="Open menu">ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ°</button>`;
+<button class="mobile-nav-toggle" onclick="document.querySelector('.primary-nav').classList.toggle('open')" aria-label="Open menu">ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ°</button>`;
 }
 
 // ---------- Login ----------
@@ -126,7 +126,7 @@ export function todayPage({ user, snapshot }) {
   <div class="kpi-card">
     <div class="kpi-label">Active right now</div>
     <div class="kpi-value">${activeNow.length}</div>
-    <div class="kpi-sub">${activeNow.map(escape).join(" ÃÂÃÂÃÂÃÂ· ") || "ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ"}</div>
+    <div class="kpi-sub">${activeNow.map(escape).join(" ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ· ") || "ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ"}</div>
   </div>
   <div class="kpi-card">
     <div class="kpi-label">Calls today</div>
@@ -148,15 +148,15 @@ export function todayPage({ user, snapshot }) {
 <section class="panel">
   <h2>Schedule discrepancies</h2>
   ${discrepancies.length === 0
-    ? `<div class="empty-good">ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ Everyone scheduled today is clocked in. No issues.</div>`
-    : `<ul class="alert-list">${discrepancies.map(d => `<li><strong>${escape(d.employee)}</strong> ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ ${escape(d.detail)}</li>`).join("")}</ul>`}
+    ? `<div class="empty-good">ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ Everyone scheduled today is clocked in. No issues.</div>`
+    : `<ul class="alert-list">${discrepancies.map(d => `<li><strong>${escape(d.employee)}</strong> ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ ${escape(d.detail)}</li>`).join("")}</ul>`}
 </section>
 
 <section class="panel">
   <h2>Recent live alerts</h2>
   ${recentAlerts.length === 0
     ? `<div class="empty-good">No live alerts in the last 7 days.</div>`
-    : `<ul class="alert-list">${recentAlerts.map(a => `<li><span class="badge badge-red">ÃÂÃÂ°ÃÂÃÂÃÂÃÂÃÂÃÂ´ ${a.minutes_elapsed}m</span> <strong>${escape(a.contact_name || "(unnamed)")}</strong> ÃÂÃÂÃÂÃÂ· ${escape(a.phone || "")} ÃÂÃÂÃÂÃÂ· ${escape(a.fired_at)}</li>`).join("")}</ul>`}
+    : `<ul class="alert-list">${recentAlerts.map(a => `<li><span class="badge badge-red">ÃÂÃÂÃÂÃÂ°ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ´ ${a.minutes_elapsed}m</span> <strong>${escape(a.contact_name || "(unnamed)")}</strong> ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ· ${escape(a.phone || "")} ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ· ${escape(a.fired_at)}</li>`).join("")}</ul>`}
 </section>`,
   });
 }
@@ -185,9 +185,9 @@ export function askPage({ user, history = [], hasApiKey }) {
     body: `
 <div class="page-head">
   <h1>Ask Claude</h1>
-  <span class="page-sub">Ask anything about your business ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ Claude has access to Hubstaff, GoHighLevel, and Jobber.</span>
+  <span class="page-sub">Ask anything about your business ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ Claude has access to Hubstaff, GoHighLevel, and Jobber.</span>
 </div>
-${!hasApiKey ? `<div class="banner-warn">ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ  Anthropic API key not configured yet. Add <code>ANTHROPIC_API_KEY</code> in Render's Environment tab to activate.</div>` : ""}
+${!hasApiKey ? `<div class="banner-warn">ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ  Anthropic API key not configured yet. Add <code>ANTHROPIC_API_KEY</code> in Render's Environment tab to activate.</div>` : ""}
 <div class="chat-wrap">
   <div class="chat-history" id="chatHistory">
     ${messagesHtml || `<div class="chat-empty">
@@ -215,7 +215,7 @@ form?.addEventListener('submit', async (e) => {
   if (!q) return;
   ta.value = '';
   history.insertAdjacentHTML('beforeend', '<div class="msg msg-user"><div class="msg-role">You</div><div class="msg-body">' + q.replace(/</g,'&lt;').replace(/\\n/g,'<br>') + '</div></div>');
-  history.insertAdjacentHTML('beforeend', '<div class="msg msg-assistant pending"><div class="msg-role">Claude</div><div class="msg-body">ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ¦thinkingÃÂÃÂ¢ÃÂÃÂÃÂÃÂ¦</div></div>');
+  history.insertAdjacentHTML('beforeend', '<div class="msg msg-assistant pending"><div class="msg-role">Claude</div><div class="msg-body">ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¦thinkingÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¦</div></div>');
   history.scrollTop = history.scrollHeight;
   const r = await fetch('/api/ask', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ question: q }) });
   const d = await r.json();
@@ -242,7 +242,7 @@ export function usersPage({ user, users, flash }) {
       <td>${escape(u.name || "")}</td>
       <td><span class="badge badge-${u.role}">${escape(u.role)}</span></td>
       <td class="muted">${escape((u.created_at || "").slice(0, 10))}</td>
-      <td class="muted">${escape((u.last_login_at || "ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ").slice(0, 16))}</td>
+      <td class="muted">${escape((u.last_login_at || "ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ").slice(0, 16))}</td>
     </tr>`).join("")}</tbody>
   </table>
 </section>
@@ -266,15 +266,15 @@ export function usersPage({ user, users, flash }) {
 
 // ---------- Gross Profit ----------
 function money(v) {
-  if (v == null || v === "") return "ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ";
+  if (v == null || v === "") return "ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ";
   const n = parseFloat(v);
   if (!Number.isFinite(n)) return String(v);
   return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 function pct(v) {
-  if (v == null || v === "") return "ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ";
+  if (v == null || v === "") return "ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ";
   const n = parseFloat(v);
-  if (!Number.isFinite(n)) return "ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ";
+  if (!Number.isFinite(n)) return "ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ";
   return n.toFixed(1) + "%";
 }
 function gpClass(p) {
@@ -301,7 +301,7 @@ export function grossProfitPage({ user, jobs, unmatched, inventory, status, flas
   const fmtMoney = (n) =>
     "$" + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 });
   const fmtPct = (n) =>
-    n == null ? "Ã¢ÂÂ" : Number(n).toFixed(1) + "%";
+    n == null ? "ÃÂ¢ÃÂÃÂ" : Number(n).toFixed(1) + "%";
   // Summary tiles. If summary is null (older callers), fall back to zeros.
   const s = summary || { qualified: 0, qualified_sales: 0, qualified_gp_dollars: 0, qualified_gp_percent: null, paid: 0, info_complete: 0, total: totalCount };
   const summaryHtml = `
@@ -324,16 +324,16 @@ export function grossProfitPage({ user, jobs, unmatched, inventory, status, flas
     <div style="padding:12px 14px;background:#fff;border:1px solid #e5e9f0;border-radius:8px">
       <div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px">Gross profit $</div>
       <div style="font-size:24px;font-weight:600;color:${s.qualified_gp_dollars >= 0 ? '#147a3e' : '#b3261e'}">${fmtMoney(s.qualified_gp_dollars)}</div>
-      <div class="muted" style="font-size:11px;margin-top:2px">sales Ã¢ÂÂ costs (qualified rows)</div>
+      <div class="muted" style="font-size:11px;margin-top:2px">sales ÃÂ¢ÃÂÃÂ costs (qualified rows)</div>
     </div>
     <div style="padding:12px 14px;background:#fff;border:1px solid #e5e9f0;border-radius:8px">
       <div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px">Gross profit %</div>
       <div style="font-size:24px;font-weight:600;color:${(s.qualified_gp_percent || 0) >= 0 ? '#147a3e' : '#b3261e'}">${fmtPct(s.qualified_gp_percent)}</div>
-      <div class="muted" style="font-size:11px;margin-top:2px">GP $ ÃÂ· sales</div>
+      <div class="muted" style="font-size:11px;margin-top:2px">GP $ ÃÂÃÂ· sales</div>
     </div>
   </div>
   <div class="muted" style="font-size:12px;margin-top:10px">
-    Coverage in this range: <strong>${s.paid.toLocaleString()}</strong> paid Ã¢ÂÂ¢ <strong>${s.info_complete.toLocaleString()}</strong> info complete Ã¢ÂÂ¢ <strong>${s.qualified.toLocaleString()}</strong> qualified
+    Coverage in this range: <strong>${s.paid.toLocaleString()}</strong> paid ÃÂ¢ÃÂÃÂ¢ <strong>${s.info_complete.toLocaleString()}</strong> info complete ÃÂ¢ÃÂÃÂ¢ <strong>${s.qualified.toLocaleString()}</strong> qualified
   </div>
 </section>`;
   const preset = filter.preset || "all";
@@ -354,7 +354,7 @@ export function grossProfitPage({ user, jobs, unmatched, inventory, status, flas
     <div class="muted" style="font-size:13px">
       Showing <strong>${totalCount.toLocaleString()}</strong> invoice${totalCount === 1 ? "" : "s"}
       ${preset === "all" ? "" : ` of ${grandTotalCount.toLocaleString()} total`}
-      ÃÂ¢ÃÂÃÂ¢ Total paid: <strong>${Number(totalPaid || 0).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}</strong>
+      ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ¢ Total paid: <strong>${Number(totalPaid || 0).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}</strong>
     </div>
   </div>
   <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">
@@ -383,15 +383,34 @@ export function grossProfitPage({ user, jobs, unmatched, inventory, status, flas
       j.salesperson_name || j.permit_required != null || j.sales_commission_amount != null ? "Sheet" : null,
       j.equipment_materials_total != null ? "Suppliers" : null,
     ].filter(Boolean);
+    const dashIfNull = (v) => (v == null || v === "") ? '<span class="muted">-</span>' : v;
+    const moneyOrDash = (v) => v == null ? '<span class="muted">-</span>' : money(v);
+    const pctOrDash = (v) => v == null ? '<span class="muted">-</span>' : (Number(v).toFixed(1) + "%");
+    const yesNoBadge = (v) => v == null ? '<span class="muted">-</span>' : (v ? yesBadge : noBadge);
+    const issuedDate = j.jobber_invoice_issued_at ? String(j.jobber_invoice_issued_at).slice(0, 10) : null;
     return `<tr>
-      <td><a href="/gross-profit/${j.id}"><strong>${escape(j.customer_name || "(no name)")}</strong></a><br>
+      <td style="position:sticky;left:0;background:#fff;z-index:1;min-width:240px"><a href="/gross-profit/${j.id}"><strong>${escape(j.customer_name || "(no name)")}</strong></a><br>
         <span class="muted">${escape(j.address || "")}${j.city ? ", " + escape(j.city) : ""}</span></td>
-      <td>${escape(j.jobber_invoice_number || "ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ")}</td>
-      <td>${money(j.amount_paid)}</td>
-      <td>${money(j.equipment_materials_total)}</td>
-      <td>${money(j.total_labor_cost)}</td>
-      <td><strong>${money(j.gross_profit_dollars)}</strong></td>
-      <td><span class="gp-pct ${gpClass(j.gross_profit_percent)}">${pct(j.gross_profit_percent)}</span></td>
+      <td>${escape(j.jobber_invoice_number || "-")}</td>
+      <td class="muted" style="white-space:nowrap">${dashIfNull(issuedDate)}</td>
+      <td>${moneyOrDash(j.amount_paid)}</td>
+      <td>${dashIfNull(escape(j.payment_method || ""))}</td>
+      <td>${moneyOrDash(j.fee_amount)}</td>
+      <td>${dashIfNull(escape(j.fee_type || ""))}</td>
+      <td>${dashIfNull(escape(j.salesperson_name || ""))}</td>
+      <td>${moneyOrDash(j.sales_commission_amount)}</td>
+      <td>${j.sales_commission_rate == null ? '<span class="muted">-</span>' : (Number(j.sales_commission_rate).toFixed(1) + "%")}</td>
+      <td>${dashIfNull(escape(j.sales_manager_name || ""))}</td>
+      <td>${moneyOrDash(j.sales_manager_fee)}</td>
+      <td>${yesNoBadge(j.permit_required)}</td>
+      <td>${moneyOrDash(j.permit_fee)}</td>
+      <td>${moneyOrDash(j.equipment_cost)}</td>
+      <td>${moneyOrDash(j.materials_cost)}</td>
+      <td>${moneyOrDash(j.equipment_materials_total)}</td>
+      <td>${moneyOrDash(j.total_labor_cost)}</td>
+      <td>${moneyOrDash(j.total_other_expenses)}</td>
+      <td><strong>${moneyOrDash(j.gross_profit_dollars)}</strong></td>
+      <td><span class="gp-pct ${gpClass(j.gross_profit_percent)}">${j.gross_profit_percent == null ? '-' : pct(j.gross_profit_percent)}</span></td>
       <td>${isInfoComplete(j) ? yesBadge : noBadge}</td>
       <td>${isPaid(j) ? yesBadge : noBadge}</td>
       <td class="muted">${completeness.map(c => `<span class="badge badge-${c.toLowerCase()}">${escape(c)}</span>`).join(" ")}</td>
@@ -399,27 +418,51 @@ export function grossProfitPage({ user, jobs, unmatched, inventory, status, flas
   }).join("");
 
   const tableHtml = empty
-    ? `<div class="empty-good">No jobs yet ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ waiting for first Jobber invoice. Open the <a href="/gross-profit/setup">setup checklist</a> to wire up the integrations.</div>`
-    : `<table class="data-table">
+    ? `<div class="empty-good">No jobs yet. Backfill 2026 invoices or wait for the next Jobber poll.</div>`
+    : `<div style="overflow-x:auto;border:1px solid #e5e9f0;border-radius:8px">
+      <table class="data-table" style="min-width:2200px">
         <thead><tr>
-          <th>Customer / Address</th><th>Invoice #</th><th>Amount paid</th>
-          <th>Equip + Mat</th><th>Labor</th><th>GP $</th><th>GP %</th><th>Info â</th><th>Paid â</th><th>Sources</th>
+          <th style="position:sticky;left:0;background:#fafbfd;z-index:2;min-width:240px">Customer / Address</th>
+          <th>Invoice #</th>
+          <th>Issued</th>
+          <th>Amount paid</th>
+          <th>Pay method</th>
+          <th>Fee $</th>
+          <th>Fee type</th>
+          <th>Salesperson</th>
+          <th>Sales commission $</th>
+          <th>Sales commission %</th>
+          <th>Sales manager</th>
+          <th>Sales mgr fee</th>
+          <th>Permit?</th>
+          <th>Permit fee</th>
+          <th>Equipment $</th>
+          <th>Materials $</th>
+          <th>Equip + Mat</th>
+          <th>Labor $</th>
+          <th>Other expenses</th>
+          <th>GP $</th>
+          <th>GP %</th>
+          <th>Info</th>
+          <th>Paid</th>
+          <th>Sources</th>
         </tr></thead>
         <tbody>${rows}</tbody>
-      </table>`;
+      </table>
+    </div>`;
 
   const unmatchedHtml = unmatched.length === 0 ? "" : `
     <section class="panel panel-warn">
-      <h2>ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ  Unmatched Invoices ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ Review Manually</h2>
+      <h2>ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ  Unmatched Invoices ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ Review Manually</h2>
       <table class="data-table">
         <thead><tr><th>Supplier</th><th>PO / customer name</th><th>Total</th><th>Attachment</th><th>Received</th><th></th></tr></thead>
         <tbody>${unmatched.map(u => `<tr>
           <td>${escape(u.supplier)}</td>
-          <td>${escape(u.po_name || "ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ")}</td>
+          <td>${escape(u.po_name || "ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ")}</td>
           <td>${money(u.total_amount)}</td>
-          <td>${u.att_id ? `<a href="/gross-profit/attachment/${u.att_id}">${escape(u.filename || "PDF")}</a>` : "ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ"}</td>
+          <td>${u.att_id ? `<a href="/gross-profit/attachment/${u.att_id}">${escape(u.filename || "PDF")}</a>` : "ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ"}</td>
           <td class="muted">${escape((u.created_at || "").slice(0,16))}</td>
-          <td><a href="/gross-profit/unmatched/${u.id}/resolve">Resolve ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ</a></td>
+          <td><a href="/gross-profit/unmatched/${u.id}/resolve">Resolve ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ</a></td>
         </tr>`).join("")}</tbody>
       </table>
     </section>`;
@@ -432,26 +475,26 @@ export function grossProfitPage({ user, jobs, unmatched, inventory, status, flas
         <tbody>${inventory.map(i => `<tr>
           <td>${escape(i.supplier)}</td>
           <td>${money(i.total_amount)}</td>
-          <td>${escape(i.filename || "ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ")}</td>
+          <td>${escape(i.filename || "ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ")}</td>
           <td class="muted">${escape(i.notes || "")}</td>
           <td class="muted">${escape((i.created_at || "").slice(0,16))}</td>
         </tr>`).join("")}</tbody>
       </table>
     </section>`;
 
-  // Status panel ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ shows whether each connector is wired up
+  // Status panel ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ shows whether each connector is wired up
   const statusItem = (label, ok, hint) =>
-    `<li><span class="status-dot ${ok ? "ok" : "off"}"></span> <strong>${escape(label)}</strong> ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ ${ok ? "ready" : escape(hint || "not configured")}</li>`;
+    `<li><span class="status-dot ${ok ? "ok" : "off"}"></span> <strong>${escape(label)}</strong> ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ ${ok ? "ready" : escape(hint || "not configured")}</li>`;
 
   const yr = new Date().getFullYear();
   const setupHtml = `
     <section class="panel">
       <h2>Integration status</h2>
       <ul class="status-list">
-        ${statusItem("Jobber sync (invoices ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ rows)", status.jobber, "Set JOBBER_CLIENT_ID, CLIENT_SECRET, ACCESS_TOKEN, REFRESH_TOKEN")}
-        ${statusItem("Google Sheets (Chris's sheet ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ rows)", status.sheets && status.chrisSheetId, "Set GOOGLE_SA_JSON + CHRIS_SHEET_ID")}
-        ${statusItem("Mirror sheet (rows ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ Google Sheet)", status.sheets && status.mirrorSheetId, "Set GOOGLE_SA_JSON + MIRROR_SHEET_ID")}
-        ${statusItem("Gmail watcher (supplier invoices ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ rows)", status.gmail, "Set GOOGLE_SA_JSON + GMAIL_DELEGATED_USER (with domain-wide delegation)")}
+        ${statusItem("Jobber sync (invoices ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ rows)", status.jobber, "Set JOBBER_CLIENT_ID, CLIENT_SECRET, ACCESS_TOKEN, REFRESH_TOKEN")}
+        ${statusItem("Google Sheets (Chris's sheet ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ rows)", status.sheets && status.chrisSheetId, "Set GOOGLE_SA_JSON + CHRIS_SHEET_ID")}
+        ${statusItem("Mirror sheet (rows ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ Google Sheet)", status.sheets && status.mirrorSheetId, "Set GOOGLE_SA_JSON + MIRROR_SHEET_ID")}
+        ${statusItem("Gmail watcher (supplier invoices ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ rows)", status.gmail, "Set GOOGLE_SA_JSON + GMAIL_DELEGATED_USER (with domain-wide delegation)")}
       </ul>
       ${user.role === "admin" ? `
       <div class="action-row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
@@ -491,21 +534,21 @@ export function grossProfitJobPage({ user, job }) {
     return placeholderPage({ user, title: "Job not found", navKey: "gross-profit", body: "<p>That job doesn't exist.</p>" });
   }
   const li = (kind) => job.line_items.filter(x => x.kind === kind);
-  const itemsHtml = (rows) => rows.length === 0 ? `<p class="muted">ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ</p>` : `<table class="data-table"><tbody>${rows.map(r => `<tr><td>${escape(r.description || r.labor_name || "")}</td><td>${escape(r.labor_type || "")}</td><td class="num">${money(r.amount)}</td><td class="muted">${escape(r.source || "")}</td></tr>`).join("")}</tbody></table>`;
+  const itemsHtml = (rows) => rows.length === 0 ? `<p class="muted">ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ</p>` : `<table class="data-table"><tbody>${rows.map(r => `<tr><td>${escape(r.description || r.labor_name || "")}</td><td>${escape(r.labor_type || "")}</td><td class="num">${money(r.amount)}</td><td class="muted">${escape(r.source || "")}</td></tr>`).join("")}</tbody></table>`;
 
-  const att = job.attachments.map(a => `<li><a href="/gross-profit/attachment/${a.id}">${escape(a.filename)}</a> <span class="muted">${escape(a.source)}${a.supplier ? " ÃÂÃÂÃÂÃÂ· " + escape(a.supplier) : ""}</span></li>`).join("");
+  const att = job.attachments.map(a => `<li><a href="/gross-profit/attachment/${a.id}">${escape(a.filename)}</a> <span class="muted">${escape(a.source)}${a.supplier ? " ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ· " + escape(a.supplier) : ""}</span></li>`).join("");
 
   return layout({
     title: `Job ${job.jobber_invoice_number || job.id}`, user, activeNav: "gross-profit",
     body: `
 <div class="page-head">
   <h1>${escape(job.customer_name || "(no name)")}</h1>
-  <span class="page-sub">Invoice ${escape(job.jobber_invoice_number || "ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ")} ÃÂÃÂÃÂÃÂ· ${escape(job.address || "")}${job.city ? ", " + escape(job.city) : ""} ${escape(job.zip || "")}</span>
+  <span class="page-sub">Invoice ${escape(job.jobber_invoice_number || "ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ")} ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ· ${escape(job.address || "")}${job.city ? ", " + escape(job.city) : ""} ${escape(job.zip || "")}</span>
 </div>
 <div class="kpi-grid">
-  <div class="kpi-card"><div class="kpi-label">Amount paid</div><div class="kpi-value">${money(job.amount_paid)}</div><div class="kpi-sub">${escape(job.payment_method || "ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ")}</div></div>
-  <div class="kpi-card"><div class="kpi-label">Equip + Materials</div><div class="kpi-value">${money(job.equipment_materials_total)}</div><div class="kpi-sub">Equip ${money(job.equipment_cost)} ÃÂÃÂÃÂÃÂ· Mat ${money(job.materials_cost)}</div></div>
-  <div class="kpi-card"><div class="kpi-label">Labor + Other</div><div class="kpi-value">${money((job.total_labor_cost || 0) + (job.total_other_expenses || 0))}</div><div class="kpi-sub">Labor ${money(job.total_labor_cost)} ÃÂÃÂÃÂÃÂ· Other ${money(job.total_other_expenses)}</div></div>
+  <div class="kpi-card"><div class="kpi-label">Amount paid</div><div class="kpi-value">${money(job.amount_paid)}</div><div class="kpi-sub">${escape(job.payment_method || "ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ")}</div></div>
+  <div class="kpi-card"><div class="kpi-label">Equip + Materials</div><div class="kpi-value">${money(job.equipment_materials_total)}</div><div class="kpi-sub">Equip ${money(job.equipment_cost)} ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ· Mat ${money(job.materials_cost)}</div></div>
+  <div class="kpi-card"><div class="kpi-label">Labor + Other</div><div class="kpi-value">${money((job.total_labor_cost || 0) + (job.total_other_expenses || 0))}</div><div class="kpi-sub">Labor ${money(job.total_labor_cost)} ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ· Other ${money(job.total_other_expenses)}</div></div>
   <div class="kpi-card ${gpClass(job.gross_profit_percent)}"><div class="kpi-label">Gross profit</div><div class="kpi-value">${money(job.gross_profit_dollars)}</div><div class="kpi-sub">${pct(job.gross_profit_percent)}</div></div>
 </div>
 
@@ -528,18 +571,18 @@ export function grossProfitJobPage({ user, job }) {
 <section class="panel">
   <h2>Sales / commissions / permit</h2>
   <table class="data-table"><tbody>
-    <tr><td>Salesperson</td><td>${escape(job.salesperson_name || "ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ")}</td></tr>
+    <tr><td>Salesperson</td><td>${escape(job.salesperson_name || "ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ")}</td></tr>
     <tr><td>Sales commission</td><td>${money(job.sales_commission_amount)} (${pct(job.sales_commission_rate)})</td></tr>
-    <tr><td>Sales manager</td><td>${escape(job.sales_manager_name || "ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ")} ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ ${money(job.sales_manager_fee)}</td></tr>
-    <tr><td>Permit</td><td>${job.permit_required == null ? "ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ" : (job.permit_required ? "Yes" : "No")} ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ ${money(job.permit_fee)}</td></tr>
-    <tr><td>Fee</td><td>${money(job.fee_amount)} (${escape(job.fee_type || "ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ")})</td></tr>
+    <tr><td>Sales manager</td><td>${escape(job.sales_manager_name || "ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ")} ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ ${money(job.sales_manager_fee)}</td></tr>
+    <tr><td>Permit</td><td>${job.permit_required == null ? "ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ" : (job.permit_required ? "Yes" : "No")} ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ ${money(job.permit_fee)}</td></tr>
+    <tr><td>Fee</td><td>${money(job.fee_amount)} (${escape(job.fee_type || "ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ")})</td></tr>
   </tbody></table>
 </section>
 <section class="panel">
   <h2>Attached docs</h2>
   ${att ? `<ul class="alert-list">${att}</ul>` : `<p class="muted">No attachments yet.</p>`}
 </section>
-<p><a href="/gross-profit">ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ back to all jobs</a></p>
+<p><a href="/gross-profit">ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ back to all jobs</a></p>
 `,
   });
 }
