@@ -3,7 +3,7 @@
 // One row per HVAC job. Data accumulates from three sources:
 //   1. Jobber invoice  (creates the row, anchors customer + amount paid)
 //   2. Chris's Google Sheet (labor, commissions, permits, other expenses)
-//   3. Supplier invoice emails ÃÂ¢ÃÂÃÂ Gemaire, Goodman, Home Depot (equipment + materials)
+//   3. Supplier invoice emails ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ Gemaire, Goodman, Home Depot (equipment + materials)
 // Once enough data is in place, GP $ and GP % are computed.
 //
 // The DB is the source of truth. A separate mirror writer (src/sheets.js)
@@ -134,6 +134,14 @@ CREATE TABLE IF NOT EXISTS gp_inventory_invoices (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+// Schema migrations: ALTER TABLE for additive changes. Wrap each in try/catch
+// because better-sqlite3 throws if the column already exists. Idempotent.
+function safeAlter(sql) {
+  try { db.exec(sql); } catch (e) { /* column already exists - OK */ }
+}
+safeAlter("ALTER TABLE gp_jobs ADD COLUMN invoice_total REAL");
+
+
 CREATE INDEX IF NOT EXISTS idx_gp_jobs_customer ON gp_jobs(customer_name);
 CREATE INDEX IF NOT EXISTS idx_gp_jobs_invoice ON gp_jobs(jobber_invoice_id);
 CREATE INDEX IF NOT EXISTS idx_gp_jobs_issued ON gp_jobs(jobber_invoice_issued_at);
@@ -254,6 +262,7 @@ export const GpJobs = {
     city,
     zip,
     amountPaid,
+    invoiceTotal,
     paymentMethod,
     feeAmount,
     feeType,
@@ -276,6 +285,7 @@ export const GpJobs = {
            city = COALESCE(?, city),
            zip = COALESCE(?, zip),
            amount_paid = COALESCE(?, amount_paid),
+           invoice_total = COALESCE(?, invoice_total),
            payment_method = COALESCE(?, payment_method),
            fee_amount = COALESCE(?, fee_amount),
            fee_type = COALESCE(?, fee_type),
@@ -285,7 +295,7 @@ export const GpJobs = {
       ).run(
         invoiceNumber, clientId, issuedAt,
         customerName, address, city, zip,
-        amountPaid, paymentMethod, feeAmount, feeType,
+        amountPaid, invoiceTotal, paymentMethod, feeAmount, feeType,
         jobId
       );
     } else {
@@ -293,13 +303,13 @@ export const GpJobs = {
         `INSERT INTO gp_jobs (
            jobber_invoice_id, jobber_invoice_number, jobber_client_id,
            jobber_invoice_issued_at, customer_name, address, city, zip,
-           amount_paid, payment_method, fee_amount, fee_type,
+           amount_paid, invoice_total, payment_method, fee_amount, fee_type,
            jobber_synced_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
       ).run(
         jobberInvoiceId, invoiceNumber, clientId,
         issuedAt, customerName, address, city, zip,
-        amountPaid, paymentMethod, feeAmount, feeType
+        amountPaid, invoiceTotal, paymentMethod, feeAmount, feeType
       );
       jobId = r.lastInsertRowid;
     }
@@ -363,7 +373,7 @@ export const GpJobs = {
     if (sheet.permitRequired != null) set("permit_required", sheet.permitRequired ? 1 : 0);
     set("permit_fee", sheet.permitFee);
 
-    // Labor entries ÃÂ¢ÃÂÃÂ replace existing 'labor' kind from sheet to avoid duplicates
+    // Labor entries ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ replace existing 'labor' kind from sheet to avoid duplicates
     if (Array.isArray(sheet.labor) && sheet.labor.length) {
       db.prepare("DELETE FROM gp_line_items WHERE job_id = ? AND kind = 'labor' AND source = 'sheet'").run(jobId);
       const ins = db.prepare(
@@ -444,7 +454,7 @@ export const GpJobs = {
       .all(...params, limit, offset);
   },
 
-  // Count rows matching the same filter Ã¢ÂÂ exposed so the page can show
+  // Count rows matching the same filter ÃÂ¢ÃÂÃÂ exposed so the page can show
   // `N invoices` for the current view (compare against Jobber).
   count({ from = null, to = null } = {}) {
     const where = [];
@@ -465,13 +475,25 @@ export const GpJobs = {
     return db.prepare(`SELECT COALESCE(SUM(amount_paid), 0) AS s FROM gp_jobs ${whereSql}`).get(...params).s;
   },
 
+  // Total invoiced (from invoice_total) for the date range. Older rows that
+  // were synced before invoice_total existed contribute 0; re-running backfill
+  // populates them.
+  sumInvoiceTotal({ from = null, to = null } = {}) {
+    const where = [];
+    const params = [];
+    if (from) { where.push("DATE(jobber_invoice_issued_at) >= DATE(?)"); params.push(from); }
+    if (to)   { where.push("DATE(jobber_invoice_issued_at) <= DATE(?)"); params.push(to); }
+    const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+    return db.prepare(`SELECT COALESCE(SUM(invoice_total), 0) AS s FROM gp_jobs ${whereSql}`).get(...params).s;
+  },
+
   // Returns counts and totals for the report header. Differentiates between:
-  //   total       — every invoice in the date range (matches the table)
-  //   paid        — invoices with amount_paid > 0
-  //   info_complete — invoices that have data from all 3 sources
+  //   total       â every invoice in the date range (matches the table)
+  //   paid        â invoices with amount_paid > 0
+  //   info_complete â invoices that have data from all 3 sources
   //                  (Jobber amount_paid + supplier equip+mat + sheet labor)
-  //   qualified   — paid AND info_complete (counts toward GP totals)
-  // Only "qualified" rows roll up into total_sales / gp_dollars / gp_percent —
+  //   qualified   â paid AND info_complete (counts toward GP totals)
+  // Only "qualified" rows roll up into total_sales / gp_dollars / gp_percent â
   // because a row missing labor cost would compute as 100% margin, which
   // misleads. Those totals match what you'd get summing the rows by hand.
   qualifiedSummary({ from = null, to = null } = {}) {
