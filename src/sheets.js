@@ -195,31 +195,39 @@ export async function scanChrisSheet() {
   } catch (e) {
     return { error: `SALES read failed: ${e.message}` };
   }
-  // Skip header row (assume row 1 is headers)
+  // Skip header row (assume row 1 is headers).
+  // Matching strategy: customer name only (fuzzy, ~70% similarity), no date
+  // window — Chris's sheet spans many months while gp_jobs holds the recent
+  // Jobber invoices we care about. Apply to ALL matching invoices for the
+  // same customer (applySheetData has don't-overwrite logic, so re-running
+  // with another SALES row for the same customer won't clobber filled fields).
   for (let i = 1; i < salesRows.length; i++) {
     const data = parseSalesRow(salesRows[i] || []);
     if (!data.customerName) continue;
     out.sales.scanned++;
-    const cands = GpJobs.findCandidatesByCustomer(data.customerName, { windowDays: 30, minSimilarity: 0.85 });
+    const cands = GpJobs.findCandidatesByCustomer(data.customerName, { windowDays: 9999, minSimilarity: 0.7 });
     if (cands.length === 0) { out.sales.unmatched++; continue; }
-    if (cands.length > 1 && cands[0].sim - cands[1].sim < 0.05) { out.sales.ambiguous++; continue; }
-    try {
-      GpJobs.applySheetData(cands[0].row.id, {
-        sheetRowRef:           `SALES!A${i + 1}`,
-        salespersonName:       data.salespersonName,
-        salesCommissionAmount: data.salesCommissionAmount,
-        salesCommissionRate:   data.salesCommissionRate,
-        salesManagerFee:       data.salesManagerFee,
-        permitRequired:        data.permitRequired,
-        feeAmount:             data.feeAmount,
-        paymentMethod:         data.paymentMethod,
-        totalOtherExpenses:    data.totalOtherExpenses,
-      });
-      out.sales.matched++;
-    } catch (e) {
-      console.warn(`[sheets] SALES row ${i + 1} apply failed:`, e.message);
-      out.sales.errors++;
+    let appliedAny = false;
+    for (const cand of cands) {
+      try {
+        GpJobs.applySheetData(cand.row.id, {
+          sheetRowRef:           `SALES!A${i + 1}`,
+          salespersonName:       data.salespersonName,
+          salesCommissionAmount: data.salesCommissionAmount,
+          salesCommissionRate:   data.salesCommissionRate,
+          salesManagerFee:       data.salesManagerFee,
+          permitRequired:        data.permitRequired,
+          feeAmount:             data.feeAmount,
+          paymentMethod:         data.paymentMethod,
+          totalOtherExpenses:    data.totalOtherExpenses,
+        });
+        appliedAny = true;
+      } catch (e) {
+        console.warn(`[sheets] SALES row ${i + 1} -> job ${cand.row.id} apply failed:`, e.message);
+        out.sales.errors++;
+      }
     }
+    if (appliedAny) out.sales.matched++;
   }
 
   // JOBS tab - labor lines. Multiple rows per customer is OK; we sum cost.
@@ -240,24 +248,28 @@ export async function scanChrisSheet() {
   }
   for (const [customer, laborItems] of laborByCustomer) {
     out.jobs.scanned++;
-    const cands = GpJobs.findCandidatesByCustomer(customer, { windowDays: 30, minSimilarity: 0.85 });
+    const cands = GpJobs.findCandidatesByCustomer(customer, { windowDays: 9999, minSimilarity: 0.7 });
     if (cands.length === 0) { out.jobs.unmatched++; continue; }
     const totalLabor = laborItems.reduce((s, x) => s + (x.cost || 0), 0);
-    try {
-      GpJobs.applyLaborItems(cands[0].row.id, {
-        sheetRowRef: `JOBS!A${laborItems[0].rowIndex}`,
-        totalLaborCost: totalLabor,
-        items: laborItems.map((x) => ({
-          laborName: x.name,
-          laborType: x.type,
-          amount:    x.cost,
-        })),
-      });
-      out.jobs.matched++;
-    } catch (e) {
-      console.warn(`[sheets] JOBS apply failed for ${customer}:`, e.message);
-      out.jobs.errors++;
+    let appliedAny = false;
+    for (const cand of cands) {
+      try {
+        GpJobs.applyLaborItems(cand.row.id, {
+          sheetRowRef: `JOBS!A${laborItems[0].rowIndex}`,
+          totalLaborCost: totalLabor,
+          items: laborItems.map((x) => ({
+            laborName: x.name,
+            laborType: x.type,
+            amount:    x.cost,
+          })),
+        });
+        appliedAny = true;
+      } catch (e) {
+        console.warn(`[sheets] JOBS apply for ${customer} -> job ${cand.row.id} failed:`, e.message);
+        out.jobs.errors++;
+      }
     }
+    if (appliedAny) out.jobs.matched++;
   }
   return out;
 }
