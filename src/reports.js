@@ -313,6 +313,11 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
           pipeline: p.name,
           opportunityId: o.id,
           updatedAt: o.updatedAt,
+          // oppDateAdded = when the opportunity itself was created. Used to detect
+          // leads that were ADDED RETROACTIVELY to the pipeline (manual drag-in
+          // from an old contact) vs. genuinely new inbound leads where the contact
+          // and opp are created within a few minutes of each other.
+          oppDateAdded: o.dateAdded || o.createdAt || null,
         });
       }
     }
@@ -543,10 +548,21 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
 
   // New-lead response time — only NEW leads in the window. Use isCallMessage
   // (handles numeric type=1) and also consider Vonage notes as a "first call".
+  //
+  // CRITICAL Orlando-only filter: we ONLY count leads that arrived as genuinely
+  // new inbound leads to the Orlando Pipeline. Excluded:
+  //   - leads not in Orlando Pipeline at all
+  //   - leads where the Orlando opp was created HOURS after the contact
+  //     (= old contact dragged into the pipeline retroactively, e.g. someone
+  //     manually re-pipelined an old lead today). Real new leads have the
+  //     contact and the opp created within a few minutes of each other.
+  const ORLANDO_NEW_OPP_WINDOW_MIN = 60;
   const newLeads = await ghl
     .searchContacts({ from: fromIso, to: toIso, limit: 100 })
     .catch(() => []);
   const responseTimeAlerts = [];
+  // Orlando-NEW response time samples (used for averages — per requirement)
+  const orlandoResponseSamples = []; // { dispatcher, delayMinutes }
   for (const c of newLeads) {
     const created = DateTime.fromISO(c.dateAdded).setZone(TZ);
     let firstCallAt = null;
@@ -596,6 +612,45 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
       delayMinutes,
       late,
     });
+
+    // Decide if this lead qualifies as Orlando-NEW for the average metric.
+    const stageInfo = contactStage.get(c.id);
+    if (!stageInfo) continue; // not in Orlando Pipeline at all
+    if (!firstCallAt) continue; // can't compute response time if no contact attempt
+    const oppDateAdded = stageInfo.oppDateAdded;
+    if (oppDateAdded) {
+      const oppCreated = DateTime.fromISO(oppDateAdded).setZone(TZ);
+      const gapMin = Math.abs(oppCreated.diff(created, "minutes").minutes);
+      if (gapMin > ORLANDO_NEW_OPP_WINDOW_MIN) continue; // retroactively added
+    }
+    orlandoResponseSamples.push({
+      dispatcher: firstCallBy,
+      delayMinutes,
+    });
+  }
+
+  // Compute averages: overall + per-dispatcher
+  const round1 = (n) => Math.round(n * 10) / 10;
+  const avgResponseMinOverall = orlandoResponseSamples.length
+    ? round1(
+        orlandoResponseSamples.reduce((s, r) => s + r.delayMinutes, 0) /
+          orlandoResponseSamples.length
+      )
+    : null;
+  const responseByDispatcher = new Map();
+  for (const r of orlandoResponseSamples) {
+    if (!r.dispatcher) continue;
+    const arr = responseByDispatcher.get(r.dispatcher) || [];
+    arr.push(r.delayMinutes);
+    responseByDispatcher.set(r.dispatcher, arr);
+  }
+  const avgResponseMinByDispatcher = {};
+  const newLeadsCountByDispatcher = {};
+  for (const [name, arr] of responseByDispatcher) {
+    avgResponseMinByDispatcher[name] = round1(
+      arr.reduce((s, x) => s + x, 0) / arr.length
+    );
+    newLeadsCountByDispatcher[name] = arr.length;
   }
 
   // Build per-dispatcher final shape using the new bucket model.
@@ -671,6 +726,9 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
       avgAttemptsPerContact,
       leadAge: { ...d.leadAge },
       byStage,
+      // v5: avg response time on Orlando NEW leads only (per-dispatcher)
+      avgResponseMin: avgResponseMinByDispatcher[d.name] ?? null,
+      newLeadsResponded: newLeadsCountByDispatcher[d.name] ?? 0,
     });
   }
 
@@ -713,6 +771,9 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
     timeOfDay,
     // v4: pipeline scope label so the email header can show it
     pipelineLabel: REPORTED_PIPELINE_NAMES.join(" + "),
+    // v5: avg new-lead response time on Orlando NEW leads only
+    avgResponseMinOverall,
+    orlandoNewLeadsCount: orlandoResponseSamples.length,
     // Stage order across reported pipelines — used to render consistent stage tables
     stageOrder: (() => {
       const arr = [];
@@ -741,6 +802,78 @@ function formatHourLabel(hh00) {
   return ampmStart === ampmEnd ? `${start} – ${end} ${ampmStart}` : `${start} ${ampmStart} – ${end} ${ampmEnd}`;
 }
 
+// Cross-system flags: detect mismatches between Hubstaff (presence) and GHL (output).
+//
+//   hubstaff_silent : Hubstaff shows >= 50% activity for an hour with >= 10 min
+//                     tracked, but GHL shows 0 events from that dispatcher in
+//                     the same hour. Activity-padding signal.
+//
+//   off_clock       : GHL shows >= 1 outbound event in an hour but Hubstaff has
+//                     < 1 minute tracked. Working off the clock — payroll +
+//                     visibility issue.
+//
+// Returns [{ employee, hour, kind, detail }, ...].
+function computeCrossSystemFlags(hub, dispatch) {
+  const flags = [];
+  const dispatcherByName = new Map(dispatch.byDispatcher.map((d) => [d.name, d]));
+
+  for (const [, slot] of hub._byUser) {
+    const empName = slot.employee.name;
+    const dispatcher = dispatcherByName.get(empName);
+
+    // ---- 1) hubstaff_silent ----
+    for (const [hourKey, hubData] of slot.hourly) {
+      const trackedSec = hubData.trackedSec || 0;
+      const activeSec = hubData.activeSec || 0;
+      if (trackedSec < 600) continue; // skip hours with <10 min tracked
+      const pct = Math.round((activeSec / trackedSec) * 100);
+      if (pct < 50) continue;
+      const label = formatHourLabel(hourKey);
+      const hourlyEntry = dispatcher?.hourly.find((h) => h.label === label);
+      const ghlEvents = hourlyEntry
+        ? (hourlyEntry.real || 0) + (hourlyEntry.voicemail || 0) +
+          (hourlyEntry.attempt || 0) + (hourlyEntry.sms || 0)
+        : 0;
+      if (ghlEvents === 0 && dispatcher) {
+        flags.push({
+          employee: empName,
+          hour: label,
+          kind: "hubstaff_silent",
+          detail: `${pct}% activity, 0 GHL events`,
+        });
+      }
+    }
+
+    // ---- 2) off_clock ---- (only check if employee is a dispatcher tracked in GHL)
+    if (!dispatcher) continue;
+    for (const h of dispatcher.hourly || []) {
+      const ghlEvents =
+        (h.real || 0) + (h.voicemail || 0) + (h.attempt || 0) + (h.sms || 0);
+      if (ghlEvents === 0) continue;
+      // Reverse-resolve label "8 – 9 AM" → "08:00"
+      const m = h.label.match(/^(\d+)\s*[–-]\s*\d+\s*(AM|PM)/i);
+      if (!m) continue;
+      let hr = parseInt(m[1], 10);
+      const isPM = /PM/i.test(m[2]);
+      if (isPM && hr !== 12) hr += 12;
+      if (!isPM && hr === 12) hr = 0;
+      const hubKey = `${String(hr).padStart(2, "0")}:00`;
+      const hubHour = slot.hourly.get(hubKey);
+      const tracked = hubHour?.trackedSec || 0;
+      if (tracked < 60) {
+        flags.push({
+          employee: empName,
+          hour: h.label,
+          kind: "off_clock",
+          detail: `${ghlEvents} GHL events, no Hubstaff tracking`,
+        });
+      }
+    }
+  }
+
+  return flags;
+}
+
 // ---------- Top-level orchestrators ----------
 
 export async function runMorningReport() {
@@ -758,6 +891,9 @@ export async function runMorningReport() {
     const hourly = d.hourly.find((h) => formatHourLabel(f.hour) === h.label);
     if (hourly && (hourly.real + hourly.voicemail + hourly.attempt) <= 1) f.alsoLowCalls = true;
   }
+
+  // v5: cross-system flags (Hubstaff active + GHL silent / GHL active + off clock)
+  hub.crossSystemFlags = computeCrossSystemFlags(hub, dispatch);
 
   const html = renderEmail({
     title: "Morning Snapshot",
@@ -798,6 +934,9 @@ export async function runEveningReport() {
     const hourly = d.hourly.find((h) => formatHourLabel(f.hour) === h.label);
     if (hourly && (hourly.real + hourly.voicemail + hourly.attempt) <= 1) f.alsoLowCalls = true;
   }
+
+  // v5: cross-system flags (Hubstaff active + GHL silent / GHL active + off clock)
+  hub.crossSystemFlags = computeCrossSystemFlags(hub, dispatch);
 
   const html = renderEmail({
     title: "Full Day Summary",
