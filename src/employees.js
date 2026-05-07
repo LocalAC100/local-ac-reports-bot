@@ -49,6 +49,12 @@ export const EMPLOYEES = [
       6: { start: "07:00", end: "20:00" }, // Sat
     },
     breakMinutesPerShift: 60, // 2 × 30 min
+    // Frank is a dispatcher MANAGER, not a primary caller. He supervises the
+    // team, orders equipment, talks with techs, assigns jobs, chases customer
+    // financing/completion docs. Frequent 20+ min stretches without GHL
+    // activity are normal for his role. Bump idle threshold to 60 min so he
+    // only gets alerted when he's been off GHL for a full hour.
+    idleThresholdMin: 60,
   },
   {
     name: "Ellie",
