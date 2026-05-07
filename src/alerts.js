@@ -80,23 +80,44 @@ function isVonageCallNote(note) {
   return /^\s*called\b/i.test(String(note?.body || ""));
 }
 
+// Walk every outbound non-call message (SMS, email, etc.) made by anyone
+// AFTER the lead arrived. Used as a SECONDARY signal — if a dispatcher
+// reached out via text instead of calling, that's still contact, suppress alert.
+function hasOutboundContactAfterLead(messages, leadAddedAt) {
+  const leadTime = new Date(leadAddedAt).getTime();
+  for (const m of messages || []) {
+    const dir = String(m.direction ?? "").toLowerCase();
+    if (dir !== "outbound") continue;
+    const ts = new Date(m.dateAdded ?? m.createdAt ?? 0).getTime();
+    if (ts < leadTime) continue;
+    return true; // any outbound activity counts as contact
+  }
+  return false;
+}
+
 async function getCallSummary(contactId, leadAddedAt) {
   try {
     const leadTime = new Date(leadAddedAt).getTime();
+
+    // FIX (May 7 2026): use getConversationsByContactId — direct lookup by
+    // contactId. Previously used searchConversations({from,to}) which filters
+    // by conversation CREATION date and missed any contact whose conversation
+    // existed before the webhook fired (very common). That bug caused multiple
+    // false-positive alerts (Tinnelly, Juan Lopez, mike +13157976111).
     const [conversations, notes] = await Promise.all([
-      ghl
-        .searchConversations({
-          from: new Date(leadAddedAt).toISOString(),
-          to: new Date().toISOString(),
-        })
-        .catch(() => []),
+      ghl.getConversationsByContactId(contactId).catch(() => []),
       ghl.getContactNotes(contactId).catch(() => []),
     ]);
-    const conv = conversations.find((c) => c.contactId === contactId);
-    const msgs = conv
-      ? await ghl.getConversationMessages(conv.id).catch(() => [])
-      : [];
-    const summary = summarizeCalls(msgs, leadAddedAt);
+
+    // Pull messages from EVERY conversation for this contact and merge them.
+    // Most contacts have one, but some have multiple (e.g., one for SMS, one
+    // for calls). Don't lose calls by only checking the first conversation.
+    const allMessages = [];
+    for (const conv of conversations) {
+      const msgs = await ghl.getConversationMessages(conv.id).catch(() => []);
+      for (const m of msgs) allMessages.push(m);
+    }
+    const summary = summarizeCalls(allMessages, leadAddedAt);
 
     // Fold Vonage notes in — any "Called" note added AFTER the lead arrived
     // counts as a qualifying attempt (so we don't false-fire when dispatcher
@@ -111,12 +132,32 @@ async function getCallSummary(contactId, leadAddedAt) {
       summary.attempted = true;
       summary.vonageCalls = vonageCallsAfterLead;
     }
+
+    // ALSO suppress if the dispatcher reached out via text/SMS — that's still
+    // contact even if no phone call was placed. Lots of dispatchers respond to
+    // brand-new leads with a quick text first.
+    const hadOutboundContact = hasOutboundContactAfterLead(allMessages, leadAddedAt);
+    if (hadOutboundContact) {
+      summary.attempted = true;
+      summary.outboundContact = true;
+    }
+
+    // Track totals for debugging output
+    summary._diag = {
+      conversationCount: conversations.length,
+      messageCount: allMessages.length,
+      noteCount: notes?.length || 0,
+    };
+
     return summary;
   } catch (e) {
     console.error("[live-alert] GHL fetch failed", e?.message);
     return summarizeCalls([], leadAddedAt);
   }
 }
+
+// Exported so the debug endpoint can inspect what alerts.js sees for a contact.
+export const _internal = { getCallSummary };
 
 async function fireAlert({ contactId, contactName, phone, leadAddedAt, level }) {
   try {
