@@ -125,10 +125,12 @@ async function getGmailClient(userEmail) {
 // `excludeAny` drops the message if any of these tokens appears.
 const SUPPLIERS = [
   {
+    // Gemaire actually sends "Sales Order Confirmation" emails (with the
+    // invoice attached as PDF), not subjects with "Invoice" in them.
     key: "gemaire",
     domains: ["gemaire.com"],
     subjectHints: ["gemaire"],
-    mustInclude: ["invoice"],
+    mustInclude: ["invoice", "sales order", "order confirmation", "order #", "order#"],
     excludeAny: [
       "payment", "statement", "monthly", "report", "remittance",
       "confirmation of payment", "credit memo", "promotion",
@@ -136,7 +138,8 @@ const SUPPLIERS = [
   },
   {
     // Goodman = Daikin (Daikin acquired Goodman; invoices may come from
-    // either brand's domains). Include both.
+    // either brand's domains). Goodman invoices arrive as "Delivery Receipt/BOL
+    // for Order HMxxxx & PO CUSTOMER NAME" — that's their invoice email format.
     key: "goodman",
     domains: [
       "goodmanmfg.com",
@@ -148,7 +151,9 @@ const SUPPLIERS = [
       "daikinhvac.com",
     ],
     subjectHints: ["goodman", "daikin"],
-    mustInclude: ["invoice"],
+    mustInclude: [
+      "invoice", "delivery receipt", "bol", "order",
+    ],
     excludeAny: [
       "report", "statement", "monthly", "cashback", "rewards",
       "payment received", "remittance", "credit memo", "promotion",
@@ -330,7 +335,7 @@ async function pollOnceForUser(gmail, userEmail, { since = "2026/01/01", maxPage
       ).run(m.id, e.message);
     }
   }
-  return { scanned: messages.length, processed, errors };
+  return { scanned: messages.length, processed, errors: };
 }
 
 async function processMessage(gmail, messageId, userEmail) {
