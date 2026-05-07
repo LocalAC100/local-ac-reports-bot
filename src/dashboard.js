@@ -14,6 +14,8 @@ import { DateTime } from "luxon";
 import { checkIdleDispatchers } from "./idle.js";
 import { runMorningReport, runEveningReport } from "./reports.js";
 import { _internal as alertsInternal } from "./alerts.js";
+import { GpJobs, GpAttachments, GpUnmatched } from "./gross-profit.js";
+import * as gmail from "./gmail.js";
 
 // SQLite stores CURRENT_TIMESTAMP as UTC strings ("YYYY-MM-DD HH:MM:SS").
 // Display them in America/New_York (Florida) so the website matches emails + clocks.
@@ -471,6 +473,100 @@ export function buildDashboardRouter() {
       res.status(500).json({ ok: false, error: e?.message, stack: e?.stack });
     }
   });
+
+  // ----- Admin: rescan with subject/dedup ladder cleared -----
+  router.post("/gross-profit/debug/rescan-skipped", requireAdmin, async (req, res) => {
+    try {
+      const { db } = await import("./db.js");
+      const before = db.prepare("SELECT COUNT(*) AS n FROM gp_processed_emails WHERE outcome='skipped'").get().n;
+      db.prepare("DELETE FROM gp_processed_emails WHERE outcome='skipped'").run();
+      res.json({ deletedSkipped: before });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ----- Admin: gmail processed-emails debug -----
+  router.get("/gross-profit/debug/gmail", requireAdmin, async (req, res) => {
+    try {
+      const { db } = await import("./db.js");
+      const byOutcome = db.prepare("SELECT outcome, COUNT(*) AS n FROM gp_processed_emails GROUP BY outcome").all();
+      const recent = db.prepare("SELECT message_id, from_addr, subject, outcome, notes, received_at FROM gp_processed_emails ORDER BY id DESC LIMIT 30").all();
+      res.json({ byOutcome, recent });
+    } catch (e) {
+      res.status(500).json({ error: e.message, stack: e.stack });
+    }
+  });
+
+  // ----- Admin: re-parse all unmatched supplier invoices using new body-PO extractor -----
+  router.post("/gross-profit/debug/reparse-unmatched", requireAdmin, async (req, res) => {
+    try {
+      const r = await gmail.reparseUnmatched({ limit: parseInt(req.query.limit, 10) || 500 });
+      res.json(r);
+    } catch (e) {
+      res.status(500).json({ error: e.message, stack: e.stack });
+    }
+  });
+
+  // ----- Manual attach: GET shows ranked candidate jobs for a Gemaire/Goodman/HD invoice -----
+  router.get("/gross-profit/unmatched/:id(\\d+)/resolve", async (req, res) => {
+    try {
+      const { db } = await import("./db.js");
+      const um = db.prepare("SELECT * FROM gp_unmatched_invoices WHERE id = ?").get(parseInt(req.params.id, 10));
+      if (!um) return res.status(404).send("Unmatched invoice not found");
+      const candidates = um.po_name
+        ? GpJobs.findCandidatesByCustomer(um.po_name, { windowDays: 90, minSimilarity: 0.0 })
+        : GpJobs.list({ limit: 100 }).map(j => ({ row: j, sim: 0 }));
+      const rows = candidates.slice(0, 30).map(c => "<tr>" +
+        "<td><strong>" + (c.row.customer_name || "?") + "</strong><br><span class='muted'>" + (c.row.customer_address || "") + "</span></td>" +
+        "<td>" + (c.row.jobber_invoice_number || c.row.invoice_number || "") + "</td>" +
+        "<td class='muted'>" + (c.row.jobber_invoice_issued_at || "") + "</td>" +
+        "<td>$" + Number(c.row.amount_paid || 0).toFixed(2) + "</td>" +
+        "<td><span class='badge badge-" + (c.sim >= 0.9 ? "manager" : c.sim >= 0.7 ? "admin" : "amber") + "'>" + (c.sim * 100).toFixed(0) + "%</span></td>" +
+        "<td><form method='POST' action='/gross-profit/unmatched/" + um.id + "/resolve' style='display:inline'>" +
+        "<input type='hidden' name='jobId' value='" + c.row.id + "'>" +
+        "<button type='submit' class='btn'>Attach to job #" + c.row.id + "</button>" +
+        "</form></td></tr>"
+      ).join("");
+      const att = um.attachment_id ? GpAttachments.byId(um.attachment_id) : null;
+      const pdfLink = att ? "<p><a href='/gross-profit/attachment/" + att.id + "' target='_blank'>View attached PDF: " + att.filename + "</a></p>" : "";
+      const body = "<p>Unmatched invoice <strong>#" + um.id + "</strong> from <strong>" + um.supplier + "</strong>" +
+                   (um.po_name ? " (PO: <em>" + um.po_name + "</em>)" : " (no PO extracted)") + "." +
+                   (um.total_amount ? " Total: $" + Number(um.total_amount).toFixed(2) : "") + "</p>" +
+                   pdfLink +
+                   "<p>Pick the job to attach this invoice to. Top match shown first.</p>" +
+                   "<table class='data-table'><thead><tr><th>Customer</th><th>Invoice #</th><th>Issued</th><th>Amount paid</th><th>Match</th><th></th></tr></thead><tbody>" + rows + "</tbody></table>" +
+                   "<p style='margin-top:14px'><a href='/gross-profit'>&larr; back to Gross Profit</a></p>";
+      res.send(views.placeholderPage({ user: req.user, navKey: "gross-profit", title: "Resolve unmatched invoice", body }));
+    } catch (e) {
+      res.status(500).send("resolve UI failed: " + e.message);
+    }
+  });
+
+  // ----- Manual attach: POST applies the chosen job -----
+  router.post("/gross-profit/unmatched/:id(\\d+)/resolve", requireAdmin, express.urlencoded({ extended: false }), async (req, res) => {
+    try {
+      const { db } = await import("./db.js");
+      const um = db.prepare("SELECT * FROM gp_unmatched_invoices WHERE id = ?").get(parseInt(req.params.id, 10));
+      if (!um) throw new Error("Unmatched invoice not found");
+      const jobId = parseInt(req.body.jobId, 10);
+      if (!jobId) throw new Error("No job selected");
+      const att = um.attachment_id ? GpAttachments.byId(um.attachment_id) : null;
+      const meta = att && att.metadata_json ? JSON.parse(att.metadata_json) : {};
+      const parsed = meta.parsed || {};
+      GpJobs.applySupplierInvoice(jobId, {
+        equipmentCost: parsed.equipment || 0,
+        materialsCost: parsed.materials || 0,
+        totalWithTax: parsed.total || null,
+      }, { attachmentId: um.attachment_id });
+      GpUnmatched.resolve(um.id, jobId);
+      req.session.flash = { type: "ok", message: "Attached invoice #" + um.id + " to job #" + jobId };
+    } catch (e) {
+      req.session.flash = { type: "error", message: "Attach failed: " + e.message };
+    }
+    res.redirect("/gross-profit");
+  });
+
 
   return router;
 }
