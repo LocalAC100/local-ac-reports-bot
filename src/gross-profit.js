@@ -3,7 +3,7 @@
 // One row per HVAC job. Data accumulates from three sources:
 //   1. Jobber invoice  (creates the row, anchors customer + amount paid)
 //   2. Chris's Google Sheet (labor, commissions, permits, other expenses)
-//   3. Supplier invoice emails ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ Gemaire, Goodman, Home Depot (equipment + materials)
+//   3. Supplier invoice emails — Gemaire, Goodman, Home Depot (equipment + materials)
 // Once enough data is in place, GP $ and GP % are computed.
 //
 // The DB is the source of truth. A separate mirror writer (src/sheets.js)
@@ -142,6 +142,32 @@ CREATE INDEX IF NOT EXISTS idx_gp_attachments_job ON gp_attachments(job_id);
 CREATE INDEX IF NOT EXISTS idx_gp_unmatched_supplier ON gp_unmatched_invoices(supplier);
 `);
 
+// ---------- Dedup safeguards (idempotent migrations) ----------
+//
+// Supplier invoice ingestion uses += accumulation — re-processing the same
+// invoice would double equipment/materials totals. Guard with three layers:
+//   1. gp_processed_emails(message_id UNIQUE) — already in src/gmail.js
+//   2. gp_attachments.pdf_sha256 — content hash, dedups identical PDFs
+//      regardless of how many times they show up across emails
+//   3. gp_attachments.applied_at — flag set the first time costs from this
+//      attachment are added to a job; applySupplierInvoice is a no-op if set
+function safeAlter(sql) {
+  try { db.exec(sql); }
+  catch (e) {
+    if (!/duplicate column name/i.test(e.message)) throw e;
+  }
+}
+safeAlter(`ALTER TABLE gp_attachments ADD COLUMN pdf_sha256 TEXT`);
+safeAlter(`ALTER TABLE gp_attachments ADD COLUMN gmail_message_id TEXT`);
+safeAlter(`ALTER TABLE gp_attachments ADD COLUMN gmail_attachment_part_id TEXT`);
+safeAlter(`ALTER TABLE gp_attachments ADD COLUMN applied_at TEXT`);
+db.exec(`
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gp_attachments_sha
+  ON gp_attachments(pdf_sha256) WHERE pdf_sha256 IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_gp_attachments_msg
+  ON gp_attachments(gmail_message_id);
+`);
+
 // ---------- Fuzzy customer-name matching ----------
 //
 // Suppliers and Chris use slightly different spellings of customer names.
@@ -179,23 +205,10 @@ function levenshtein(a, b) {
   return dp[b.length];
 }
 
-export // Schema migrations: ALTER TABLE for additive changes. Wrap each in try/catch
-// because better-sqlite3 throws if the column already exists. Idempotent.
-function safeAlter(sql) {
-  try { db.exec(sql); } catch (e) { /* column already exists - OK */ }
-}
-safeAlter("ALTER TABLE gp_jobs ADD COLUMN invoice_total REAL");
-
-function nameSimilarity(a, b) {
+export function nameSimilarity(a, b) {
   const na = normalizeName(a);
   const nb = normalizeName(b);
   if (!na || !nb) return 0;
-  // High-confidence match: one name fully contains the other (>= 4 chars each)
-  // Catches "Juan Carlos" (sheet) vs "Juan Carlos Fernandez" (Jobber)
-  if (na.length >= 4 && nb.length >= 4) {
-    if (na === nb) return 1;
-    if (na.includes(nb) || nb.includes(na)) return 0.95;
-  }
   const dist = levenshtein(na, nb);
   const maxLen = Math.max(na.length, nb.length);
   return 1 - dist / maxLen;
@@ -267,7 +280,6 @@ export const GpJobs = {
     city,
     zip,
     amountPaid,
-    invoiceTotal,
     paymentMethod,
     feeAmount,
     feeType,
@@ -290,7 +302,6 @@ export const GpJobs = {
            city = COALESCE(?, city),
            zip = COALESCE(?, zip),
            amount_paid = COALESCE(?, amount_paid),
-           invoice_total = COALESCE(?, invoice_total),
            payment_method = COALESCE(?, payment_method),
            fee_amount = COALESCE(?, fee_amount),
            fee_type = COALESCE(?, fee_type),
@@ -300,7 +311,7 @@ export const GpJobs = {
       ).run(
         invoiceNumber, clientId, issuedAt,
         customerName, address, city, zip,
-        amountPaid, invoiceTotal, paymentMethod, feeAmount, feeType,
+        amountPaid, paymentMethod, feeAmount, feeType,
         jobId
       );
     } else {
@@ -308,13 +319,13 @@ export const GpJobs = {
         `INSERT INTO gp_jobs (
            jobber_invoice_id, jobber_invoice_number, jobber_client_id,
            jobber_invoice_issued_at, customer_name, address, city, zip,
-           amount_paid, invoice_total, payment_method, fee_amount, fee_type,
+           amount_paid, payment_method, fee_amount, fee_type,
            jobber_synced_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
       ).run(
         jobberInvoiceId, invoiceNumber, clientId,
         issuedAt, customerName, address, city, zip,
-        amountPaid, invoiceTotal, paymentMethod, feeAmount, feeType
+        amountPaid, paymentMethod, feeAmount, feeType
       );
       jobId = r.lastInsertRowid;
     }
@@ -377,11 +388,8 @@ export const GpJobs = {
     set("sales_manager_fee", sheet.salesManagerFee);
     if (sheet.permitRequired != null) set("permit_required", sheet.permitRequired ? 1 : 0);
     set("permit_fee", sheet.permitFee);
-    set("payment_method", sheet.paymentMethod);
-    set("fee_amount", sheet.feeAmount);
-    set("total_other_expenses", sheet.totalOtherExpenses);
 
-    // Labor entries ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ replace existing 'labor' kind from sheet to avoid duplicates
+    // Labor entries — replace existing 'labor' kind from sheet to avoid duplicates
     if (Array.isArray(sheet.labor) && sheet.labor.length) {
       db.prepare("DELETE FROM gp_line_items WHERE job_id = ? AND kind = 'labor' AND source = 'sheet'").run(jobId);
       const ins = db.prepare(
@@ -422,163 +430,70 @@ export const GpJobs = {
     applyComputed(jobId);
   },
 
-  // Apply labor items from Chris's JOBS tab. Replaces any existing labor lines
-  // and updates total_labor_cost. The JOBS tab can have multiple rows per
-  // customer; sheets.js groups them and passes them here as one apply call.
-  applyLaborItems(jobId, { sheetRowRef = null, totalLaborCost, items = [] }) {
-    const job = db.prepare("SELECT id FROM gp_jobs WHERE id = ?").get(jobId);
-    if (!job) throw new Error(`gp_jobs ${jobId} not found`);
-    db.prepare("DELETE FROM gp_line_items WHERE job_id = ? AND kind = 'labor'").run(jobId);
-    const insLine = db.prepare(`INSERT INTO gp_line_items
-      (job_id, kind, position, description, labor_name, labor_type, amount, source)
-      VALUES (?, 'labor', ?, ?, ?, ?, ?, 'sheet')`);
-    items.forEach((it, idx) => {
-      insLine.run(jobId, idx + 1, it.laborName || null, it.laborName || null, it.laborType || null, it.amount ?? null);
-    });
-    db.prepare(`UPDATE gp_jobs SET
-        total_labor_cost = ?,
-        sheet_matched_at = CURRENT_TIMESTAMP,
-        sheet_row_ref = COALESCE(?, sheet_row_ref),
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?`).run(totalLaborCost ?? 0, sheetRowRef, jobId);
-    GpJobs._recomputeProfit(jobId);
-    return jobId;
-  },
-
   // Part 3: a supplier invoice was parsed and matched to this job.
   // Costs are accumulated (multiple invoices for the same job add up).
-  applySupplierInvoice(jobId, parsed) {
+  //
+  // DEDUP CONTRACT: pass the gp_attachments.id of the PDF whose costs you're
+  // adding. If that attachment was already applied to ANY job, this is a
+  // no-op. The attachment's applied_at column is the source of truth for
+  // "has this PDF's costs already been counted?". Without an attachmentId
+  // (e.g. manual entry path) the call still works but you lose the dedup
+  // guarantee — only the caller knows whether it's safe.
+  applySupplierInvoice(jobId, parsed, opts = {}) {
     const job = db.prepare("SELECT * FROM gp_jobs WHERE id = ?").get(jobId);
     if (!job) throw new Error(`gp_jobs ${jobId} not found`);
 
-    const equipment = num(job.equipment_cost) + num(parsed.equipmentCost);
-    const materials = num(job.materials_cost) + num(parsed.materialsCost);
-    // The combined column includes sales tax per spec
-    const total = num(job.equipment_materials_total) + num(parsed.totalWithTax || (parsed.equipmentCost + parsed.materialsCost));
+    const attId = opts.attachmentId || null;
+    if (attId) {
+      const att = db.prepare("SELECT id, applied_at FROM gp_attachments WHERE id = ?").get(attId);
+      if (!att) throw new Error(`gp_attachments ${attId} not found`);
+      if (att.applied_at) {
+        // Already applied — silently no-op. This is the critical dedup gate.
+        return { applied: false, reason: "already_applied", attachmentId: attId };
+      }
+    }
 
-    db.prepare(
-      `UPDATE gp_jobs SET
-         equipment_cost = ?,
-         materials_cost = ?,
-         equipment_materials_total = ?,
-         supplier_invoices_synced_at = CURRENT_TIMESTAMP,
-         updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`
-    ).run(round2(equipment), round2(materials), round2(total), jobId);
+    // Apply + mark in a single transaction so a crash mid-way can't leave
+    // costs added without the applied_at flag (which would allow re-apply).
+    const tx = db.transaction(() => {
+      const equipment = num(job.equipment_cost) + num(parsed.equipmentCost);
+      const materials = num(job.materials_cost) + num(parsed.materialsCost);
+      // The combined column includes sales tax per spec
+      const total = num(job.equipment_materials_total) + num(parsed.totalWithTax || (parsed.equipmentCost + parsed.materialsCost));
+
+      db.prepare(
+        `UPDATE gp_jobs SET
+           equipment_cost = ?,
+           materials_cost = ?,
+           equipment_materials_total = ?,
+           supplier_invoices_synced_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`
+      ).run(round2(equipment), round2(materials), round2(total), jobId);
+
+      if (attId) {
+        // Re-link attachment to the job (if it wasn't already) and mark applied.
+        // applied_at + UNIQUE on pdf_sha256 together guarantee idempotency.
+        db.prepare(
+          `UPDATE gp_attachments
+              SET job_id = COALESCE(job_id, ?),
+                  applied_at = CURRENT_TIMESTAMP
+            WHERE id = ?`
+        ).run(jobId, attId);
+      }
+    });
+    tx();
 
     applyComputed(jobId);
+    return { applied: true, attachmentId: attId };
   },
 
-  list({ limit = 500, offset = 0, from = null, to = null } = {}) {
-    // from/to are inclusive ISO date strings (YYYY-MM-DD or full ISO).
-    // Filter by jobber_invoice_issued_at; rows with no issue date are kept only
-    // when no filter is applied so they don't ghost-vanish from totals.
-    const where = [];
-    const params = [];
-    if (from) { where.push("DATE(jobber_invoice_issued_at) >= DATE(?)"); params.push(from); }
-    if (to)   { where.push("DATE(jobber_invoice_issued_at) <= DATE(?)"); params.push(to); }
-    const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+  list({ limit = 200, offset = 0 } = {}) {
     return db
       .prepare(
-        `SELECT * FROM gp_jobs ${whereSql} ORDER BY COALESCE(jobber_invoice_issued_at, created_at) DESC LIMIT ? OFFSET ?`
+        `SELECT * FROM gp_jobs ORDER BY COALESCE(jobber_invoice_issued_at, created_at) DESC LIMIT ? OFFSET ?`
       )
-      .all(...params, limit, offset);
-  },
-
-  // Count rows matching the same filter ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ exposed so the page can show
-  // `N invoices` for the current view (compare against Jobber).
-  count({ from = null, to = null } = {}) {
-    const where = [];
-    const params = [];
-    if (from) { where.push("DATE(jobber_invoice_issued_at) >= DATE(?)"); params.push(from); }
-    if (to)   { where.push("DATE(jobber_invoice_issued_at) <= DATE(?)"); params.push(to); }
-    const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
-    return db.prepare(`SELECT COUNT(*) AS n FROM gp_jobs ${whereSql}`).get(...params).n;
-  },
-
-  // Sum amount_paid for the same filter, used in the page header.
-  sumAmountPaid({ from = null, to = null } = {}) {
-    const where = [];
-    const params = [];
-    if (from) { where.push("DATE(jobber_invoice_issued_at) >= DATE(?)"); params.push(from); }
-    if (to)   { where.push("DATE(jobber_invoice_issued_at) <= DATE(?)"); params.push(to); }
-    const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
-    return db.prepare(`SELECT COALESCE(SUM(amount_paid), 0) AS s FROM gp_jobs ${whereSql}`).get(...params).s;
-  },
-
-  // Total invoiced (from invoice_total) for the date range. Older rows that
-  // were synced before invoice_total existed contribute 0; re-running backfill
-  // populates them.
-  sumInvoiceTotal({ from = null, to = null } = {}) {
-    const where = [];
-    const params = [];
-    if (from) { where.push("DATE(jobber_invoice_issued_at) >= DATE(?)"); params.push(from); }
-    if (to)   { where.push("DATE(jobber_invoice_issued_at) <= DATE(?)"); params.push(to); }
-    const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
-    return db.prepare(`SELECT COALESCE(SUM(invoice_total), 0) AS s FROM gp_jobs ${whereSql}`).get(...params).s;
-  },
-
-  // Recompute gross_profit_dollars + gross_profit_percent from current cost
-  // fields. Called after any source updates the row.
-  _recomputeProfit(jobId) {
-    const job = db.prepare("SELECT * FROM gp_jobs WHERE id = ?").get(jobId);
-    if (!job) return;
-    const sales = Number(job.amount_paid || 0);
-    const equipMat = Number(job.equipment_materials_total || 0);
-    const labor = Number(job.total_labor_cost || 0);
-    const fee = Number(job.fee_amount || 0);
-    const commission = Number(job.sales_commission_amount || 0);
-    const mgrFee = Number(job.sales_manager_fee || 0);
-    const permitFee = Number(job.permit_fee || 0);
-    const otherExp = Number(job.total_other_expenses || 0);
-    const totalCost = equipMat + labor + fee + commission + mgrFee + permitFee + otherExp;
-    const gpDollars = sales - totalCost;
-    const gpPercent = sales > 0 ? (gpDollars / sales) * 100 : null;
-    db.prepare(`UPDATE gp_jobs SET gross_profit_dollars = ?, gross_profit_percent = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-      .run(gpDollars, gpPercent, jobId);
-  },
-
-  // Returns counts and totals for the report header. Differentiates between:
-  //   total       ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ every invoice in the date range (matches the table)
-  //   paid        ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ invoices with amount_paid > 0
-  //   info_complete ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ invoices that have data from all 3 sources
-  //                  (Jobber amount_paid + supplier equip+mat + sheet labor)
-  //   qualified   ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ paid AND info_complete (counts toward GP totals)
-  // Only "qualified" rows roll up into total_sales / gp_dollars / gp_percent ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ
-  // because a row missing labor cost would compute as 100% margin, which
-  // misleads. Those totals match what you'd get summing the rows by hand.
-  qualifiedSummary({ from = null, to = null } = {}) {
-    const where = [];
-    const params = [];
-    if (from) { where.push("DATE(jobber_invoice_issued_at) >= DATE(?)"); params.push(from); }
-    if (to)   { where.push("DATE(jobber_invoice_issued_at) <= DATE(?)"); params.push(to); }
-    const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
-    // Quick boolean predicates inline as CASE expressions
-    const paidExpr = "(amount_paid IS NOT NULL AND amount_paid > 0)";
-    const infoExpr = "(amount_paid IS NOT NULL AND equipment_materials_total IS NOT NULL AND total_labor_cost IS NOT NULL)";
-    const qualExpr = `(${paidExpr} AND ${infoExpr})`;
-    const row = db.prepare(`
-      SELECT
-        COUNT(*) AS total,
-        SUM(CASE WHEN ${paidExpr} THEN 1 ELSE 0 END) AS paid,
-        SUM(CASE WHEN ${infoExpr} THEN 1 ELSE 0 END) AS info_complete,
-        SUM(CASE WHEN ${qualExpr} THEN 1 ELSE 0 END) AS qualified,
-        COALESCE(SUM(CASE WHEN ${qualExpr} THEN amount_paid ELSE 0 END), 0) AS qualified_sales,
-        COALESCE(SUM(CASE WHEN ${qualExpr} THEN gross_profit_dollars ELSE 0 END), 0) AS qualified_gp_dollars
-      FROM gp_jobs
-      ${whereSql}
-    `).get(...params);
-    const sales = Number(row.qualified_sales || 0);
-    const gp = Number(row.qualified_gp_dollars || 0);
-    return {
-      total: Number(row.total || 0),
-      paid: Number(row.paid || 0),
-      info_complete: Number(row.info_complete || 0),
-      qualified: Number(row.qualified || 0),
-      qualified_sales: sales,
-      qualified_gp_dollars: gp,
-      qualified_gp_percent: sales > 0 ? (gp / sales) * 100 : null,
-    };
+      .all(limit, offset);
   },
 
   byId(id) {
@@ -593,27 +508,62 @@ export const GpJobs = {
     return job;
   },
 
+  count() {
+    return db.prepare("SELECT COUNT(*) AS n FROM gp_jobs").get().n;
+  },
 };
 
 // ---------- Attachments ----------
+import crypto from "crypto";
+
 export const GpAttachments = {
   // Save the bytes to disk and record metadata. job_id may be null for
   // unmatched/inventory invoices (caller files the unmatched/inventory row separately).
-  save({ jobId = null, source, supplier = null, filename, mimeType, bytes, metadata = null }) {
+  //
+  // DEDUP: callers passing supplier-invoice PDFs should pass `bytes` so we
+  // can SHA-256 hash them. If a row with the same hash already exists,
+  // return that row's id (and DON'T re-write the file or insert a new row)
+  // along with `{ deduped: true }`. The caller can use this to skip
+  // re-applying costs (the existing row's applied_at flag handles that too).
+  save({ jobId = null, source, supplier = null, filename, mimeType, bytes, metadata = null,
+         gmailMessageId = null, gmailAttachmentPartId = null }) {
+    const sha = bytes ? crypto.createHash("sha256").update(bytes).digest("hex") : null;
+    if (sha) {
+      const existing = db.prepare(
+        `SELECT id, job_id, applied_at FROM gp_attachments WHERE pdf_sha256 = ?`
+      ).get(sha);
+      if (existing) {
+        // Same PDF bytes already stored. Update gmail tracking metadata for
+        // traceability, but never re-insert and never re-write the file.
+        if (gmailMessageId || gmailAttachmentPartId) {
+          db.prepare(
+            `UPDATE gp_attachments
+                SET gmail_message_id = COALESCE(gmail_message_id, ?),
+                    gmail_attachment_part_id = COALESCE(gmail_attachment_part_id, ?)
+              WHERE id = ?`
+          ).run(gmailMessageId, gmailAttachmentPartId, existing.id);
+        }
+        return { id: existing.id, deduped: true, alreadyApplied: !!existing.applied_at };
+      }
+    }
     const ts = Date.now();
     const safeName = String(filename).replace(/[^A-Za-z0-9._-]+/g, "_");
     const stored = `${ts}-${safeName}`;
     const fullPath = path.join(ATTACHMENT_DIR, stored);
     fs.writeFileSync(fullPath, bytes);
     const r = db.prepare(
-      `INSERT INTO gp_attachments (job_id, source, supplier, filename, mime_type, size_bytes, storage_path, metadata_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO gp_attachments (
+         job_id, source, supplier, filename, mime_type, size_bytes,
+         storage_path, metadata_json, pdf_sha256,
+         gmail_message_id, gmail_attachment_part_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       jobId, source, supplier, filename, mimeType || null,
       bytes.length, fullPath,
-      metadata ? JSON.stringify(metadata) : null
+      metadata ? JSON.stringify(metadata) : null,
+      sha, gmailMessageId, gmailAttachmentPartId
     );
-    return r.lastInsertRowid;
+    return { id: r.lastInsertRowid, deduped: false, alreadyApplied: false };
   },
 
   byJob(jobId) {
