@@ -661,5 +661,4 @@ export function extractPoMapFromBody(bodyText) {
   }
   return out;
 }
-return {extractBodyText, extractPoMapFromBody};
 
