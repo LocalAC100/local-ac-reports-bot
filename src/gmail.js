@@ -553,19 +553,15 @@ async function processMessage(gmail, messageId, userEmail) {
 // Returns counts: { total, attached, updated, kept, errors }.
 export async function reparseUnmatched({ limit = 500 } = {}) {
   if (!isConfigured()) return { skipped: true, reason: "gmail watcher not configured" };
-  const rows = db.prepare(
-    \`SELECT u.id AS unm_id, u.attachment_id, u.po_name AS old_po,
-              a.gmail_message_id, a.metadata_json, a.filename
-         FROM gp_unmatched_invoices u
-         JOIN gp_attachments a ON a.id = u.attachment_id
-        WHERE u.resolved_to_job_id IS NULL
-          AND a.gmail_message_id IS NOT NULL
-        LIMIT ?\`
-  ).all(limit);
+  const sql = "SELECT u.id AS unm_id, u.attachment_id, u.po_name AS old_po, " +
+              "a.gmail_message_id, a.metadata_json, a.filename " +
+              "FROM gp_unmatched_invoices u " +
+              "JOIN gp_attachments a ON a.id = u.attachment_id " +
+              "WHERE u.resolved_to_job_id IS NULL " +
+              "AND a.gmail_message_id IS NOT NULL LIMIT ?";
+  const rows = db.prepare(sql).all(limit);
   const users = getDelegatedUsers();
-  // Cache message bodies + PO maps to avoid refetching for bulk emails
-  // that have multiple unmatched attachments pointing at them.
-  const msgCache = new Map(); // messageId -> { bodyText, poMap }
+  const msgCache = new Map();
   const out = { total: rows.length, attached: 0, updated: 0, kept: 0, errors: 0 };
   for (const r of rows) {
     try {
@@ -574,23 +570,20 @@ export async function reparseUnmatched({ limit = 500 } = {}) {
         let full = null;
         for (const userEmail of users) {
           try {
-            const gmail = await getGmailClient(userEmail);
-            full = await gmail.users.messages.get({ userId: "me", id: r.gmail_message_id, format: "full" });
-            if (full?.data?.payload) break;
+            const gm = await getGmailClient(userEmail);
+            full = await gm.users.messages.get({ userId: "me", id: r.gmail_message_id, format: "full" });
+            if (full && full.data && full.data.payload) break;
           } catch (e) { /* try next user */ }
         }
-        if (!full?.data?.payload) { out.errors++; continue; }
+        if (!full || !full.data || !full.data.payload) { out.errors++; continue; }
         const bodyText = extractBodyText(full.data.payload);
         const poMap = extractPoMapFromBody(bodyText);
-        cached = { bodyText, poMap };
+        cached = { bodyText: bodyText, poMap: poMap };
         msgCache.set(r.gmail_message_id, cached);
       }
-      // Strategy 1: single-PO body (Customer PO:, Reference:, etc.)
       let newPo = extractPoFromBody(cached.bodyText);
-      // Strategy 2: invoice→PO map. Pull invoice number from filename like
-      // "invoice-W403984.pdf" or "W403984-82454.pdf".
       if (!newPo) {
-        const invMatch = (r.filename || "").match(/W(\\d{5,})/i);
+        const invMatch = (r.filename || "").match(/W(\d{5,})/i);
         if (invMatch) {
           const key = ("W" + invMatch[1]).toUpperCase();
           if (cached.poMap[key]) newPo = cached.poMap[key];
@@ -721,7 +714,10 @@ export function extractBodyText(payload) {
 export function extractPoMapFromBody(bodyText) {
   if (!bodyText) return {};
   const out = {};
-  const re = /\b(W\d{5,})\s+([A-Za-z][A-Za-z0-9 .'\-&]{1,60}?)\s+\d{2}-\d{2}-\d{4}\s+\d{2}-\d{2}-\d{4}\s+\\?\$/g;
+  const re = new RegExp(
+    "\\b(W\\d{5,})\\s+([A-Za-z][A-Za-z0-9 .'\\-&]{1,60}?)\\s+\\d{2}-\\d{2}-\\d{4}\\s+\\d{2}-\\d{2}-\\d{4}\\s+\\$",
+    "g"
+  );
   let m;
   while ((m = re.exec(bodyText)) !== null) {
     const inv = m[1].toUpperCase();
