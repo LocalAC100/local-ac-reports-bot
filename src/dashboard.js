@@ -1,4 +1,4 @@
-// Dashboard router ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ login, all pages, /api/ask endpoint, /logout.
+// Dashboard router — login, all pages, /api/ask endpoint, /logout.
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -11,16 +11,13 @@ import * as claude from "./claude.js";
 import { EMPLOYEES, isDispatcher, expectedShiftFor } from "./employees.js";
 import { now, TZ } from "./time.js";
 import { DateTime } from "luxon";
-import { GpJobs, GpAttachments, GpUnmatched, GpInventory } from "./gross-profit.js";
-import * as jobberSync from "./jobber-sync.js";
-import * as sheets from "./sheets.js";
-import * as gmail from "./gmail.js";
-import fs from "fs";
+import { checkIdleDispatchers } from "./idle.js";
+import { runMorningReport, runEveningReport } from "./reports.js";
 
 // SQLite stores CURRENT_TIMESTAMP as UTC strings ("YYYY-MM-DD HH:MM:SS").
 // Display them in America/New_York (Florida) so the website matches emails + clocks.
 function fmtET(iso) {
-  if (!iso) return "ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ";
+  if (!iso) return "—";
   // SQLite format has no T separator; Luxon SQL parser handles it.
   const dt = String(iso).includes("T")
     ? DateTime.fromISO(iso, { zone: "utc" })
@@ -31,20 +28,6 @@ function fmtET(iso) {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-
-// Filter for installs only ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ excludes $0 invoices (warranty/recall/service)
-// and the "Local AC LLC" test row. Used on the Gross Profit page; future
-// pages for warranty/recall will display the excluded rows.
-function isInstall(j) {
-  const amt = Math.max(Number(j.amount_paid) || 0, Number(j.invoice_total) || 0);
-  if (amt <= 0) return false;
-  const name = String(j.customer_name || '').toLowerCase().trim();
-  if (name === 'local ac llc' || name === 'local ac') return false;
-  // Exclude obvious test rows ("Test 1", "Test 8", etc.)
-  if (/^test\s*\d*$/i.test(name)) return false;
-  return true;
-}
 
 export function buildDashboardRouter() {
   const router = express.Router();
@@ -86,11 +69,16 @@ export function buildDashboardRouter() {
       callsToday: 0,
       leadsToday: 0,
       alertsToday: Alerts.todayCount(),
-      recentAlerts: Alerts.recent(10),
+      // Pre-format alert timestamps in ET so the Today widget doesn't show raw UTC
+      recentAlerts: Alerts.recent(10).map((a) => ({
+        ...a,
+        fired_at_display: fmtET(a.fired_at),
+        lead_added_display: fmtET(a.lead_added_at),
+      })),
       discrepancies: [],
     };
 
-    // Best-effort live data ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ failures don't break the page
+    // Best-effort live data — failures don't break the page
     try {
       const orgUsers = await hubstaff.listOrgUsers();
       // Mark anyone whose Hubstaff "last_activity" was within ~10 min as active
@@ -102,26 +90,42 @@ export function buildDashboardRouter() {
         })
         .map((u) => u.name || u.email);
 
-      // Discrepancies: scheduled today but no recent activity
+      // Discrepancies: only flag people whose shift is CURRENTLY in progress
+      // but who have no recent Hubstaff activity. Skip anyone whose shift
+      // hasn't started yet OR has already ended — those aren't discrepancies.
+      const nowDt = today; // Luxon DateTime in ET
       for (const e of EMPLOYEES) {
         if (!e.hubstaffEmail) continue;
         const shift = expectedShiftFor(e, today);
         if (!shift) continue;
+        // Parse shift start/end as Luxon DateTimes for today
+        const [sh, sm] = shift.start.split(":").map(Number);
+        const [eh, em] = shift.end.split(":").map(Number);
+        const shiftStart = nowDt.set({ hour: sh, minute: sm, second: 0, millisecond: 0 });
+        const shiftEnd = nowDt.set({ hour: eh, minute: em, second: 0, millisecond: 0 });
+        // Skip if shift hasn't started or already ended
+        if (nowDt < shiftStart || nowDt > shiftEnd) continue;
         const hu = orgUsers.find(
           (u) => (u.email || "").toLowerCase() === e.hubstaffEmail.toLowerCase()
         );
         if (!hu) continue;
         const lastT = new Date(hu.last_activity || 0).getTime();
         if (lastT < Date.now() - 60 * 60 * 1000) {
+          // Format times nicely (12-hour AM/PM)
+          const fmtHHMM = (hhmm) => {
+            const [h, m] = hhmm.split(":").map(Number);
+            const ampm = h < 12 ? "AM" : "PM";
+            const h12 = h % 12 === 0 ? 12 : h % 12;
+            return `${h12}:${String(m).padStart(2, "0")} ${ampm}`;
+          };
+          const lastActivityDisplay = hu.last_activity
+            ? DateTime.fromISO(hu.last_activity)
+                .setZone(TZ)
+                .toFormat("LLL d, h:mm a") + " ET"
+            : "never";
           snapshot.discrepancies.push({
             employee: e.name,
-            detail: `scheduled ${shift.start}, last activity ${
-              hu.last_activity
-                ? new Date(hu.last_activity).toLocaleString("en-US", {
-                    timeZone: "America/New_York",
-                  })
-                : "never"
-            }`,
+            detail: `scheduled ${fmtHHMM(shift.start)}–${fmtHHMM(shift.end)}, last activity ${lastActivityDisplay}`,
           });
         }
       }
@@ -146,8 +150,8 @@ export function buildDashboardRouter() {
           <td>${e.hubstaffEmail}</td>
           <td>$${e.payRate}/hr</td>
           <td>${e.breakMinutesPerShift} min</td>
-          <td>${hu ? "ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ linked" : "<span class='badge badge-amber'>not in Hubstaff</span>"}</td>
-          <td class="muted">${hu?.last_activity ? new Date(hu.last_activity).toLocaleString("en-US", { timeZone: "America/New_York" }) : "ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ"}</td>
+          <td>${hu ? "✓ linked" : "<span class='badge badge-amber'>not in Hubstaff</span>"}</td>
+          <td class="muted">${hu?.last_activity ? new Date(hu.last_activity).toLocaleString("en-US", { timeZone: "America/New_York" }) : "—"}</td>
         </tr>`;
       }).join("");
       body = `<table class="data-table">
@@ -183,7 +187,7 @@ export function buildDashboardRouter() {
           return `<tr>
             <td><strong>${e.name}</strong></td>
             <td>${e.ghlEmail || e.hubstaffEmail}</td>
-            <td>${matched ? "ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ linked" : "<span class='badge badge-amber'>not in GHL</span>"}</td>
+            <td>${matched ? "✓ linked" : "<span class='badge badge-amber'>not in GHL</span>"}</td>
             <td>${e.role}</td>
           </tr>`;
         })
@@ -213,7 +217,7 @@ export function buildDashboardRouter() {
         user: req.user,
         title: "Leads",
         navKey: "leads",
-        body: `<p class="muted">Recent leads from GoHighLevel will show here. Live alerts fire when a lead isn't contacted within 3 minutes ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ see the Alerts tab for that history.</p>`,
+        body: `<p class="muted">Recent leads from GoHighLevel will show here. Live alerts fire when a lead isn't contacted within 3 minutes — see the Alerts tab for that history.</p>`,
       })
     );
   });
@@ -231,7 +235,7 @@ export function buildDashboardRouter() {
                 (a) => `<tr>
               <td class="muted">${fmtET(a.fired_at)}</td>
               <td><strong>${a.contact_name || "(unnamed)"}</strong></td>
-              <td>${a.phone || "ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ"}</td>
+              <td>${a.phone || "—"}</td>
               <td class="muted">${fmtET(a.lead_added_at)}</td>
               <td><span class="badge badge-red">${a.minutes_elapsed || "?"}m</span></td>
             </tr>`
@@ -279,7 +283,7 @@ export function buildDashboardRouter() {
   router.get("/reports/:id", (req, res) => {
     const report = Reports.byId(req.params.id);
     if (!report) return res.status(404).send("Report not found.");
-    // Reports are stored as raw HTML ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ wrap in our layout
+    // Reports are stored as raw HTML — wrap in our layout
     res.send(
       views.placeholderPage({
         user: req.user,
@@ -318,185 +322,6 @@ export function buildDashboardRouter() {
     }
   });
 
-  // ----- Gross Profit -----
-  router.get("/gross-profit", (req, res) => {
-    // Date-range filtering. Accepts:
-    //   ?preset=jan-2026 | feb-2026 | ... | year | last-30 | last-90 | all
-    //   ?from=YYYY-MM-DD&to=YYYY-MM-DD  (custom range; overrides preset)
-    const preset = String(req.query.preset || "all").toLowerCase();
-    let from = req.query.from || null;
-    let to = req.query.to || null;
-    if (!from && !to) {
-      const today = new Date();
-      const yyyymm = (y, m) => `${y}-${String(m + 1).padStart(2, "0")}`;
-      const monthRange = (y, m) => {
-        const first = `${yyyymm(y, m)}-01`;
-        const last = new Date(y, m + 1, 0); // last day of month
-        return [first, `${yyyymm(y, m)}-${String(last.getDate()).padStart(2, "0")}`];
-      };
-      const months2026 = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
-      const mIdx = months2026.indexOf(preset.replace("-2026", "").trim());
-      if (mIdx >= 0 && preset.endsWith("2026")) {
-        [from, to] = monthRange(2026, mIdx);
-      } else if (preset === "year") {
-        from = `${today.getFullYear()}-01-01`;
-        to = `${today.getFullYear()}-12-31`;
-      } else if (preset === "last-30") {
-        const d = new Date(today); d.setDate(d.getDate() - 30);
-        from = d.toISOString().slice(0, 10);
-        to = today.toISOString().slice(0, 10);
-      } else if (preset === "last-90") {
-        const d = new Date(today); d.setDate(d.getDate() - 90);
-        from = d.toISOString().slice(0, 10);
-        to = today.toISOString().slice(0, 10);
-      }
-      // preset === "all" ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ leave from/to null
-    }
-    const filter = { from, to };
-    let jobs = GpJobs.list({ limit: 5000, ...filter }).filter(isInstall);
-    const totalCount = jobs.length;
-    const totalPaid = jobs.reduce((s, j) => s + (Number(j.amount_paid) || 0), 0);
-    const grandTotalCount = GpJobs.list({ limit: 5000 }).filter(isInstall).length;
-    const summary = GpJobs.qualifiedSummary(filter);
-    if (summary && typeof summary === "object") summary.total = jobs.length;
-    const totalInvoiced = jobs.reduce((s, j) => s + (Number(j.invoice_total) || 0), 0);
-    const totalDue = Math.max(0, totalInvoiced - totalPaid);
-    const unmatched = GpUnmatched.list();
-    const inventory = GpInventory.list();
-    const status = {
-      jobber: jobberSync.isConfigured(),
-      sheets: sheets.isConfigured(),
-      gmail: gmail.isConfigured(),
-      ...sheets.status(),
-      ...gmail.status(),
-    };
-    res.send(
-      views.grossProfitPage({
-        user: req.user,
-        jobs, unmatched, inventory, status,
-        flash: req.session.flash,
-        filter: { ...filter, preset },
-        totalCount, totalPaid, totalInvoiced, totalDue, grandTotalCount,
-        summary,
-      })
-    );
-    delete req.session.flash;
-  });
-
-  router.get("/gross-profit/:id(\\d+)", (req, res) => {
-    const job = GpJobs.byId(parseInt(req.params.id, 10));
-    res.send(views.grossProfitJobPage({ user: req.user, job }));
-  });
-
-  // Serve attachment PDFs (PDFs only, served inline)
-  router.get("/gross-profit/attachment/:id(\\d+)", (req, res) => {
-    const att = GpAttachments.byId(parseInt(req.params.id, 10));
-    if (!att) return res.status(404).send("Not found");
-    try {
-      const bytes = fs.readFileSync(att.storage_path);
-      res.setHeader("Content-Type", att.mime_type || "application/pdf");
-      res.setHeader("Content-Disposition", `inline; filename="${att.filename.replace(/"/g, "")}"`);
-      res.send(bytes);
-    } catch (e) {
-      res.status(500).send("attachment file missing on disk");
-    }
-  });
-
-  // Manual sync triggers (admin only) ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ useful before crons fire
-  router.post("/gross-profit/sync/jobber", requireAdmin, async (req, res) => {
-    try {
-      const r = await jobberSync.pollOnce();
-      req.session.flash = { type: "ok", message: `Jobber sync: ${JSON.stringify(r)}` };
-    } catch (e) {
-      req.session.flash = { type: "error", message: `Jobber sync failed: ${e.message}` };
-    }
-    res.redirect("/gross-profit");
-  });
-  // Backfill: pull every Jobber invoice issued on/after a given date.
-  // Defaults to Jan 1 of the current year.
-  router.post("/gross-profit/sync/backfill", requireAdmin, async (req, res) => {
-    const since = (req.body?.since || `${new Date().getFullYear()}-01-01`).trim();
-    try {
-      const r = await jobberSync.backfillSince(since);
-      req.session.flash = { type: "ok", message: `Backfill since ${since}: ${JSON.stringify(r)}` };
-    } catch (e) {
-      req.session.flash = { type: "error", message: `Backfill failed: ${e.message}` };
-    }
-    res.redirect("/gross-profit");
-  });
-  router.post("/gross-profit/sync/sheets", requireAdmin, async (req, res) => {
-    try {
-      const r = await sheets.scanChrisSheet();
-      req.session.flash = { type: "ok", message: `Sheets scan: ${JSON.stringify(r)}` };
-    } catch (e) {
-      req.session.flash = { type: "error", message: `Sheets scan failed: ${e.message}` };
-    }
-    res.redirect("/gross-profit");
-  });
-  router.post("/gross-profit/sync/gmail", requireAdmin, async (req, res) => {
-    try {
-      const r = await gmail.pollOnce();
-      req.session.flash = { type: "ok", message: `Gmail watcher: ${JSON.stringify(r)}` };
-    } catch (e) {
-      req.session.flash = { type: "error", message: `Gmail watcher failed: ${e.message}` };
-    }
-    res.redirect("/gross-profit");
-  });
-  
-  // Debug: reconcile gp_jobs vs Jobber report. Returns invoice rows with
-  // any data inconsistency (paid != amount_paid, etc.) so we can spot which
-  // rows have stale or missing payment data.
-  router.get("/gross-profit/debug/reconcile", requireAdmin, (req, res) => {
-    const all = GpJobs.list({ limit: 5000 });
-    const installs = all.filter(isInstall);
-    const summary = {
-      totalRows: all.length,
-      installRows: installs.length,
-      paid: installs.filter(j => Number(j.amount_paid) > 0).length,
-      fullyPaid: installs.filter(j => Number(j.amount_paid) > 0 && Number(j.amount_paid) >= Number(j.invoice_total)).length,
-      partialPaid: installs.filter(j => Number(j.amount_paid) > 0 && Number(j.invoice_total) > Number(j.amount_paid)).length,
-      sumAmountPaid: installs.reduce((s, j) => s + (Number(j.amount_paid) || 0), 0),
-      sumInvoiceTotal: installs.reduce((s, j) => s + (Number(j.invoice_total) || 0), 0),
-    };
-    const partial = installs
-      .filter(j => Number(j.amount_paid) > 0 && Number(j.invoice_total) > Number(j.amount_paid))
-      .map(j => ({ id: j.id, customer: j.customer_name, invoice: j.jobber_invoice_number, issued: j.jobber_invoice_issued_at, paid: j.amount_paid, total: j.invoice_total, gap: Number(j.invoice_total) - Number(j.amount_paid) }))
-      .sort((a, b) => b.gap - a.gap);
-    const noTotal = installs.filter(j => !j.invoice_total || Number(j.invoice_total) === 0).map(j => ({ id: j.id, customer: j.customer_name, invoice: j.jobber_invoice_number, paid: j.amount_paid, total: j.invoice_total }));
-    // Also list installs missing salesperson (i.e., no SALES sheet match)
-    const noSalesperson = installs
-      .filter(j => !j.salesperson_name)
-      .map(j => ({ id: j.id, customer: j.customer_name, invoice: j.jobber_invoice_number, issued: j.jobber_invoice_issued_at, paid: j.amount_paid, total: j.invoice_total }))
-      .sort((a,b) => (b.total||0) - (a.total||0));
-    const noLabor = installs
-      .filter(j => !j.total_labor_cost || Number(j.total_labor_cost) === 0)
-      .map(j => ({ id: j.id, customer: j.customer_name, invoice: j.jobber_invoice_number, total: j.invoice_total }));
-    res.json({ summary, partialPaid: partial, noInvoiceTotal: noTotal, noSalesperson, noLabor });
-  });
-
-  router.post("/gross-profit/sync/mirror", requireAdmin, async (req, res) => {
-    try {
-      const r = await sheets.syncMirror();
-      req.session.flash = { type: "ok", message: `Mirror sync: ${JSON.stringify(r)}` };
-    } catch (e) {
-      req.session.flash = { type: "error", message: `Mirror sync failed: ${e.message}` };
-    }
-    res.redirect("/gross-profit");
-  });
-
-  // ----- GHL diagnostic probe (admin only) -----
-  // Hits several GHL endpoints and returns raw responses so we can see
-  // exactly why the calls report shows zero. Safe to leave in place.
-  router.get("/admin/ghl-debug", requireAdmin, async (req, res) => {
-    try {
-      const out = await ghl.probe();
-      res.setHeader("Content-Type", "application/json");
-      res.send(JSON.stringify(out, null, 2));
-    } catch (e) {
-      res.status(500).send(`probe failed: ${e.message}`);
-    }
-  });
-
   // ----- Settings/Users (admin only) -----
   router.get("/settings/users", requireAdmin, (req, res) => {
     res.send(
@@ -521,7 +346,6 @@ export function buildDashboardRouter() {
         }
         if (Users.findByEmail(email)) throw new Error("Email already exists.");
         Users.create({ email, name, password, role: role === "admin" ? "admin" : "manager" });
-        Users.create({ email, name, password, role: role === "admin" ? "admin" : "manager" });
         req.session.flash = { type: "ok", message: `User ${email} created.` };
       } catch (e) {
         req.session.flash = { type: "error", message: e.message };
@@ -529,6 +353,39 @@ export function buildDashboardRouter() {
       res.redirect("/settings/users");
     }
   );
+
+  // ===== Admin: manual triggers (test-on-demand for the cron jobs) =====
+  // Lets Alex run any of the schedulers ad-hoc to verify they work without
+  // waiting for the actual cron. Returns JSON with timing + any error message.
+  router.get("/admin/run/idle-check", requireAdmin, async (req, res) => {
+    const t0 = Date.now();
+    try {
+      await checkIdleDispatchers();
+      res.json({ ok: true, kind: "idle-check", durationMs: Date.now() - t0 });
+    } catch (e) {
+      res.status(500).json({ ok: false, kind: "idle-check", error: e?.message, stack: e?.stack });
+    }
+  });
+
+  router.get("/admin/run/morning-report", requireAdmin, async (req, res) => {
+    const t0 = Date.now();
+    try {
+      await runMorningReport();
+      res.json({ ok: true, kind: "morning-report", durationMs: Date.now() - t0 });
+    } catch (e) {
+      res.status(500).json({ ok: false, kind: "morning-report", error: e?.message, stack: e?.stack });
+    }
+  });
+
+  router.get("/admin/run/evening-report", requireAdmin, async (req, res) => {
+    const t0 = Date.now();
+    try {
+      await runEveningReport();
+      res.json({ ok: true, kind: "evening-report", durationMs: Date.now() - t0 });
+    } catch (e) {
+      res.status(500).json({ ok: false, kind: "evening-report", error: e?.message, stack: e?.stack });
+    }
+  });
 
   return router;
 }
