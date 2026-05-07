@@ -88,9 +88,17 @@ function hasOutboundContactAfterLead(messages, leadAddedAt) {
   for (const m of messages || []) {
     const dir = String(m.direction ?? "").toLowerCase();
     if (dir !== "outbound") continue;
+    // CRITICAL: skip messages with no userId. GHL workflows automatically send
+    // welcome SMS / email blasts when a lead arrives — those have NO userId
+    // (they're bot-generated). Counting them as "human contact" caused the
+    // 3-min alert to be falsely suppressed for Villa Marte (May 7, 6:44 PM)
+    // and uCU0sNBSaBYKv4pCQB1v (May 7, 7:04 PM). Real dispatchers ALWAYS
+    // have a userId on their outbound messages.
+    const userId = m.userId || m.user || m.createdBy;
+    if (!userId) continue;
     const ts = new Date(m.dateAdded ?? m.createdAt ?? 0).getTime();
     if (ts < leadTime) continue;
-    return true; // any outbound activity counts as contact
+    return true;
   }
   return false;
 }
