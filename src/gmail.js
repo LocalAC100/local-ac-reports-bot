@@ -335,7 +335,7 @@ async function pollOnceForUser(gmail, userEmail, { since = "2026/01/01", maxPage
       ).run(m.id, e.message);
     }
   }
-  return { scanned: messages.length, processed, errors: };
+  return { scanned: messages.length, processed, errors };
 }
 
 async function processMessage(gmail, messageId, userEmail) {
