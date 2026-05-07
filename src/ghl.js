@@ -128,6 +128,30 @@ export async function listActiveConversations({ from, to, maxPages = 10 }) {
   return all;
 }
 
+// Find contacts by phone number — used by the debug endpoint to look up
+// a lead from its phone (when only the phone is known, not the contactId).
+export async function searchContactsByPhone(phone) {
+  if (!phone) return [];
+  const cleaned = String(phone).replace(/[^\d+]/g, "");
+  try {
+    const r = await http.post("/contacts/search", {
+      locationId: config.ghl.locationId,
+      pageLimit: 20,
+      filters: [
+        {
+          field: "phone",
+          operator: "contains",
+          value: cleaned,
+        },
+      ],
+    });
+    return r.data?.contacts ?? [];
+  } catch (e) {
+    console.error("[ghl] searchContactsByPhone failed", e?.message);
+    return [];
+  }
+}
+
 // Look up conversations by contactId — the ONLY reliable way to find the
 // conversation for an alert lookup. Date-filtered search misses conversations
 // that existed before the lead webhook fired.
