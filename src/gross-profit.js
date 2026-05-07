@@ -3,7 +3,7 @@
 // One row per HVAC job. Data accumulates from three sources:
 //   1. Jobber invoice  (creates the row, anchors customer + amount paid)
 //   2. Chris's Google Sheet (labor, commissions, permits, other expenses)
-//   3. Supplier invoice emails ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ Gemaire, Goodman, Home Depot (equipment + materials)
+//   3. Supplier invoice emails ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ Gemaire, Goodman, Home Depot (equipment + materials)
 // Once enough data is in place, GP $ and GP % are computed.
 //
 // The DB is the source of truth. A separate mirror writer (src/sheets.js)
@@ -190,6 +190,12 @@ function nameSimilarity(a, b) {
   const na = normalizeName(a);
   const nb = normalizeName(b);
   if (!na || !nb) return 0;
+  // High-confidence match: one name fully contains the other (>= 4 chars each)
+  // Catches "Juan Carlos" (sheet) vs "Juan Carlos Fernandez" (Jobber)
+  if (na.length >= 4 && nb.length >= 4) {
+    if (na === nb) return 1;
+    if (na.includes(nb) || nb.includes(na)) return 0.95;
+  }
   const dist = levenshtein(na, nb);
   const maxLen = Math.max(na.length, nb.length);
   return 1 - dist / maxLen;
@@ -375,7 +381,7 @@ export const GpJobs = {
     set("fee_amount", sheet.feeAmount);
     set("total_other_expenses", sheet.totalOtherExpenses);
 
-    // Labor entries ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ replace existing 'labor' kind from sheet to avoid duplicates
+    // Labor entries ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ replace existing 'labor' kind from sheet to avoid duplicates
     if (Array.isArray(sheet.labor) && sheet.labor.length) {
       db.prepare("DELETE FROM gp_line_items WHERE job_id = ? AND kind = 'labor' AND source = 'sheet'").run(jobId);
       const ins = db.prepare(
@@ -479,7 +485,7 @@ export const GpJobs = {
       .all(...params, limit, offset);
   },
 
-  // Count rows matching the same filter ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ exposed so the page can show
+  // Count rows matching the same filter ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ exposed so the page can show
   // `N invoices` for the current view (compare against Jobber).
   count({ from = null, to = null } = {}) {
     const where = [];
@@ -533,12 +539,12 @@ export const GpJobs = {
   },
 
   // Returns counts and totals for the report header. Differentiates between:
-  //   total       ÃÂ¢ÃÂÃÂ every invoice in the date range (matches the table)
-  //   paid        ÃÂ¢ÃÂÃÂ invoices with amount_paid > 0
-  //   info_complete ÃÂ¢ÃÂÃÂ invoices that have data from all 3 sources
+  //   total       ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ every invoice in the date range (matches the table)
+  //   paid        ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ invoices with amount_paid > 0
+  //   info_complete ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ invoices that have data from all 3 sources
   //                  (Jobber amount_paid + supplier equip+mat + sheet labor)
-  //   qualified   ÃÂ¢ÃÂÃÂ paid AND info_complete (counts toward GP totals)
-  // Only "qualified" rows roll up into total_sales / gp_dollars / gp_percent ÃÂ¢ÃÂÃÂ
+  //   qualified   ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ paid AND info_complete (counts toward GP totals)
+  // Only "qualified" rows roll up into total_sales / gp_dollars / gp_percent ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ
   // because a row missing labor cost would compute as 100% margin, which
   // misleads. Those totals match what you'd get summing the rows by hand.
   qualifiedSummary({ from = null, to = null } = {}) {
