@@ -568,5 +568,58 @@ export function buildDashboardRouter() {
   });
 
 
+  // ----- Admin: inspect raw email body for one unmatched row (parser tuning) -----
+  router.get("/gross-profit/unmatched/:id(\\d+)/debug-body", requireAdmin, async (req, res) => {
+    try {
+      const { db } = await import("./db.js");
+      const um = db.prepare(`SELECT u.*, a.gmail_message_id, a.metadata_json
+                               FROM gp_unmatched_invoices u
+                               JOIN gp_attachments a ON a.id = u.attachment_id
+                              WHERE u.id = ?`).get(parseInt(req.params.id, 10));
+      if (!um) return res.status(404).json({ error: "not found" });
+      if (!um.gmail_message_id) return res.json({ error: "no gmail_message_id on attachment", um });
+      const fs = await import("fs");
+      const { google } = await import("googleapis");
+      const gmailMod = await import("./gmail.js");
+      let creds;
+      if (process.env.GOOGLE_SA_JSON) creds = JSON.parse(process.env.GOOGLE_SA_JSON);
+      else creds = JSON.parse(fs.readFileSync("/etc/secrets/google-sa.json", "utf8"));
+      const usersList = (process.env.GMAIL_DELEGATED_USERS || "").split(",").map(s => s.trim()).filter(Boolean);
+      let full = null, fromUser = null;
+      for (const userEmail of usersList) {
+        try {
+          const auth = new google.auth.JWT({
+            email: creds.client_email, key: creds.private_key,
+            scopes: ["https://www.googleapis.com/auth/gmail.readonly"], subject: userEmail,
+          });
+          await auth.authorize();
+          const gm = google.gmail({ version: "v1", auth });
+          full = await gm.users.messages.get({ userId: "me", id: um.gmail_message_id, format: "full" });
+          if (full?.data?.payload) { fromUser = userEmail; break; }
+        } catch (e) { /* try next */ }
+      }
+      if (!full?.data?.payload) return res.json({ error: "couldn't fetch message in any mailbox" });
+      const headers = Object.fromEntries(
+        (full.data.payload.headers || []).map(h => [h.name.toLowerCase(), h.value])
+      );
+      const body = gmailMod.extractBodyText(full.data.payload);
+      res.json({
+        unmatched_id: um.id,
+        supplier: um.supplier,
+        old_po: um.po_name,
+        gmail_message_id: um.gmail_message_id,
+        mailbox: fromUser,
+        from: headers["from"],
+        subject: headers["subject"],
+        date: headers["date"],
+        bodyLength: body.length,
+        bodyPreview: body.slice(0, 5000),
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message, stack: e.stack });
+    }
+  });
+
+
   return router;
 }
