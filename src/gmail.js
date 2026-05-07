@@ -68,27 +68,36 @@ export function status() {
 }
 
 // ---------- Google client ----------
-let cachedClient = null;
-async function getGmailClient() {
-  if (cachedClient) return cachedClient;
+const cachedClients = new Map(); // user email -> gmail client
+function getDelegatedUsers() {
+  const multi = process.env.GMAIL_DELEGATED_USERS;
+  const single = process.env.GMAIL_DELEGATED_USER;
+  const raw = multi || single || "";
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+async function getGmailClient(userEmail) {
+  if (!userEmail) throw new Error("userEmail required");
+  if (cachedClients.has(userEmail)) return cachedClients.get(userEmail);
   let creds;
   if (process.env.GOOGLE_SA_JSON) creds = JSON.parse(process.env.GOOGLE_SA_JSON);
   else if (fs.existsSync("/etc/secrets/google-sa.json"))
     creds = JSON.parse(fs.readFileSync("/etc/secrets/google-sa.json", "utf8"));
   else throw new Error("Google service account not configured");
-  if (!process.env.GMAIL_DELEGATED_USER) {
-    throw new Error("GMAIL_DELEGATED_USER env var required");
+  if (getDelegatedUsers().length === 0) {
+    throw new Error("GMAIL_DELEGATED_USERS or GMAIL_DELEGATED_USER env var required");
   }
   const { google } = await import("googleapis");
   const auth = new google.auth.JWT({
     email: creds.client_email,
     key: creds.private_key,
     scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
-    subject: process.env.GMAIL_DELEGATED_USER,
+    subject: userEmail,
   });
   await auth.authorize();
-  cachedClient = google.gmail({ version: "v1", auth });
-  return cachedClient;
+  const client = google.gmail({ version: "v1", auth });
+  cachedClients.set(userEmail, client);
+  return client;
 }
 
 // ---------- Supplier identification ----------
@@ -175,12 +184,31 @@ export async function pollOnce({ window = 50 } = {}) {
   if (!isConfigured()) {
     return { skipped: true, reason: "Gmail watcher not configured" };
   }
-  let gmail;
-  try {
-    gmail = await getGmailClient();
-  } catch (e) {
-    return { skipped: false, error: e.message };
+  const users = getDelegatedUsers();
+  if (!users.length) return { skipped: true, reason: "no Gmail mailboxes configured" };
+  const totals = { matched: 0, unmatched: 0, errors: 0, processed: 0, perUser: {} };
+  for (const userEmail of users) {
+    let gmail;
+    try {
+      gmail = await getGmailClient(userEmail);
+    } catch (e) {
+      totals.errors++;
+      totals.perUser[userEmail] = { error: e.message };
+      continue;
+    }
+    const userResult = await pollOnceForUser(gmail);
+    totals.matched += userResult.matched || 0;
+    totals.unmatched += userResult.unmatched || 0;
+    totals.errors += userResult.errors || 0;
+    totals.processed += userResult.processed || 0;
+    totals.perUser[userEmail] = userResult;
   }
+  return totals;
+}
+
+async function pollOnceForUser(gmail) {
+  let _placeholder;
+  try { _placeholder = null; } catch (e) {}
 
   // Build a Gmail search query: from any supplier, has attachment, newer_than:30d
   const fromClause = SUPPLIERS.map((s) => s.domains.map((d) => `from:${d}`).join(" OR ")).map((c) => `(${c})`).join(" OR ");
