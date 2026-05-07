@@ -538,14 +538,87 @@ async function processMessage(gmail, messageId, userEmail) {
 
 
 // Re-parse all currently-unmatched supplier invoices using the new body-PO
-// extractor. Refetches each email body via Gmail (using the stored
-// gmail_message_id on the attachment row). For each row:
-//   - if extractPoFromBody returns a name and there's a high-confidence (≥0.9)
-//     unique candidate, auto-attach to that job and resolve the unmatched row
-//   - otherwise just update gp_unmatched_invoices.po_name so the manual
-//     Resolve UI shows a useful customer name instead of column-header garbage
+// extractor + Gemaire/VersaPay invoice→PO map. Refetches each email body
+// via Gmail (using the stored gmail_message_id on the attachment row).
+//
+// For each unmatched row:
+//   1. Try extractPoFromBody (single PO, e.g. "Customer PO: BRAD HAMILTON")
+//   2. If not found, try extractPoMapFromBody (Gemaire bulk-invoice table)
+//      and look up by the invoice number from the attachment filename
+//      (e.g. "W403984-82454.pdf" -> map["W403984"])
+//   3. If a PO is found and there's a high-confidence (>=0.9) unique
+//      candidate job, auto-attach and resolve the unmatched row
+//   4. Otherwise just update gp_unmatched_invoices.po_name so the manual
+//      Resolve UI shows the customer name instead of column-header garbage
 // Returns counts: { total, attached, updated, kept, errors }.
 export async function reparseUnmatched({ limit = 500 } = {}) {
+  if (!isConfigured()) return { skipped: true, reason: "gmail watcher not configured" };
+  const rows = db.prepare(
+    \`SELECT u.id AS unm_id, u.attachment_id, u.po_name AS old_po,
+              a.gmail_message_id, a.metadata_json, a.filename
+         FROM gp_unmatched_invoices u
+         JOIN gp_attachments a ON a.id = u.attachment_id
+        WHERE u.resolved_to_job_id IS NULL
+          AND a.gmail_message_id IS NOT NULL
+        LIMIT ?\`
+  ).all(limit);
+  const users = getDelegatedUsers();
+  // Cache message bodies + PO maps to avoid refetching for bulk emails
+  // that have multiple unmatched attachments pointing at them.
+  const msgCache = new Map(); // messageId -> { bodyText, poMap }
+  const out = { total: rows.length, attached: 0, updated: 0, kept: 0, errors: 0 };
+  for (const r of rows) {
+    try {
+      let cached = msgCache.get(r.gmail_message_id);
+      if (!cached) {
+        let full = null;
+        for (const userEmail of users) {
+          try {
+            const gmail = await getGmailClient(userEmail);
+            full = await gmail.users.messages.get({ userId: "me", id: r.gmail_message_id, format: "full" });
+            if (full?.data?.payload) break;
+          } catch (e) { /* try next user */ }
+        }
+        if (!full?.data?.payload) { out.errors++; continue; }
+        const bodyText = extractBodyText(full.data.payload);
+        const poMap = extractPoMapFromBody(bodyText);
+        cached = { bodyText, poMap };
+        msgCache.set(r.gmail_message_id, cached);
+      }
+      // Strategy 1: single-PO body (Customer PO:, Reference:, etc.)
+      let newPo = extractPoFromBody(cached.bodyText);
+      // Strategy 2: invoice→PO map. Pull invoice number from filename like
+      // "invoice-W403984.pdf" or "W403984-82454.pdf".
+      if (!newPo) {
+        const invMatch = (r.filename || "").match(/W(\\d{5,})/i);
+        if (invMatch) {
+          const key = ("W" + invMatch[1]).toUpperCase();
+          if (cached.poMap[key]) newPo = cached.poMap[key];
+        }
+      }
+      if (!newPo) { out.kept++; continue; }
+      const cands = GpJobs.findCandidatesByCustomer(newPo, { windowDays: 30, minSimilarity: 0.7 });
+      if (cands.length && cands[0].sim >= 0.9 &&
+          (cands.length < 2 || cands[0].sim - cands[1].sim >= 0.1)) {
+        const jobId = cands[0].row.id;
+        const meta = r.metadata_json ? JSON.parse(r.metadata_json) : {};
+        const parsed = meta.parsed || {};
+        GpJobs.applySupplierInvoice(jobId, {
+          equipmentCost: parsed.equipment || 0,
+          materialsCost: parsed.materials || 0,
+          totalWithTax: parsed.total || null,
+        }, { attachmentId: r.attachment_id });
+        GpUnmatched.resolve(r.unm_id, jobId);
+        out.attached++;
+      } else {
+        db.prepare("UPDATE gp_unmatched_invoices SET po_name = ? WHERE id = ?").run(newPo, r.unm_id);
+        out.updated++;
+      }
+    } catch (e) { out.errors++; }
+  }
+  return out;
+}
+ = {}) {
   if (!isConfigured()) return { skipped: true, reason: "gmail watcher not configured" };
   const rows = db.prepare(
     `SELECT u.id AS unm_id, u.attachment_id, u.po_name AS old_po,
@@ -601,11 +674,10 @@ function collectParts(payload, acc = []) {
   return acc;
 }
 
-// Walk all parts of a Gmail message payload and collect text body content
-// (text/plain preferred; text/html stripped of tags as fallback). Returns a
-// single concatenated string. Used so the PO extractor can read the body
-// of supplier emails (Gemaire/VersaPay puts the customer PO in the email
-// body, not in the attached PDF).
+// Walk all parts of a Gmail message payload and collect text body content.
+// Returns text/plain CONCATENATED with HTML-stripped text/html, because
+// some senders (Gemaire/VersaPay) strip the table data when emitting the
+// text/plain version — the per-invoice PO names only live in the HTML.
 export function extractBodyText(payload) {
   const parts = collectParts(payload);
   const plain = [];
@@ -617,23 +689,19 @@ export function extractBodyText(payload) {
     let txt;
     try {
       txt = Buffer.from(data, "base64url").toString("utf8");
-    } catch (e) {
-      continue;
-    }
+    } catch (e) { continue; }
     if (mime.startsWith("text/plain")) plain.push(txt);
     else if (mime.startsWith("text/html")) html.push(txt);
   }
-  if (plain.length) return plain.join("\n");
+  let strippedHtml = "";
   if (html.length) {
-    // Strip tags + decode common HTML entities. Cheap but adequate for
-    // reading PO/customer-name lines out of supplier email bodies.
-    return html
-      .join("\n")
+    strippedHtml = html.join("\n")
       .replace(/<style[\s\S]*?<\/style>/gi, " ")
       .replace(/<script[\s\S]*?<\/script>/gi, " ")
       .replace(/<br\s*\/?>/gi, "\n")
       .replace(/<\/p>/gi, "\n")
       .replace(/<\/(div|tr|li|h\d)>/gi, "\n")
+      .replace(/<\/td>/gi, " ")
       .replace(/<[^>]+>/g, " ")
       .replace(/&nbsp;/gi, " ")
       .replace(/&amp;/gi, "&")
@@ -642,5 +710,26 @@ export function extractBodyText(payload) {
       .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
       .replace(/&[a-z]+;/gi, " ");
   }
-  return "";
+  return [plain.join("\n"), strippedHtml].filter(Boolean).join("\n\n");
 }
+
+// Parse a Gemaire/VersaPay bulk-invoice email body and return a map of
+// { invoice_number_uppercase: PO_name }. Body table format:
+//   "Invoice  PO #         Issued        Due          Balance"
+//   "W403984  PATRICK HOTZ 03-19-2026   05-18-2026   $1,108.28"
+// Returns {} if no rows match.
+export function extractPoMapFromBody(bodyText) {
+  if (!bodyText) return {};
+  const out = {};
+  const re = /\b(W\d{5,})\s+([A-Za-z][A-Za-z0-9 .'\-&]{1,60}?)\s+\d{2}-\d{2}-\d{4}\s+\d{2}-\d{2}-\d{4}\s+\\?\$/g;
+  let m;
+  while ((m = re.exec(bodyText)) !== null) {
+    const inv = m[1].toUpperCase();
+    const po = m[2].trim();
+    if (po && !/^(Issued|Due|Balance|PO|Invoice)$/i.test(po)) {
+      out[inv] = po;
+    }
+  }
+  return out;
+}
+
