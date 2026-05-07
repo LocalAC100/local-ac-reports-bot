@@ -404,39 +404,10 @@ export function buildDashboardRouter() {
       let contact = null;
 
       if (!resolvedContactId && phone) {
-        // Try the GHL contacts/lookup endpoint by phone
-        try {
-          const r = await ghl.searchContacts ? null : null; // no-op safeguard
-        } catch (_) {}
-        // Use raw axios via the http client baked into ghl.js — but it's not
-        // exported. Instead, use /contacts/search with phone filter.
-        const axios = (await import("axios")).default;
-        const apiKey = process.env.GHL_API_KEY;
-        const locationId = process.env.GHL_LOCATION_ID;
-        const r = await axios.post(
-          "https://services.leadconnectorhq.com/contacts/search",
-          {
-            locationId,
-            pageLimit: 20,
-            filters: [
-              {
-                field: "phone",
-                operator: "contains",
-                value: String(phone).replace(/[^\d+]/g, ""),
-              },
-            ],
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${apiKey}`,
-              Version: "2021-07-28",
-              Accept: "application/json",
-            },
-          }
-        ).catch((e) => ({ data: { contacts: [], _err: e?.message } }));
-        const matches = r.data?.contacts || [];
+        // Use the ghl client (already has correct PIT auth + Version header)
+        const matches = await ghl.searchContactsByPhone(phone);
         if (matches.length === 0) {
-          return res.json({ ok: false, error: `no contact found for phone ${phone}`, ghl_response: r.data });
+          return res.json({ ok: false, error: `no contact found for phone ${phone}` });
         }
         contact = matches[0];
         resolvedContactId = contact.id;
