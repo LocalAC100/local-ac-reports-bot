@@ -1,6 +1,7 @@
 // Gmail watcher for supplier invoices.
 //
-// Watches office@local-ac.com (a Google Workspace inbox) for messages from:
+// Watches office@local-ac.com and service@local-ac.com (Workspace inboxes)
+// for messages from:
 //   - Gemaire, Goodman, Home Depot
 // For each new message, downloads attached PDFs, attempts to parse line
 // items into Equipment vs Materials, and either:
@@ -9,12 +10,20 @@
 //   (c) files it under Inventory if it's clearly not for a single job.
 //
 // Auth: same Google service account as src/sheets.js, with domain-wide
-// delegation to impersonate office@local-ac.com.
+// delegation to impersonate the configured mailboxes.
 // Required env vars:
 //   GOOGLE_SA_JSON or /etc/secrets/google-sa.json
-//   GMAIL_DELEGATED_USER  (e.g. "office@local-ac.com")
+//   GMAIL_DELEGATED_USERS  (comma-separated, e.g. "office@local-ac.com,service@local-ac.com")
+//   GMAIL_DELEGATED_USER   (legacy single-user fallback)
 //
-// Idempotency: a gp_processed_emails table records message IDs we've seen.
+// DEDUP: three layers of protection against double-counting an invoice:
+//   1. gp_processed_emails(message_id UNIQUE) — message-level skip
+//   2. gp_attachments.pdf_sha256 UNIQUE — same PDF bytes only stored once
+//   3. gp_attachments.applied_at — applySupplierInvoice no-op if already set
+// All three must be wrong simultaneously for a duplicate to slip through.
+// Per-supplier subject filters also drop non-invoice mail (statements,
+// payment receipts, monthly reports, cashback notices, etc.) before the
+// PDF parser sees them.
 
 import fs from "fs";
 import { db } from "./db.js";
@@ -47,8 +56,19 @@ CREATE INDEX IF NOT EXISTS idx_gp_processed_msg ON gp_processed_emails(message_i
 `);
 
 // ---------- Configuration ----------
+function getDelegatedUsers() {
+  // Prefer GMAIL_DELEGATED_USERS (comma-separated) for multi-mailbox polling.
+  // Fall back to legacy GMAIL_DELEGATED_USER (single mailbox).
+  const plural = (process.env.GMAIL_DELEGATED_USERS || "").trim();
+  if (plural) {
+    return plural.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  const singular = (process.env.GMAIL_DELEGATED_USER || "").trim();
+  return singular ? [singular] : [];
+}
+
 export function isConfigured() {
-  if (!process.env.GMAIL_DELEGATED_USER) return false;
+  if (getDelegatedUsers().length === 0) return false;
   if (process.env.GOOGLE_SA_JSON) return true;
   if (fs.existsSync("/etc/secrets/google-sa.json")) return true;
   return false;
@@ -61,32 +81,22 @@ export function status() {
     .get();
   return {
     serviceAccount: Boolean(process.env.GOOGLE_SA_JSON || fs.existsSync("/etc/secrets/google-sa.json")),
-    delegatedUser: process.env.GMAIL_DELEGATED_USER || null,
+    delegatedUsers: getDelegatedUsers(),
     processedCount: seen,
     lastProcessed: lastRow?.t || null,
   };
 }
 
-// ---------- Google client ----------
-const cachedClients = new Map(); // user email -> gmail client
-function getDelegatedUsers() {
-  const multi = process.env.GMAIL_DELEGATED_USERS;
-  const single = process.env.GMAIL_DELEGATED_USER;
-  const raw = multi || single || "";
-  return raw.split(",").map((s) => s.trim()).filter(Boolean);
-}
-
+// ---------- Google client (one auth/client per delegated user) ----------
+const cachedClients = new Map(); // userEmail -> gmail client
 async function getGmailClient(userEmail) {
-  if (!userEmail) throw new Error("userEmail required");
   if (cachedClients.has(userEmail)) return cachedClients.get(userEmail);
   let creds;
   if (process.env.GOOGLE_SA_JSON) creds = JSON.parse(process.env.GOOGLE_SA_JSON);
   else if (fs.existsSync("/etc/secrets/google-sa.json"))
     creds = JSON.parse(fs.readFileSync("/etc/secrets/google-sa.json", "utf8"));
   else throw new Error("Google service account not configured");
-  if (getDelegatedUsers().length === 0) {
-    throw new Error("GMAIL_DELEGATED_USERS or GMAIL_DELEGATED_USER env var required");
-  }
+  if (!userEmail) throw new Error("getGmailClient: userEmail required");
   const { google } = await import("googleapis");
   const auth = new google.auth.JWT({
     email: creds.client_email,
@@ -101,18 +111,72 @@ async function getGmailClient(userEmail) {
 }
 
 // ---------- Supplier identification ----------
+//
+// Per-supplier subject rules (filters applied AFTER the from/subject match):
+//
+//   Gemaire   — invoice mail arrives ~1 day after equipment pickup. Skip
+//               payment confirmations, statements, and monthly reports.
+//   Goodman   — same-day or next-day after pickup. Skip cashback/rewards
+//               notifications, monthly reports, and payment confirmations.
+//   Home Depot — order/receipt emails (paid at order time). Skip shipping
+//               updates, returns, and promotional mail.
+//
+// `mustInclude` (if set) requires at least one of these tokens in the subject;
+// `excludeAny` drops the message if any of these tokens appears.
 const SUPPLIERS = [
-  { key: "gemaire",    domains: ["gemaire.com"],          subjectHints: ["gemaire"] },
-  { key: "goodman",    domains: ["goodmanmfg.com", "goodmandistribution.com"], subjectHints: ["goodman"] },
-  { key: "home_depot", domains: ["homedepot.com"],        subjectHints: ["home depot", "homedepot"] },
+  {
+    key: "gemaire",
+    domains: ["gemaire.com"],
+    subjectHints: ["gemaire"],
+    mustInclude: ["invoice"],
+    excludeAny: [
+      "payment", "statement", "monthly", "report", "remittance",
+      "confirmation of payment", "credit memo", "promotion",
+    ],
+  },
+  {
+    key: "goodman",
+    domains: ["goodmanmfg.com", "goodmandistribution.com"],
+    subjectHints: ["goodman"],
+    mustInclude: ["invoice"],
+    excludeAny: [
+      "report", "statement", "monthly", "cashback", "rewards",
+      "payment received", "remittance", "credit memo", "promotion",
+    ],
+  },
+  {
+    key: "home_depot",
+    domains: ["homedepot.com", "orders.homedepot.com"],
+    subjectHints: ["home depot", "homedepot"],
+    mustInclude: ["order", "receipt", "purchase"],
+    excludeAny: [
+      "shipping", "shipped", "delivery", "return", "refund",
+      "monthly", "statement", "promotion", "deal", "savings",
+    ],
+  },
 ];
 
 function identifySupplier({ from, subject }) {
   const fromLower = (from || "").toLowerCase();
   const subjLower = (subject || "").toLowerCase();
   for (const s of SUPPLIERS) {
-    if (s.domains.some((d) => fromLower.includes(d))) return s.key;
-    if (s.subjectHints.some((h) => subjLower.includes(h))) return s.key;
+    if (s.domains.some((d) => fromLower.includes(d))) return s;
+    if (s.subjectHints.some((h) => subjLower.includes(h))) return s;
+  }
+  return null;
+}
+
+// Returns null if the subject passes the supplier's filter; otherwise a
+// string reason describing why the message was skipped.
+function subjectSkipReason(supplier, subject) {
+  const subj = (subject || "").toLowerCase();
+  if (Array.isArray(supplier.excludeAny)) {
+    const hit = supplier.excludeAny.find((tok) => subj.includes(tok));
+    if (hit) return `excluded:${hit}`;
+  }
+  if (Array.isArray(supplier.mustInclude) && supplier.mustInclude.length) {
+    const ok = supplier.mustInclude.some((tok) => subj.includes(tok));
+    if (!ok) return `missing_required:${supplier.mustInclude.join("|")}`;
   }
   return null;
 }
@@ -179,37 +243,39 @@ function parseInvoiceText(text) {
 
 // ---------- Run once ----------
 //
-// Pulls newest 50 unprocessed messages from any supplier. Idempotent.
+// Pulls newest unprocessed messages from each delegated mailbox.
+// Idempotent at three levels (see DEDUP note in the file header).
 export async function pollOnce({ window = 50 } = {}) {
   if (!isConfigured()) {
     return { skipped: true, reason: "Gmail watcher not configured" };
   }
   const users = getDelegatedUsers();
-  if (!users.length) return { skipped: true, reason: "no Gmail mailboxes configured" };
-  const totals = { matched: 0, unmatched: 0, errors: 0, processed: 0, perUser: {} };
+  const perUser = [];
+  let totalScanned = 0, totalProcessed = 0, totalErrors = 0;
   for (const userEmail of users) {
     let gmail;
     try {
       gmail = await getGmailClient(userEmail);
     } catch (e) {
-      totals.errors++;
-      totals.perUser[userEmail] = { error: e.message };
+      perUser.push({ user: userEmail, error: e.message });
+      totalErrors++;
       continue;
     }
-    const userResult = await pollOnceForUser(gmail);
-    totals.matched += userResult.matched || 0;
-    totals.unmatched += userResult.unmatched || 0;
-    totals.errors += userResult.errors || 0;
-    totals.processed += userResult.processed || 0;
-    totals.perUser[userEmail] = userResult;
+    try {
+      const r = await pollOnceForUser(gmail, userEmail, { window });
+      perUser.push({ user: userEmail, ...r });
+      totalScanned += r.scanned || 0;
+      totalProcessed += r.processed || 0;
+      totalErrors += r.errors || 0;
+    } catch (e) {
+      perUser.push({ user: userEmail, error: e.message });
+      totalErrors++;
+    }
   }
-  return totals;
+  return { users: perUser, scanned: totalScanned, processed: totalProcessed, errors: totalErrors };
 }
 
-async function pollOnceForUser(gmail) {
-  let _placeholder;
-  try { _placeholder = null; } catch (e) {}
-
+async function pollOnceForUser(gmail, userEmail, { window = 50 } = {}) {
   // Build a Gmail search query: from any supplier, has attachment, newer_than:30d
   const fromClause = SUPPLIERS.map((s) => s.domains.map((d) => `from:${d}`).join(" OR ")).map((c) => `(${c})`).join(" OR ");
   const q = `(${fromClause}) has:attachment newer_than:30d`;
@@ -221,24 +287,25 @@ async function pollOnceForUser(gmail) {
   });
   const messages = list.data.messages || [];
 
-  let processed = 0, matched = 0, unmatched = 0, inventory = 0, errors = 0;
+  let processed = 0, errors = 0;
   for (const m of messages) {
+    // First dedup gate: have we already seen this Gmail message ID?
     if (db.prepare("SELECT 1 AS x FROM gp_processed_emails WHERE message_id = ?").get(m.id)) continue;
     try {
-      await processMessage(gmail, m.id);
+      await processMessage(gmail, m.id, userEmail);
       processed++;
     } catch (e) {
       errors++;
-      console.warn(`[gmail] processing ${m.id} failed:`, e.message);
+      console.warn(`[gmail][${userEmail}] processing ${m.id} failed:`, e.message);
       db.prepare(
         `INSERT OR IGNORE INTO gp_processed_emails (message_id, outcome, notes) VALUES (?, 'error', ?)`
       ).run(m.id, e.message);
     }
   }
-  return { scanned: messages.length, processed };
+  return { scanned: messages.length, processed, errors };
 }
 
-async function processMessage(gmail, messageId) {
+async function processMessage(gmail, messageId, userEmail) {
   const full = await gmail.users.messages.get({ userId: "me", id: messageId, format: "full" });
   const headers = Object.fromEntries(
     (full.data.payload?.headers || []).map((h) => [h.name.toLowerCase(), h.value])
@@ -251,8 +318,19 @@ async function processMessage(gmail, messageId) {
   if (!supplier) {
     db.prepare(
       `INSERT INTO gp_processed_emails (message_id, thread_id, from_addr, subject, received_at, outcome, notes)
-       VALUES (?, ?, ?, ?, ?, 'skipped', 'unknown supplier')`
-    ).run(messageId, full.data.threadId, fromAddr, subject, date);
+       VALUES (?, ?, ?, ?, ?, 'skipped', ?)`
+    ).run(messageId, full.data.threadId, fromAddr, subject, date, `unknown supplier (mbox=${userEmail})`);
+    return;
+  }
+
+  // Subject-level filter: skip non-invoice mail (statements, payment confirms,
+  // monthly reports, cashback, etc.). This is the "skip and flag" pass per spec.
+  const skip = subjectSkipReason(supplier, subject);
+  if (skip) {
+    db.prepare(
+      `INSERT INTO gp_processed_emails (message_id, thread_id, from_addr, subject, received_at, outcome, notes)
+       VALUES (?, ?, ?, ?, ?, 'skipped', ?)`
+    ).run(messageId, full.data.threadId, fromAddr, subject, date, `${supplier.key}:${skip}`);
     return;
   }
 
@@ -270,7 +348,9 @@ async function processMessage(gmail, messageId) {
     return;
   }
 
-  // For each PDF, save bytes + parse + match
+  // For each PDF, save bytes + parse + match. Track per-message outcomes so
+  // we can stamp ONE gp_processed_emails row at the end (UNIQUE on message_id).
+  const outcomes = [];
   for (const part of pdfParts) {
     const att = await gmail.users.messages.attachments.get({
       userId: "me",
@@ -293,40 +373,75 @@ async function processMessage(gmail, messageId) {
       }
     }
 
-    const attachmentId = GpAttachments.save({
+    // GpAttachments.save now returns { id, deduped, alreadyApplied } —
+    // dedup happens via SHA-256 on the PDF bytes, so the same PDF re-attached
+    // to a different email will resolve to the existing attachment row.
+    const saveRes = GpAttachments.save({
       jobId,
       source: "supplier_invoice",
-      supplier,
-      filename: part.filename || `${supplier}-${messageId}.pdf`,
+      supplier: supplier.key,
+      filename: part.filename || `${supplier.key}-${messageId}.pdf`,
       mimeType: "application/pdf",
       bytes,
-      metadata: { parsed, candList: candList.slice(0, 3).map(c => ({ id: c.row.id, name: c.row.customer_name, sim: c.sim })) },
+      metadata: { parsed, candList: candList.slice(0, 3).map(c => ({ id: c.row.id, name: c.row.customer_name, sim: c.sim })), mailbox: userEmail },
+      gmailMessageId: messageId,
+      gmailAttachmentPartId: part.body.attachmentId,
     });
+    const attachmentId = saveRes.id;
 
     if (jobId) {
-      GpJobs.applySupplierInvoice(jobId, {
+      // applySupplierInvoice is a no-op if attachment.applied_at is already
+      // set — that's our final gate against double-counting costs.
+      const applyRes = GpJobs.applySupplierInvoice(jobId, {
         equipmentCost: parsed.equipment,
         materialsCost: parsed.materials,
         totalWithTax: parsed.total,
-      });
-      db.prepare(
-        `INSERT INTO gp_processed_emails (message_id, thread_id, from_addr, subject, received_at, outcome, job_id, attachment_id)
-         VALUES (?, ?, ?, ?, ?, 'matched', ?, ?)`
-      ).run(messageId, full.data.threadId, fromAddr, subject, date, jobId, attachmentId);
-    } else {
-      const unmId = GpUnmatched.add({
-        supplier,
-        poName: parsed.poName,
-        totalAmount: parsed.total,
+      }, { attachmentId });
+      outcomes.push({
+        outcome: applyRes.applied ? "matched" : "duplicate",
+        jobId,
         attachmentId,
-        notes: text == null ? "PDF could not be parsed" : null,
+        notes: applyRes.applied ? null : `dedup: ${applyRes.reason || "already_applied"}`,
       });
-      db.prepare(
-        `INSERT INTO gp_processed_emails (message_id, thread_id, from_addr, subject, received_at, outcome, unmatched_id, attachment_id, notes)
-         VALUES (?, ?, ?, ?, ?, 'unmatched', ?, ?, ?)`
-      ).run(messageId, full.data.threadId, fromAddr, subject, date, unmId, attachmentId, text == null ? "no parse" : null);
+    } else {
+      // Unmatched path: only file a new unmatched row if this is a new attachment.
+      // (If we already saw this PDF, we already filed it — don't duplicate.)
+      let unmId = null;
+      if (!saveRes.deduped) {
+        unmId = GpUnmatched.add({
+          supplier: supplier.key,
+          poName: parsed.poName,
+          totalAmount: parsed.total,
+          attachmentId,
+          notes: text == null ? "PDF could not be parsed" : null,
+        });
+      }
+      outcomes.push({
+        outcome: saveRes.deduped ? "duplicate" : "unmatched",
+        unmatchedId: unmId,
+        attachmentId,
+        notes: saveRes.deduped ? "dedup: same PDF already filed" : (text == null ? "no parse" : null),
+      });
     }
   }
+
+  // Stamp ONE gp_processed_emails row for the message. If multiple PDFs led
+  // to different outcomes, prefer 'matched' > 'unmatched' > 'duplicate' > 'skipped'.
+  const priority = { matched: 4, unmatched: 3, duplicate: 2, skipped: 1 };
+  outcomes.sort((a, b) => (priority[b.outcome] || 0) - (priority[a.outcome] || 0));
+  const top = outcomes[0] || { outcome: "skipped", notes: "no outcomes" };
+  const noteParts = outcomes
+    .map((o, i) => `pdf${i + 1}=${o.outcome}${o.notes ? `(${o.notes})` : ""}`)
+    .join("; ");
+  db.prepare(
+    `INSERT OR IGNORE INTO gp_processed_emails
+       (message_id, thread_id, from_addr, subject, received_at, outcome, job_id, unmatched_id, attachment_id, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    messageId, full.data.threadId, fromAddr, subject, date,
+    top.outcome, top.jobId || null, top.unmatchedId || null, top.attachmentId || null,
+    noteParts
+  );
 }
 
 function collectParts(payload, acc = []) {
