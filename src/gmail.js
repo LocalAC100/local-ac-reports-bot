@@ -17,9 +17,9 @@
 //   GMAIL_DELEGATED_USER   (legacy single-user fallback)
 //
 // DEDUP: three layers of protection against double-counting an invoice:
-//   1. gp_processed_emails(message_id UNIQUE) â message-level skip
-//   2. gp_attachments.pdf_sha256 UNIQUE â same PDF bytes only stored once
-//   3. gp_attachments.applied_at â applySupplierInvoice no-op if already set
+//   1. gp_processed_emails(message_id UNIQUE) — message-level skip
+//   2. gp_attachments.pdf_sha256 UNIQUE — same PDF bytes only stored once
+//   3. gp_attachments.applied_at — applySupplierInvoice no-op if already set
 // All three must be wrong simultaneously for a duplicate to slip through.
 // Per-supplier subject filters also drop non-invoice mail (statements,
 // payment receipts, monthly reports, cashback notices, etc.) before the
@@ -114,11 +114,11 @@ async function getGmailClient(userEmail) {
 //
 // Per-supplier subject rules (filters applied AFTER the from/subject match):
 //
-//   Gemaire   â invoice mail arrives ~1 day after equipment pickup. Skip
+//   Gemaire   — invoice mail arrives ~1 day after equipment pickup. Skip
 //               payment confirmations, statements, and monthly reports.
-//   Goodman   â same-day or next-day after pickup. Skip cashback/rewards
+//   Goodman   — same-day or next-day after pickup. Skip cashback/rewards
 //               notifications, monthly reports, and payment confirmations.
-//   Home Depot â order/receipt emails (paid at order time). Skip shipping
+//   Home Depot — order/receipt emails (paid at order time). Skip shipping
 //               updates, returns, and promotional mail.
 //
 // `mustInclude` (if set) requires at least one of these tokens in the subject;
@@ -128,7 +128,7 @@ const SUPPLIERS = [
     // Gemaire actually sends "Sales Order Confirmation" emails (with the
     // invoice attached as PDF), not subjects with "Invoice" in them.
     key: "gemaire",
-    domains: ["gemaire.com", "versapay.com"],
+    domains: ["gemaire.com"],
     subjectHints: ["gemaire"],
     mustInclude: ["invoice", "sales order", "order confirmation", "order #", "order#"],
     excludeAny: [
@@ -139,7 +139,7 @@ const SUPPLIERS = [
   {
     // Goodman = Daikin (Daikin acquired Goodman; invoices may come from
     // either brand's domains). Goodman invoices arrive as "Delivery Receipt/BOL
-    // for Order HMxxxx & PO CUSTOMER NAME" â that's their invoice email format.
+    // for Order HMxxxx & PO CUSTOMER NAME" — that's their invoice email format.
     key: "goodman",
     domains: [
       "goodmanmfg.com",
@@ -226,14 +226,67 @@ function classifyLine(text) {
   return EQUIPMENT_KEYWORDS.some((k) => t.includes(k)) ? "equipment" : "materials";
 }
 
-function parseInvoiceText(text) {
+// Garbage values that some PDFs (Gemaire/VersaPay) emit when the column
+// header row is mistaken for a data row. If poName matches any of these
+// it should be ignored so we fall back to email-body extraction.
+const PO_NOISE_RE =
+  /^(po\s*no|job\s*name|job\s*no|sales|due\s*date|ship\s*date|shipping\s*method|customer|reference|bill\s*to|p\.?o\.?)+$/i;
+
+// Extract a probable PO/customer name from email body text (text/plain or
+// HTML-stripped). Gemaire/VersaPay emails put the customer PO directly in
+// the body text — usually in a "PO #: <name>" or "Reference #: <name>" line.
+function extractPoFromBody(bodyText) {
+  if (!bodyText) return null;
+  const text = String(bodyText)
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/[ \t]+/g, " ");
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  // Patterns ranked by specificity. First match wins.
+  const PATTERNS = [
+    // "Customer PO: BRAD HAMILTON"
+    /Customer\s*P\.?O\.?\s*(?:#|number|no\.?|num)?\s*[:\-]?\s*(.+)/i,
+    // "PO #: BRAD HAMILTON"  / "PO Number: BRAD HAMILTON"
+    /\bP\.?O\.?\s*(?:#|number|no\.?|num)\s*[:\-]?\s*(.+)/i,
+    // "PO: BRAD HAMILTON"
+    /\bP\.?O\.?\s*[:\-]\s*(.+)/i,
+    // "Reference #: BRAD HAMILTON"
+    /Reference\s*(?:#|number|no\.?|num)?\s*[:\-]?\s*(.+)/i,
+    // "Job #: BRAD HAMILTON" / "Job Name: BRAD HAMILTON"
+    /Job\s*(?:#|name|number|no\.?|num)\s*[:\-]?\s*(.+)/i,
+    // "Bill To: BRAD HAMILTON"
+    /Bill\s*To\s*[:\-]\s*(.+)/i,
+  ];
+  for (const line of lines) {
+    for (const re of PATTERNS) {
+      const m = line.match(re);
+      if (m && m[1]) {
+        const v = m[1].trim().split(/\s{2,}|[|,;]/)[0].trim();
+        if (v && !PO_NOISE_RE.test(v) && v.length >= 2 && v.length <= 80) {
+          return v;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function parseInvoiceText(text, bodyText) {
   // Try to extract: PO/customer name, line items, total.
   // Suppliers vary wildly; this is a best-effort first pass.
+  // Strategy: try the email body FIRST (Gemaire/VersaPay puts PO there and
+  // the PDF parser otherwise grabs the column-header row as garbage), then
+  // fall back to PDF text scanning.
   const lines = (text || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  let poName = null;
-  for (const line of lines) {
-    const m = line.match(/\b(P\.?O\.?|Job|Customer|Reference|Bill\s*To)[:#\s]+([^\n]+)/i);
-    if (m) { poName = m[2].trim().split(/\s{2,}/)[0]; break; }
+  let poName = extractPoFromBody(bodyText);
+  if (!poName) {
+    for (const line of lines) {
+      const m = line.match(/\b(P\.?O\.?|Job|Customer|Reference|Bill\s*To)[:#\s]+([^\n]+)/i);
+      if (m) {
+        const cand = m[2].trim().split(/\s{2,}/)[0];
+        if (cand && !PO_NOISE_RE.test(cand)) { poName = cand; break; }
+      }
+    }
   }
   // Line items: rows that contain a quantity, a description, and a price.
   // Match any line with "$NN.NN" (or "NN.NN") at the end.
@@ -262,7 +315,7 @@ function parseInvoiceText(text) {
 // Idempotent at three levels (see DEDUP note in the file header).
 //
 // `since` (Gmail-format date YYYY/MM/DD or "newer_than:Nd") controls how far
-// back to look. Default is "2026/01/01" â we backfill all of 2026 because
+// back to look. Default is "2026/01/01" — we backfill all of 2026 because
 // gp_jobs only goes back that far. Pages through results so the maxResults
 // cap doesn't truncate the backfill.
 export async function pollOnce({ since = "2026/01/01", maxPages = 20 } = {}) {
@@ -305,7 +358,7 @@ async function pollOnceForUser(gmail, userEmail, { since = "2026/01/01", maxPage
     : `newer_than:${since}`;
   const q = `(${fromClause}) has:attachment ${dateClause}`;
 
-  // Page through results â Gmail caps at 500 per page.
+  // Page through results — Gmail caps at 500 per page.
   const messages = [];
   let pageToken = undefined;
   for (let page = 0; page < maxPages; page++) {
@@ -367,6 +420,11 @@ async function processMessage(gmail, messageId, userEmail) {
     return;
   }
 
+  // Capture the email body text up front — Gemaire/VersaPay puts the
+  // customer PO in the body, not in the PDF, so the PDF parser otherwise
+  // grabs the column-header row as garbage.
+  const bodyText = extractBodyText(full.data.payload);
+
   // Find PDF attachments
   const parts = collectParts(full.data.payload);
   const pdfParts = parts.filter((p) =>
@@ -392,16 +450,7 @@ async function processMessage(gmail, messageId, userEmail) {
     });
     const bytes = Buffer.from(att.data.data, "base64url");
     const text = await extractPdfText(bytes);
-    const parsed = text ? parseInvoiceText(text) : { poName: null, equipment: 0, materials: 0, total: null };
-
-    // Subject-based PO-name fallback: Goodman ("PO CUSTOMER NAME") and Gemaire
-    // emails put the PO/customer right in the subject line. If the PDF parser
-    // didn't find a poName, recover it from the subject.
-    if (!parsed.poName && supplier && (supplier.key === "goodman" || supplier.key === "gemaire")) {
-      const m = String(subject || "").match(/\bPO\s+([A-Z][A-Z'\.\- ]{2,})$/i)
-             || String(subject || "").match(/\bPO\s+([A-Z][A-Z'\.\- ]+)\s*&/i);
-      if (m) parsed.poName = m[1].trim();
-    }
+    const parsed = parseInvoiceText(text || "", bodyText);
 
     // Try to match the PO name to a customer
     let jobId = null;
@@ -415,7 +464,7 @@ async function processMessage(gmail, messageId, userEmail) {
       }
     }
 
-    // GpAttachments.save now returns { id, deduped, alreadyApplied } â
+    // GpAttachments.save now returns { id, deduped, alreadyApplied } —
     // dedup happens via SHA-256 on the PDF bytes, so the same PDF re-attached
     // to a different email will resolve to the existing attachment row.
     const saveRes = GpAttachments.save({
@@ -433,7 +482,7 @@ async function processMessage(gmail, messageId, userEmail) {
 
     if (jobId) {
       // applySupplierInvoice is a no-op if attachment.applied_at is already
-      // set â that's our final gate against double-counting costs.
+      // set — that's our final gate against double-counting costs.
       const applyRes = GpJobs.applySupplierInvoice(jobId, {
         equipmentCost: parsed.equipment,
         materialsCost: parsed.materials,
@@ -447,7 +496,7 @@ async function processMessage(gmail, messageId, userEmail) {
       });
     } else {
       // Unmatched path: only file a new unmatched row if this is a new attachment.
-      // (If we already saw this PDF, we already filed it â don't duplicate.)
+      // (If we already saw this PDF, we already filed it — don't duplicate.)
       let unmId = null;
       if (!saveRes.deduped) {
         unmId = GpUnmatched.add({
@@ -491,4 +540,48 @@ function collectParts(payload, acc = []) {
   if (payload.parts) payload.parts.forEach((p) => collectParts(p, acc));
   else acc.push(payload);
   return acc;
+}
+
+// Walk all parts of a Gmail message payload and collect text body content
+// (text/plain preferred; text/html stripped of tags as fallback). Returns a
+// single concatenated string. Used so the PO extractor can read the body
+// of supplier emails (Gemaire/VersaPay puts the customer PO in the email
+// body, not in the attached PDF).
+export function extractBodyText(payload) {
+  const parts = collectParts(payload);
+  const plain = [];
+  const html = [];
+  for (const p of parts) {
+    const mime = (p.mimeType || "").toLowerCase();
+    const data = p.body?.data;
+    if (!data) continue;
+    let txt;
+    try {
+      txt = Buffer.from(data, "base64url").toString("utf8");
+    } catch (e) {
+      continue;
+    }
+    if (mime.startsWith("text/plain")) plain.push(txt);
+    else if (mime.startsWith("text/html")) html.push(txt);
+  }
+  if (plain.length) return plain.join("\n");
+  if (html.length) {
+    // Strip tags + decode common HTML entities. Cheap but adequate for
+    // reading PO/customer-name lines out of supplier email bodies.
+    return html
+      .join("\n")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/p>/gi, "\n")
+      .replace(/<\/(div|tr|li|h\d)>/gi, "\n")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
+      .replace(/&[a-z]+;/gi, " ");
+  }
+  return "";
 }
