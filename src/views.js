@@ -26,8 +26,7 @@ const LOGO_SVG = `<svg viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg" ar
 const FAVICON_DATA_URL = `data:image/svg+xml;utf8,${encodeURIComponent(LOGO_SVG)}`;
 
 function escape(s) {
-  return String(s | "")
-    .replace(/&/g, "&amp;")
+  return String(s || "").replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
