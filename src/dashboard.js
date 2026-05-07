@@ -1,4 +1,4 @@
-// Dashboard router — login, all pages, /api/ask endpoint, /logout.
+// Dashboard router â login, all pages, /api/ask endpoint, /logout.
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -20,7 +20,7 @@ import fs from "fs";
 // SQLite stores CURRENT_TIMESTAMP as UTC strings ("YYYY-MM-DD HH:MM:SS").
 // Display them in America/New_York (Florida) so the website matches emails + clocks.
 function fmtET(iso) {
-  if (!iso) return "—";
+  if (!iso) return "â";
   // SQLite format has no T separator; Luxon SQL parser handles it.
   const dt = String(iso).includes("T")
     ? DateTime.fromISO(iso, { zone: "utc" })
@@ -76,7 +76,7 @@ export function buildDashboardRouter() {
       discrepancies: [],
     };
 
-    // Best-effort live data — failures don't break the page
+    // Best-effort live data â failures don't break the page
     try {
       const orgUsers = await hubstaff.listOrgUsers();
       // Mark anyone whose Hubstaff "last_activity" was within ~10 min as active
@@ -132,8 +132,8 @@ export function buildDashboardRouter() {
           <td>${e.hubstaffEmail}</td>
           <td>$${e.payRate}/hr</td>
           <td>${e.breakMinutesPerShift} min</td>
-          <td>${hu ? "✓ linked" : "<span class='badge badge-amber'>not in Hubstaff</span>"}</td>
-          <td class="muted">${hu?.last_activity ? new Date(hu.last_activity).toLocaleString("en-US", { timeZone: "America/New_York" }) : "—"}</td>
+          <td>${hu ? "â linked" : "<span class='badge badge-amber'>not in Hubstaff</span>"}</td>
+          <td class="muted">${hu?.last_activity ? new Date(hu.last_activity).toLocaleString("en-US", { timeZone: "America/New_York" }) : "â"}</td>
         </tr>`;
       }).join("");
       body = `<table class="data-table">
@@ -169,7 +169,7 @@ export function buildDashboardRouter() {
           return `<tr>
             <td><strong>${e.name}</strong></td>
             <td>${e.ghlEmail || e.hubstaffEmail}</td>
-            <td>${matched ? "✓ linked" : "<span class='badge badge-amber'>not in GHL</span>"}</td>
+            <td>${matched ? "â linked" : "<span class='badge badge-amber'>not in GHL</span>"}</td>
             <td>${e.role}</td>
           </tr>`;
         })
@@ -199,7 +199,7 @@ export function buildDashboardRouter() {
         user: req.user,
         title: "Leads",
         navKey: "leads",
-        body: `<p class="muted">Recent leads from GoHighLevel will show here. Live alerts fire when a lead isn't contacted within 3 minutes — see the Alerts tab for that history.</p>`,
+        body: `<p class="muted">Recent leads from GoHighLevel will show here. Live alerts fire when a lead isn't contacted within 3 minutes â see the Alerts tab for that history.</p>`,
       })
     );
   });
@@ -217,7 +217,7 @@ export function buildDashboardRouter() {
                 (a) => `<tr>
               <td class="muted">${fmtET(a.fired_at)}</td>
               <td><strong>${a.contact_name || "(unnamed)"}</strong></td>
-              <td>${a.phone || "—"}</td>
+              <td>${a.phone || "â"}</td>
               <td class="muted">${fmtET(a.lead_added_at)}</td>
               <td><span class="badge badge-red">${a.minutes_elapsed || "?"}m</span></td>
             </tr>`
@@ -265,7 +265,7 @@ export function buildDashboardRouter() {
   router.get("/reports/:id", (req, res) => {
     const report = Reports.byId(req.params.id);
     if (!report) return res.status(404).send("Report not found.");
-    // Reports are stored as raw HTML — wrap in our layout
+    // Reports are stored as raw HTML â wrap in our layout
     res.send(
       views.placeholderPage({
         user: req.user,
@@ -345,7 +345,82 @@ export function buildDashboardRouter() {
     }
   });
 
-  // Manual sync triggers (admin only) — useful before crons fire
+  // Manual sync triggers (admin only) â useful before crons fire
+  // ----- Resolve unmatched supplier invoice to a gp_jobs row -----
+  router.get("/gross-profit/unmatched/:id(\\d+)/resolve", requireAdmin, (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const row = GpUnmatched.list().find(u => u.id === id);
+    if (!row) return res.status(404).send("Unmatched row not found.");
+    let candidates = [];
+    if (row.po_name) candidates = GpJobs.findCandidatesByCustomer(row.po_name, { windowDays: 365, minSimilarity: 0.3 });
+    const recent = GpJobs.list({ limit: 200 });
+    const seen = new Set(candidates.map(c => c.row.id));
+    for (const r2 of recent) if (!seen.has(r2.id)) candidates.push({ row: r2, sim: 0 });
+    const esc = (s) => String(s||"").replace(/[<>"&]/g, c => ({"<":"&lt;",">":"&gt;",'"':"&quot;","&":"&amp;"}[c]));
+    const candHtml = candidates.slice(0,60).map(c => {
+      const sim = (c.sim*100).toFixed(0)+"%";
+      const issued = c.row.jobber_invoice_issued_at || c.row.created_at || "";
+      const amt = c.row.amount_paid != null ? "$"+Number(c.row.amount_paid).toLocaleString() : "&mdash;";
+      const matchCell = c.sim>=0.7 ? `<strong style="color:#0a7">${sim}</strong>` : (c.sim>0 ? `<span class="muted">${sim}</span>` : "&mdash;");
+      return `<tr><td>${matchCell}</td><td><strong>${esc(c.row.customer_name)}</strong></td><td class="muted">${esc(c.row.address)}</td><td class="muted">${String(issued).slice(0,10)}</td><td>${amt}</td><td><form method="post" action="/gross-profit/unmatched/${row.id}/resolve" style="margin:0"><input type="hidden" name="jobId" value="${c.row.id}"/><button class="btn">Attach to job #${c.row.id}</button></form></td></tr>`;
+    }).join("");
+    const pdfLink = row.attachment_id ? `<p><a href="/gross-profit/attachment/${row.attachment_id}" target="_blank">Open the PDF (new tab) &rarr;</a></p>` : "";
+    const body = `<div class="page-head"><h1>Resolve unmatched invoice</h1><span class="page-sub">${esc(row.supplier)} &middot; ${esc(row.po_name||"(no PO parsed)")} &middot; ${row.total_amount!=null?"$"+Number(row.total_amount).toLocaleString():"(no total)"}</span></div>${pdfLink}<p class="muted">Pick the job this invoice belongs to. Sorted by similarity. Greens (>=70%) are likely matches.</p><table class="data-table"><thead><tr><th>Match</th><th>Customer</th><th>Address</th><th>Issued</th><th>Paid</th><th></th></tr></thead><tbody>${candHtml||"<tr><td colspan=6 class='muted'>No candidates.</td></tr>"}</tbody></table><p style="margin-top:18px"><a href="/gross-profit">&larr; back to Gross Profit</a></p>`;
+    res.send(views.placeholderPage({ user: req.user, title: "Resolve unmatched invoice", navKey: "gross-profit", body }));
+  });
+
+  router.post("/gross-profit/unmatched/:id(\\d+)/resolve", requireAdmin, express.urlencoded({ extended: false }), async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const jobId = parseInt((req.body || {}).jobId, 10);
+    try {
+      const u = GpUnmatched.list().find(x => x.id === id);
+      if (!u) throw new Error("unmatched row no longer exists");
+      if (!Number.isFinite(jobId)) throw new Error("missing jobId");
+      const att = u.attachment_id ? GpAttachments.byId(u.attachment_id) : null;
+      let parsed = {};
+      if (att && att.metadata_json) { try { parsed = JSON.parse(att.metadata_json).parsed || {}; } catch {} }
+      if (att) {
+        GpJobs.applySupplierInvoice(jobId, { equipmentCost: parsed.equipment || 0, materialsCost: parsed.materials || 0, totalWithTax: parsed.total || u.total_amount || 0 }, { attachmentId: att.id });
+      }
+      GpUnmatched.resolve(id, jobId);
+      req.session.flash = { type: "ok", message: `Attached invoice to job #${jobId}.` };
+    } catch (e) {
+      req.session.flash = { type: "error", message: `Resolve failed: ${e.message}` };
+    }
+    res.redirect("/gross-profit");
+  });
+
+  // Gmail recon — search the inbox with an arbitrary query, return from+subject samples.
+  router.get("/gross-profit/debug/gmail-search", requireAdmin, async (req, res) => {
+    try {
+      const q = (req.query.q || "").trim();
+      if (!q) return res.json({ err: "pass ?q=<gmail-search-query>" });
+      const fs2 = await import("fs");
+      const credsRaw = process.env.GOOGLE_SA_JSON || fs2.readFileSync("/etc/secrets/google-sa.json", "utf8");
+      const creds = JSON.parse(credsRaw);
+      const { google } = await import("googleapis");
+      const users = (process.env.GMAIL_DELEGATED_USERS || process.env.GMAIL_DELEGATED_USER || "").split(",").map(s=>s.trim()).filter(Boolean);
+      const out = {};
+      for (const u of users) {
+        const auth = new google.auth.JWT({ email: creds.client_email, key: creds.private_key, scopes: ["https://www.googleapis.com/auth/gmail.readonly"], subject: u });
+        await auth.authorize();
+        const g = google.gmail({ version: "v1", auth });
+        const list = await g.users.messages.list({ userId: "me", q, maxResults: 50 });
+        const msgs = list.data.messages || [];
+        const samples = [];
+        for (const m of msgs.slice(0, 30)) {
+          const det = await g.users.messages.get({ userId: "me", id: m.id, format: "metadata", metadataHeaders: ["From", "Subject", "Date"] });
+          const h = Object.fromEntries((det.data.payload?.headers || []).map(x => [x.name, x.value]));
+          samples.push({ from: h.From, subject: h.Subject, date: h.Date });
+        }
+        out[u] = { count: msgs.length, samples };
+      }
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   router.post("/gross-profit/sync/jobber", requireAdmin, async (req, res) => {
     try {
       const r = await jobberSync.pollOnce();
@@ -442,7 +517,7 @@ export function buildDashboardRouter() {
 
   // ----- Admin: gmail processed-emails debug -----
   // Shows count of gp_processed_emails by outcome, and most recent rows.
-  // Helps diagnose why a poll returned processed:0 — were all messages
+  // Helps diagnose why a poll returned processed:0 â were all messages
   // already-processed (dedup) or filtered out by subject rules?
   router.get("/gross-profit/debug/gmail", requireAdmin, async (req, res) => {
     try {
