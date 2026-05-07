@@ -1,4 +1,4 @@
-// Jobber â Gross Profit sync.
+// Jobber Ã¢ÂÂ Gross Profit sync.
 //
 // Two paths into the same upsert:
 //   1. Webhook  POST /webhooks/jobber  (real-time, when JOBBER_WEBHOOK_SECRET is set)
@@ -73,7 +73,7 @@ async function fetchInvoiceDetail(invoiceId) {
       );
       invoice.property = p?.property;
     } catch (e) {
-      // ignore â address will be null
+      // ignore Ã¢ÂÂ address will be null
     }
   }
   return invoice;
@@ -102,7 +102,7 @@ function paymentMethodFrom(invoice) {
 
 function feeFrom(invoice) {
   // The spec mentions "Financing or CC Fee". Jobber doesn't expose this on
-  // a structured field â usually it shows up as a line-item adjustment.
+  // a structured field Ã¢ÂÂ usually it shows up as a line-item adjustment.
   // We make a best-effort: any line item whose name matches /fee/i is treated
   // as the fee. Returns { amount, type } or { amount: null, type: null }.
   const items = invoice.lineItems?.nodes || [];
@@ -147,7 +147,13 @@ export async function upsertInvoice(invoiceId) {
     address: addr.street,
     city: addr.city,
     zip: addr.postalCode,
-    amountPaid: inv.paymentsTotal ?? 0,
+    amountPaid: (() => {
+      const direct = Number(inv.paymentsTotal) || 0;
+      const status = String(inv.invoiceStatus || "").toLowerCase();
+      // Treat invoice as fully paid when Jobber says so (covers financed installs)
+      if (status === "paid") return Number(inv.total) || direct;
+      return direct;
+    })(),
     invoiceTotal: inv.total,
     paymentMethod: paymentMethodFrom(inv),
     feeAmount: fee.amount,
@@ -156,7 +162,7 @@ export async function upsertInvoice(invoiceId) {
   });
 
   // Try to attach the invoice PDF. Jobber's PDF download isn't part of the
-  // GraphQL API â we'd need a separate REST endpoint. For now, log a TODO
+  // GraphQL API Ã¢ÂÂ we'd need a separate REST endpoint. For now, log a TODO
   // so we can wire that up once we confirm the URL pattern.
   // TODO: download PDF via Jobber's invoice PDF endpoint and call GpAttachments.save
 
@@ -183,7 +189,7 @@ export function verifyWebhookSignature(rawBody, signatureHeader) {
 // ---------- Backfill (paginated, year-scoped) ----------
 //
 // One-time pull of every invoice issued on or after a given date. Uses
-// Jobber's relay-style pagination â keeps requesting next pages until
+// Jobber's relay-style pagination Ã¢ÂÂ keeps requesting next pages until
 // either we run out of data or hit a reasonable cap.
 async function listInvoicesPage({ first = 100, after = null, issuedAfter }) {
   const data = await gql(
