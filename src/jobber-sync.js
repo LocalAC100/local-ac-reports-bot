@@ -1,4 +1,4 @@
-// Jobber Ã¢ÂÂ Gross Profit sync.
+// Jobber ÃÂ¢ÃÂÃÂ Gross Profit sync.
 //
 // Two paths into the same upsert:
 //   1. Webhook  POST /webhooks/jobber  (real-time, when JOBBER_WEBHOOK_SECRET is set)
@@ -73,7 +73,7 @@ async function fetchInvoiceDetail(invoiceId) {
       );
       invoice.property = p?.property;
     } catch (e) {
-      // ignore Ã¢ÂÂ address will be null
+      // ignore ÃÂ¢ÃÂÃÂ address will be null
     }
   }
   return invoice;
@@ -102,7 +102,7 @@ function paymentMethodFrom(invoice) {
 
 function feeFrom(invoice) {
   // The spec mentions "Financing or CC Fee". Jobber doesn't expose this on
-  // a structured field Ã¢ÂÂ usually it shows up as a line-item adjustment.
+  // a structured field ÃÂ¢ÃÂÃÂ usually it shows up as a line-item adjustment.
   // We make a best-effort: any line item whose name matches /fee/i is treated
   // as the fee. Returns { amount, type } or { amount: null, type: null }.
   const items = invoice.lineItems?.nodes || [];
@@ -162,7 +162,7 @@ export async function upsertInvoice(invoiceId) {
   });
 
   // Try to attach the invoice PDF. Jobber's PDF download isn't part of the
-  // GraphQL API Ã¢ÂÂ we'd need a separate REST endpoint. For now, log a TODO
+  // GraphQL API ÃÂ¢ÃÂÃÂ we'd need a separate REST endpoint. For now, log a TODO
   // so we can wire that up once we confirm the URL pattern.
   // TODO: download PDF via Jobber's invoice PDF endpoint and call GpAttachments.save
 
@@ -189,7 +189,7 @@ export function verifyWebhookSignature(rawBody, signatureHeader) {
 // ---------- Backfill (paginated, year-scoped) ----------
 //
 // One-time pull of every invoice issued on or after a given date. Uses
-// Jobber's relay-style pagination Ã¢ÂÂ keeps requesting next pages until
+// Jobber's relay-style pagination ÃÂ¢ÃÂÃÂ keeps requesting next pages until
 // either we run out of data or hit a reasonable cap.
 async function listInvoicesPage({ first = 100, after = null, issuedAfter }) {
   const data = await gql(
@@ -223,10 +223,8 @@ export async function backfillSince(isoDate, { hardCap = 5000 } = {}) {
       scanned++;
       // Skip only if the row exists AND already has invoice_total. Allows re-running
       // backfill to populate new fields on previously-synced rows.
-      const have = db
-        .prepare("SELECT invoice_total FROM gp_jobs WHERE jobber_invoice_id = ?")
-        .get(node.id);
-      if (have && have.invoice_total != null) continue;
+      // Always refresh — amount_paid in particular needs re-syncing for
+      // invoices that became fully paid (financing settlement) since last run.
       try {
         await upsertInvoice(node.id);
         synced++;
