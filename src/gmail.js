@@ -394,6 +394,15 @@ async function processMessage(gmail, messageId, userEmail) {
     const text = await extractPdfText(bytes);
     const parsed = text ? parseInvoiceText(text) : { poName: null, equipment: 0, materials: 0, total: null };
 
+    // Subject-based PO-name fallback: Goodman ("PO CUSTOMER NAME") and Gemaire
+    // emails put the PO/customer right in the subject line. If the PDF parser
+    // didn't find a poName, recover it from the subject.
+    if (!parsed.poName && supplier && (supplier.key === "goodman" || supplier.key === "gemaire")) {
+      const m = String(subject || "").match(/\bPO\s+([A-Z][A-Z'\.\- ]{2,})$/i)
+             || String(subject || "").match(/\bPO\s+([A-Z][A-Z'\.\- ]+)\s*&/i);
+      if (m) parsed.poName = m[1].trim();
+    }
+
     // Try to match the PO name to a customer
     let jobId = null;
     let candList = [];
