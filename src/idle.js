@@ -12,9 +12,18 @@ import { sendMail } from "./mailer.js";
 import { Alerts } from "./db.js";
 
 const TZ = "America/New_York";
-const IDLE_THRESHOLD_MIN = 20;
+const IDLE_THRESHOLD_MIN = 20;          // default for primary callers
 const COOLDOWN_MIN = 60;
-const LOOKBACK_MIN = 30; // window of GHL conversations to scan
+const LOOKBACK_MIN = 60; // window of GHL conversations to scan
+
+// Per-employee threshold lookup. Falls back to the default for any
+// dispatcher whose `employees.js` record doesn't override `idleThresholdMin`.
+// Frank (dispatcher_manager) is set to 60 min in employees.js — he's a
+// supervisor doing parts ordering, tech coordination, financing follow-up,
+// not just calling, so 20-min stretches off GHL are expected.
+function thresholdFor(emp) {
+  return Number(emp?.idleThresholdMin) || IDLE_THRESHOLD_MIN;
+}
 
 // Per-dispatcher: { lastEventAt: DateTime, lastAlertAt: DateTime }
 const state = new Map();
@@ -121,7 +130,8 @@ export async function checkIdleDispatchers() {
     const inCooldown =
       lastAlertAt && nowDt.diff(lastAlertAt, "minutes").minutes < COOLDOWN_MIN;
 
-    if (silentMin >= IDLE_THRESHOLD_MIN && !inCooldown) {
+    const threshold = thresholdFor(emp);
+    if (silentMin >= threshold && !inCooldown) {
       const html = renderIdleAlertHtml({
         dispatcher: emp.name,
         silentMin,
