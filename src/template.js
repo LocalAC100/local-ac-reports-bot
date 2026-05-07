@@ -92,7 +92,8 @@ export function renderHubstaffSection(hub) {
   const flagCount =
     (hub.discrepancies?.length || 0) +
     (hub.lowActivityFlags?.length || 0) +
-    (hub.manipulationFlags?.length || 0);
+    (hub.manipulationFlags?.length || 0) +
+    (hub.crossSystemFlags?.length || 0);
   if (flagCount === 0) {
     parts.push(`<div style="margin-bottom:12px">${pill("✓ No issues — everyone on schedule and active", "green")}</div>`);
   } else {
@@ -155,6 +156,22 @@ export function renderHubstaffSection(hub) {
       icon: "🔴",
     });
   }
+  // v5: cross-system flags (Hubstaff/GHL mismatch)
+  for (const f of hub.crossSystemFlags || []) {
+    if (f.kind === "hubstaff_silent") {
+      flags.push({
+        level: "amber",
+        text: `<strong>${f.employee}</strong> — Hubstaff active but no GHL output ${f.hour} (${f.detail})`,
+        icon: "⚠",
+      });
+    } else if (f.kind === "off_clock") {
+      flags.push({
+        level: "amber",
+        text: `<strong>${f.employee}</strong> — working off the clock ${f.hour} (${f.detail})`,
+        icon: "⚠",
+      });
+    }
+  }
   if (flags.length) {
     parts.push(`<h3 style="margin:18px 0 8px;font-size:13px;font-weight:600;color:${C.primaryDk};text-transform:uppercase;letter-spacing:.4px">Red flags</h3>`);
     parts.push("<ul style='margin:0;padding-left:18px;font-size:14px;line-height:1.6'>");
@@ -208,6 +225,16 @@ export function renderDispatcherSection(dispatch) {
   // Pipeline scope label
   if (dispatch.pipelineLabel) {
     parts.push(`<div style="font-size:12px;color:${C.textDim};margin:0 0 12px">Pipeline scope: <strong style="color:${C.text}">${dispatch.pipelineLabel}</strong></div>`);
+  }
+
+  // v5: Avg new-lead response time on Orlando NEW leads only
+  if (dispatch.avgResponseMinOverall != null) {
+    parts.push(`<div style="background:${C.cyanBg};border-radius:8px;padding:10px 14px;margin:0 0 14px;font-size:13px;color:${C.primaryDk}">
+      <strong>Avg response on Orlando new leads: ${dispatch.avgResponseMinOverall} min</strong>
+      <span style="color:${C.textDim};font-weight:400"> · across ${dispatch.orlandoNewLeadsCount} new ${dispatch.orlandoNewLeadsCount === 1 ? "lead" : "leads"} that came in this window</span>
+    </div>`);
+  } else if (dispatch.orlandoNewLeadsCount === 0) {
+    parts.push(`<div style="background:${C.zebra};border-radius:8px;padding:8px 14px;margin:0 0 14px;font-size:12px;color:${C.textDim}">No new Orlando-pipeline leads in this window.</div>`);
   }
 
   // Top KPI strip — totals across all dispatchers
@@ -341,6 +368,11 @@ export function renderDispatcherSection(dispatch) {
           Physical bookings <strong style="color:${C.text}">${d.physBookings || 0}</strong> ·
           Unique leads called <strong style="color:${C.text}">${d.uniqueLeads || 0}</strong>
         </div>
+
+        ${d.newLeadsResponded > 0 ? `<div style="font-size:12px;color:${C.textDim};margin-bottom:10px">
+          Avg response on Orlando new leads <strong style="color:${C.primaryDk}">${d.avgResponseMin} min</strong>
+          <span style="color:${C.textDim}"> · ${d.newLeadsResponded} new ${d.newLeadsResponded === 1 ? "lead" : "leads"}</span>
+        </div>` : ""}
 
         <div style="font-size:11px;color:${C.textDim};text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">Lead age called</div>
         <div style="font-size:12.5px;color:${C.text};margin-bottom:12px">
