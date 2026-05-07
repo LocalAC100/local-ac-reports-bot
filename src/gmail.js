@@ -535,6 +535,65 @@ async function processMessage(gmail, messageId, userEmail) {
   );
 }
 
+
+
+// Re-parse all currently-unmatched supplier invoices using the new body-PO
+// extractor. Refetches each email body via Gmail (using the stored
+// gmail_message_id on the attachment row). For each row:
+//   - if extractPoFromBody returns a name and there's a high-confidence (≥0.9)
+//     unique candidate, auto-attach to that job and resolve the unmatched row
+//   - otherwise just update gp_unmatched_invoices.po_name so the manual
+//     Resolve UI shows a useful customer name instead of column-header garbage
+// Returns counts: { total, attached, updated, kept, errors }.
+export async function reparseUnmatched({ limit = 500 } = {}) {
+  if (!isConfigured()) return { skipped: true, reason: "gmail watcher not configured" };
+  const rows = db.prepare(
+    `SELECT u.id AS unm_id, u.attachment_id, u.po_name AS old_po,
+            a.gmail_message_id, a.metadata_json
+       FROM gp_unmatched_invoices u
+       JOIN gp_attachments a ON a.id = u.attachment_id
+      WHERE u.resolved_to_job_id IS NULL
+        AND a.gmail_message_id IS NOT NULL
+      LIMIT ?`
+  ).all(limit);
+  const users = getDelegatedUsers();
+  const out = { total: rows.length, attached: 0, updated: 0, kept: 0, errors: 0 };
+  for (const r of rows) {
+    try {
+      let full = null;
+      for (const userEmail of users) {
+        try {
+          const gmail = await getGmailClient(userEmail);
+          full = await gmail.users.messages.get({ userId: "me", id: r.gmail_message_id, format: "full" });
+          if (full?.data?.payload) break;
+        } catch (e) { /* try next user */ }
+      }
+      if (!full?.data?.payload) { out.errors++; continue; }
+      const bodyText = extractBodyText(full.data.payload);
+      const newPo = extractPoFromBody(bodyText);
+      if (!newPo) { out.kept++; continue; }
+      const cands = GpJobs.findCandidatesByCustomer(newPo, { windowDays: 30, minSimilarity: 0.7 });
+      if (cands.length && cands[0].sim >= 0.9 &&
+          (cands.length < 2 || cands[0].sim - cands[1].sim >= 0.1)) {
+        const jobId = cands[0].row.id;
+        const meta = r.metadata_json ? JSON.parse(r.metadata_json) : {};
+        const parsed = meta.parsed || {};
+        GpJobs.applySupplierInvoice(jobId, {
+          equipmentCost: parsed.equipment || 0,
+          materialsCost: parsed.materials || 0,
+          totalWithTax: parsed.total || null,
+        }, { attachmentId: r.attachment_id });
+        GpUnmatched.resolve(r.unm_id, jobId);
+        out.attached++;
+      } else {
+        db.prepare("UPDATE gp_unmatched_invoices SET po_name = ? WHERE id = ?").run(newPo, r.unm_id);
+        out.updated++;
+      }
+    } catch (e) { out.errors++; }
+  }
+  return out;
+}
+
 function collectParts(payload, acc = []) {
   if (!payload) return acc;
   if (payload.parts) payload.parts.forEach((p) => collectParts(p, acc));
