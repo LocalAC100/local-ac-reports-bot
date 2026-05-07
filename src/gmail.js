@@ -135,9 +135,19 @@ const SUPPLIERS = [
     ],
   },
   {
+    // Goodman = Daikin (Daikin acquired Goodman; invoices may come from
+    // either brand's domains). Include both.
     key: "goodman",
-    domains: ["goodmanmfg.com", "goodmandistribution.com"],
-    subjectHints: ["goodman"],
+    domains: [
+      "goodmanmfg.com",
+      "goodmandistribution.com",
+      "daikin.com",
+      "daikinapplied.com",
+      "daikinac.com",
+      "daikincomfort.com",
+      "daikinhvac.com",
+    ],
+    subjectHints: ["goodman", "daikin"],
     mustInclude: ["invoice"],
     excludeAny: [
       "report", "statement", "monthly", "cashback", "rewards",
@@ -243,9 +253,14 @@ function parseInvoiceText(text) {
 
 // ---------- Run once ----------
 //
-// Pulls newest unprocessed messages from each delegated mailbox.
+// Pulls unprocessed messages from each delegated mailbox.
 // Idempotent at three levels (see DEDUP note in the file header).
-export async function pollOnce({ window = 50 } = {}) {
+//
+// `since` (Gmail-format date YYYY/MM/DD or "newer_than:Nd") controls how far
+// back to look. Default is "2026/01/01" — we backfill all of 2026 because
+// gp_jobs only goes back that far. Pages through results so the maxResults
+// cap doesn't truncate the backfill.
+export async function pollOnce({ since = "2026/01/01", maxPages = 20 } = {}) {
   if (!isConfigured()) {
     return { skipped: true, reason: "Gmail watcher not configured" };
   }
@@ -262,7 +277,7 @@ export async function pollOnce({ window = 50 } = {}) {
       continue;
     }
     try {
-      const r = await pollOnceForUser(gmail, userEmail, { window });
+      const r = await pollOnceForUser(gmail, userEmail, { since, maxPages });
       perUser.push({ user: userEmail, ...r });
       totalScanned += r.scanned || 0;
       totalProcessed += r.processed || 0;
@@ -275,17 +290,30 @@ export async function pollOnce({ window = 50 } = {}) {
   return { users: perUser, scanned: totalScanned, processed: totalProcessed, errors: totalErrors };
 }
 
-async function pollOnceForUser(gmail, userEmail, { window = 50 } = {}) {
-  // Build a Gmail search query: from any supplier, has attachment, newer_than:30d
+async function pollOnceForUser(gmail, userEmail, { since = "2026/01/01", maxPages = 20 } = {}) {
+  // Build a Gmail search query: from any supplier, has attachment, after:<since>.
+  // Gmail accepts YYYY/MM/DD dates after `after:` and natural relative tokens
+  // like `newer_than:Nd`. We pass `since` straight in.
   const fromClause = SUPPLIERS.map((s) => s.domains.map((d) => `from:${d}`).join(" OR ")).map((c) => `(${c})`).join(" OR ");
-  const q = `(${fromClause}) has:attachment newer_than:30d`;
+  const dateClause = /^\d{4}\/\d{1,2}\/\d{1,2}$/.test(since)
+    ? `after:${since}`
+    : `newer_than:${since}`;
+  const q = `(${fromClause}) has:attachment ${dateClause}`;
 
-  const list = await gmail.users.messages.list({
-    userId: "me",
-    q,
-    maxResults: window,
-  });
-  const messages = list.data.messages || [];
+  // Page through results — Gmail caps at 500 per page.
+  const messages = [];
+  let pageToken = undefined;
+  for (let page = 0; page < maxPages; page++) {
+    const list = await gmail.users.messages.list({
+      userId: "me",
+      q,
+      maxResults: 500,
+      ...(pageToken ? { pageToken } : {}),
+    });
+    if (Array.isArray(list.data.messages)) messages.push(...list.data.messages);
+    pageToken = list.data.nextPageToken;
+    if (!pageToken) break;
+  }
 
   let processed = 0, errors = 0;
   for (const m of messages) {
