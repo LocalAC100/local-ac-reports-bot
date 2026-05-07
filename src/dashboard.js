@@ -440,6 +440,51 @@ export function buildDashboardRouter() {
     }
   );
 
+  // ----- Admin: gmail processed-emails debug -----
+  // Shows count of gp_processed_emails by outcome, and most recent rows.
+  // Helps diagnose why a poll returned processed:0 — were all messages
+  // already-processed (dedup) or filtered out by subject rules?
+  router.get("/gross-profit/debug/gmail", requireAdmin, async (req, res) => {
+    try {
+      const { db } = await import("./db.js");
+      const byOutcome = db.prepare(
+        `SELECT outcome, COUNT(*) AS n FROM gp_processed_emails GROUP BY outcome`
+      ).all();
+      const recent = db.prepare(
+        `SELECT message_id, from_addr, subject, outcome, notes, received_at
+           FROM gp_processed_emails
+          ORDER BY id DESC LIMIT 30`
+      ).all();
+      const skippedSamples = db.prepare(
+        `SELECT subject, notes FROM gp_processed_emails
+          WHERE outcome = 'skipped' ORDER BY id DESC LIMIT 30`
+      ).all();
+      const errorSamples = db.prepare(
+        `SELECT message_id, notes FROM gp_processed_emails
+          WHERE outcome = 'error' ORDER BY id DESC LIMIT 30`
+      ).all();
+      res.json({ byOutcome, recent, skippedSamples, errorSamples });
+    } catch (e) {
+      res.status(500).json({ error: e.message, stack: e.stack });
+    }
+  });
+
+  // ----- Admin: rescan with subject/dedup ladder cleared -----
+  // Removes 'skipped' rows from gp_processed_emails (so a re-poll re-evaluates
+  // them under the current filters) without touching matched/unmatched/error
+  // rows. SHA-256 + applied_at dedup still prevents double-counting costs.
+  router.post("/gross-profit/debug/rescan-skipped", requireAdmin, async (req, res) => {
+    try {
+      const { db } = await import("./db.js");
+      const before = db.prepare(`SELECT COUNT(*) AS n FROM gp_processed_emails WHERE outcome='skipped'`).get().n;
+      db.prepare(`DELETE FROM gp_processed_emails WHERE outcome='skipped'`).run();
+      const after = db.prepare(`SELECT COUNT(*) AS n FROM gp_processed_emails WHERE outcome='skipped'`).get().n;
+      res.json({ deletedSkipped: before, remaining: after });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ----- Admin: manual triggers for cron jobs (idle/morning/evening) -----
   // Lets us fire the same code paths the cron schedules use, without
   // waiting for the actual cron. Returns JSON with timing + any error message.
