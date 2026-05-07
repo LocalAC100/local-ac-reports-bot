@@ -128,7 +128,7 @@ const SUPPLIERS = [
     // Gemaire actually sends "Sales Order Confirmation" emails (with the
     // invoice attached as PDF), not subjects with "Invoice" in them.
     key: "gemaire",
-    domains: ["gemaire.com"],
+    domains: ["gemaire.com", "versapay.com"],
     subjectHints: ["gemaire"],
     mustInclude: ["invoice", "sales order", "order confirmation", "order #", "order#"],
     excludeAny: [
