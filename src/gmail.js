@@ -17,9 +17,9 @@
 //   GMAIL_DELEGATED_USER   (legacy single-user fallback)
 //
 // DEDUP: three layers of protection against double-counting an invoice:
-//   1. gp_processed_emails(message_id UNIQUE) — message-level skip
-//   2. gp_attachments.pdf_sha256 UNIQUE — same PDF bytes only stored once
-//   3. gp_attachments.applied_at — applySupplierInvoice no-op if already set
+//   1. gp_processed_emails(message_id UNIQUE) â message-level skip
+//   2. gp_attachments.pdf_sha256 UNIQUE â same PDF bytes only stored once
+//   3. gp_attachments.applied_at â applySupplierInvoice no-op if already set
 // All three must be wrong simultaneously for a duplicate to slip through.
 // Per-supplier subject filters also drop non-invoice mail (statements,
 // payment receipts, monthly reports, cashback notices, etc.) before the
@@ -114,11 +114,11 @@ async function getGmailClient(userEmail) {
 //
 // Per-supplier subject rules (filters applied AFTER the from/subject match):
 //
-//   Gemaire   — invoice mail arrives ~1 day after equipment pickup. Skip
+//   Gemaire   â invoice mail arrives ~1 day after equipment pickup. Skip
 //               payment confirmations, statements, and monthly reports.
-//   Goodman   — same-day or next-day after pickup. Skip cashback/rewards
+//   Goodman   â same-day or next-day after pickup. Skip cashback/rewards
 //               notifications, monthly reports, and payment confirmations.
-//   Home Depot — order/receipt emails (paid at order time). Skip shipping
+//   Home Depot â order/receipt emails (paid at order time). Skip shipping
 //               updates, returns, and promotional mail.
 //
 // `mustInclude` (if set) requires at least one of these tokens in the subject;
@@ -128,7 +128,7 @@ const SUPPLIERS = [
     // Gemaire actually sends "Sales Order Confirmation" emails (with the
     // invoice attached as PDF), not subjects with "Invoice" in them.
     key: "gemaire",
-    domains: ["gemaire.com"],
+    domains: ["gemaire.com", "versapay.com"],
     subjectHints: ["gemaire"],
     mustInclude: ["invoice", "sales order", "order confirmation", "order #", "order#"],
     excludeAny: [
@@ -139,7 +139,7 @@ const SUPPLIERS = [
   {
     // Goodman = Daikin (Daikin acquired Goodman; invoices may come from
     // either brand's domains). Goodman invoices arrive as "Delivery Receipt/BOL
-    // for Order HMxxxx & PO CUSTOMER NAME" — that's their invoice email format.
+    // for Order HMxxxx & PO CUSTOMER NAME" â that's their invoice email format.
     key: "goodman",
     domains: [
       "goodmanmfg.com",
@@ -262,7 +262,7 @@ function parseInvoiceText(text) {
 // Idempotent at three levels (see DEDUP note in the file header).
 //
 // `since` (Gmail-format date YYYY/MM/DD or "newer_than:Nd") controls how far
-// back to look. Default is "2026/01/01" — we backfill all of 2026 because
+// back to look. Default is "2026/01/01" â we backfill all of 2026 because
 // gp_jobs only goes back that far. Pages through results so the maxResults
 // cap doesn't truncate the backfill.
 export async function pollOnce({ since = "2026/01/01", maxPages = 20 } = {}) {
@@ -305,7 +305,7 @@ async function pollOnceForUser(gmail, userEmail, { since = "2026/01/01", maxPage
     : `newer_than:${since}`;
   const q = `(${fromClause}) has:attachment ${dateClause}`;
 
-  // Page through results — Gmail caps at 500 per page.
+  // Page through results â Gmail caps at 500 per page.
   const messages = [];
   let pageToken = undefined;
   for (let page = 0; page < maxPages; page++) {
@@ -415,7 +415,7 @@ async function processMessage(gmail, messageId, userEmail) {
       }
     }
 
-    // GpAttachments.save now returns { id, deduped, alreadyApplied } —
+    // GpAttachments.save now returns { id, deduped, alreadyApplied } â
     // dedup happens via SHA-256 on the PDF bytes, so the same PDF re-attached
     // to a different email will resolve to the existing attachment row.
     const saveRes = GpAttachments.save({
@@ -433,7 +433,7 @@ async function processMessage(gmail, messageId, userEmail) {
 
     if (jobId) {
       // applySupplierInvoice is a no-op if attachment.applied_at is already
-      // set — that's our final gate against double-counting costs.
+      // set â that's our final gate against double-counting costs.
       const applyRes = GpJobs.applySupplierInvoice(jobId, {
         equipmentCost: parsed.equipment,
         materialsCost: parsed.materials,
@@ -447,7 +447,7 @@ async function processMessage(gmail, messageId, userEmail) {
       });
     } else {
       // Unmatched path: only file a new unmatched row if this is a new attachment.
-      // (If we already saw this PDF, we already filed it — don't duplicate.)
+      // (If we already saw this PDF, we already filed it â don't duplicate.)
       let unmId = null;
       if (!saveRes.deduped) {
         unmId = GpUnmatched.add({
