@@ -150,10 +150,32 @@ async function readRange(sheetId, range) {
 // Some sheet entries use "Name - Address" to disambiguate (e.g.
 // "Jorge Diaz - Benbow Ct"). gp_jobs only has "Name" from Jobber, so
 // strip the trailing " - ..." part before matching.
+//
+// Also applies CUSTOMER_NAME_ALIASES env var, used to map sheet names to
+// Jobber names where Chris uses a different convention (personal name vs
+// business name). Format: "Edward Walls=Extreme Synergy;OtherSheet=OtherJobber".
+let _aliasCache = null;
+function getCustomerAliases() {
+  if (_aliasCache) return _aliasCache;
+  const raw = process.env.CUSTOMER_NAME_ALIASES || "";
+  const map = new Map();
+  for (const pair of raw.split(";")) {
+    const [from, to] = pair.split("=").map((s) => (s || "").trim());
+    if (from && to) map.set(from.toLowerCase(), to);
+  }
+  _aliasCache = map;
+  return map;
+}
 function trimCustomerName(name) {
   if (!name) return null;
   const split = String(name).split(/\s-\s/);
-  return split[0].trim() || null;
+  let trimmed = split[0].trim();
+  if (!trimmed) return null;
+  // Apply alias if Chris uses a personal name where Jobber has the business name
+  const aliases = getCustomerAliases();
+  const alt = aliases.get(trimmed.toLowerCase());
+  if (alt) trimmed = alt;
+  return trimmed;
 }
 
 function parseSalesRow(row) {
@@ -206,7 +228,7 @@ export async function scanChrisSheet() {
   }
   // Skip header row (assume row 1 is headers).
   // Matching strategy: customer name only (fuzzy, ~70% similarity), no date
-  // window — Chris's sheet spans many months while gp_jobs holds the recent
+  // window â Chris's sheet spans many months while gp_jobs holds the recent
   // Jobber invoices we care about. Apply to ALL matching invoices for the
   // same customer (applySheetData has don't-overwrite logic, so re-running
   // with another SALES row for the same customer won't clobber filled fields).
