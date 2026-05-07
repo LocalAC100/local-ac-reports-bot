@@ -4,9 +4,7 @@ import cron from "node-cron";
 import { config } from "./config.js";
 import { buildServer } from "./server.js";
 import { runMorningReport, runEveningReport } from "./reports.js";
-import * as jobberSync from "./jobber-sync.js";
-import * as sheets from "./sheets.js";
-import * as gmail from "./gmail.js";
+import { checkIdleDispatchers } from "./idle.js";
 
 const app = buildServer();
 app.listen(config.port, () => {
@@ -43,51 +41,19 @@ cron.schedule(
   { timezone: config.timezone }
 );
 
-console.log(`[cron] scheduled morning=12:00 evening=19:30 tz=${config.timezone}`);
+// Idle-dispatcher check — every 5 min from 8 AM to 8 PM ET (business hours).
+// Fires a 🔴 alert if any on-shift dispatcher hasn't placed a call / Vonage
+// note / SMS in 20+ minutes. 60-min cooldown per dispatcher.
+cron.schedule(
+  "*/5 8-20 * * *",
+  async () => {
+    try {
+      await checkIdleDispatchers();
+    } catch (e) {
+      console.error(`[cron] idle check failed`, e);
+    }
+  },
+  { timezone: config.timezone }
+);
 
-// ---------- Gross Profit syncs ----------
-// Each runs a poll/scan every interval. They no-op when not configured,
-// so it's safe to schedule them before Jobber/Sheets/Gmail credentials land.
-
-// Jobber poll (safety net behind the webhook): every 5 minutes
-cron.schedule("*/5 * * * *", async () => {
-  try {
-    const r = await jobberSync.pollOnce();
-    if (!r.skipped) console.log(`[cron] jobber poll`, r);
-  } catch (e) {
-    console.error(`[cron] jobber poll failed`, e?.message);
-  }
-});
-
-// Chris's sheet scan: every 30 minutes (offset by 15 min so we don't stack)
-cron.schedule("15,45 * * * *", async () => {
-  try {
-    const r = await sheets.scanChrisSheet();
-    if (!r.skipped) console.log(`[cron] sheets scan`, r);
-  } catch (e) {
-    console.error(`[cron] sheets scan failed`, e?.message);
-  }
-});
-
-// Gmail watcher: every 15 minutes
-cron.schedule("*/15 * * * *", async () => {
-  try {
-    const r = await gmail.pollOnce();
-    if (!r.skipped) console.log(`[cron] gmail poll`, r);
-  } catch (e) {
-    console.error(`[cron] gmail poll failed`, e?.message);
-  }
-});
-
-// Mirror sheet sync: every 10 minutes (cheap; just overwrites)
-cron.schedule("*/10 * * * *", async () => {
-  try {
-    const r = await sheets.syncMirror();
-    if (!r.skipped) console.log(`[cron] mirror sync`, r);
-  } catch (e) {
-    console.error(`[cron] mirror sync failed`, e?.message);
-  }
-});
-
-console.log(`[cron] gross profit syncs scheduled (jobber=5m, sheets=30m, gmail=15m, mirror=10m)`);
-
+console.log(`[cron] scheduled morning=12:00 evening=19:30 idle=*/5 8-20 tz=${config.timezone}`);
