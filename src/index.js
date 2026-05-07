@@ -49,8 +49,8 @@ console.log(`[cron] scheduled morning=12:00 evening=19:30 tz=${config.timezone}`
 // Each runs a poll/scan every interval. They no-op when not configured,
 // so it's safe to schedule them before Jobber/Sheets/Gmail credentials land.
 
-// Jobber poll (safety net behind the webhook): every 30 minutes
-cron.schedule("*/30 * * * *", async () => {
+// Jobber poll (safety net behind the webhook): every 5 minutes
+cron.schedule("*/5 * * * *", async () => {
   try {
     const r = await jobberSync.pollOnce();
     if (!r.skipped) console.log(`[cron] jobber poll`, r);
@@ -89,5 +89,5 @@ cron.schedule("*/10 * * * *", async () => {
   }
 });
 
-console.log(`[cron] gross profit syncs scheduled (jobber=30m, sheets=30m, gmail=15m, mirror=10m)`);
+console.log(`[cron] gross profit syncs scheduled (jobber=5m, sheets=30m, gmail=15m, mirror=10m)`);
 
