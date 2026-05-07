@@ -547,30 +547,42 @@ async function processMessage(gmail, messageId, userEmail) {
 // Returns counts: { total, attached, updated, kept, errors }.
 export async function reparseUnmatched({ limit = 500 } = {}) {
   if (!isConfigured()) return { skipped: true, reason: "gmail watcher not configured" };
-  const rows = db.prepare(
-    `SELECT u.id AS unm_id, u.attachment_id, u.po_name AS old_po,
-            a.gmail_message_id, a.metadata_json
-       FROM gp_unmatched_invoices u
-       JOIN gp_attachments a ON a.id = u.attachment_id
-      WHERE u.resolved_to_job_id IS NULL
-        AND a.gmail_message_id IS NOT NULL
-      LIMIT ?`
-  ).all(limit);
+  const sql = "SELECT u.id AS unm_id, u.attachment_id, u.po_name AS old_po, " +
+              "a.gmail_message_id, a.metadata_json, a.filename " +
+              "FROM gp_unmatched_invoices u " +
+              "JOIN gp_attachments a ON a.id = u.attachment_id " +
+              "WHERE u.resolved_to_job_id IS NULL " +
+              "AND a.gmail_message_id IS NOT NULL LIMIT ?";
+  const rows = db.prepare(sql).all(limit);
   const users = getDelegatedUsers();
+  const msgCache = new Map();
   const out = { total: rows.length, attached: 0, updated: 0, kept: 0, errors: 0 };
   for (const r of rows) {
     try {
-      let full = null;
-      for (const userEmail of users) {
-        try {
-          const gmail = await getGmailClient(userEmail);
-          full = await gmail.users.messages.get({ userId: "me", id: r.gmail_message_id, format: "full" });
-          if (full?.data?.payload) break;
-        } catch (e) { /* try next user */ }
+      let cached = msgCache.get(r.gmail_message_id);
+      if (!cached) {
+        let full = null;
+        for (const userEmail of users) {
+          try {
+            const gm = await getGmailClient(userEmail);
+            full = await gm.users.messages.get({ userId: "me", id: r.gmail_message_id, format: "full" });
+            if (full && full.data && full.data.payload) break;
+          } catch (e) { /* try next user */ }
+        }
+        if (!full || !full.data || !full.data.payload) { out.errors++; continue; }
+        const bodyText = extractBodyText(full.data.payload);
+        const poMap = extractPoMapFromBody(bodyText);
+        cached = { bodyText: bodyText, poMap: poMap };
+        msgCache.set(r.gmail_message_id, cached);
       }
-      if (!full?.data?.payload) { out.errors++; continue; }
-      const bodyText = extractBodyText(full.data.payload);
-      const newPo = extractPoFromBody(bodyText);
+      let newPo = extractPoFromBody(cached.bodyText);
+      if (!newPo) {
+        const invMatch = (r.filename || "").match(/W(\d{5,})/i);
+        if (invMatch) {
+          const key = ("W" + invMatch[1]).toUpperCase();
+          if (cached.poMap[key]) newPo = cached.poMap[key];
+        }
+      }
       if (!newPo) { out.kept++; continue; }
       const cands = GpJobs.findCandidatesByCustomer(newPo, { windowDays: 30, minSimilarity: 0.7 });
       if (cands.length && cands[0].sim >= 0.9 &&
@@ -593,7 +605,6 @@ export async function reparseUnmatched({ limit = 500 } = {}) {
   }
   return out;
 }
-
 function collectParts(payload, acc = []) {
   if (!payload) return acc;
   if (payload.parts) payload.parts.forEach((p) => collectParts(p, acc));
@@ -601,46 +612,54 @@ function collectParts(payload, acc = []) {
   return acc;
 }
 
-// Walk all parts of a Gmail message payload and collect text body content
-// (text/plain preferred; text/html stripped of tags as fallback). Returns a
-// single concatenated string. Used so the PO extractor can read the body
-// of supplier emails (Gemaire/VersaPay puts the customer PO in the email
-// body, not in the attached PDF).
 export function extractBodyText(payload) {
   const parts = collectParts(payload);
-  const plain = [];
-  const html = [];
+  const plain = []; const html = [];
   for (const p of parts) {
     const mime = (p.mimeType || "").toLowerCase();
-    const data = p.body?.data;
+    const data = p.body && p.body.data;
     if (!data) continue;
     let txt;
-    try {
-      txt = Buffer.from(data, "base64url").toString("utf8");
-    } catch (e) {
-      continue;
-    }
+    try { txt = Buffer.from(data, "base64url").toString("utf8"); }
+    catch (e) { continue; }
     if (mime.startsWith("text/plain")) plain.push(txt);
     else if (mime.startsWith("text/html")) html.push(txt);
   }
-  if (plain.length) return plain.join("\n");
+  let strippedHtml = "";
   if (html.length) {
-    // Strip tags + decode common HTML entities. Cheap but adequate for
-    // reading PO/customer-name lines out of supplier email bodies.
-    return html
-      .join("\n")
+    strippedHtml = html.join("\n")
       .replace(/<style[\s\S]*?<\/style>/gi, " ")
       .replace(/<script[\s\S]*?<\/script>/gi, " ")
       .replace(/<br\s*\/?>/gi, "\n")
       .replace(/<\/p>/gi, "\n")
       .replace(/<\/(div|tr|li|h\d)>/gi, "\n")
+      .replace(/<\/td>/gi, " ")
       .replace(/<[^>]+>/g, " ")
       .replace(/&nbsp;/gi, " ")
       .replace(/&amp;/gi, "&")
       .replace(/&lt;/gi, "<")
       .replace(/&gt;/gi, ">")
-      .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
+      .replace(/&#(\d+);/g, function(_, n){ return String.fromCharCode(parseInt(n, 10)); })
       .replace(/&[a-z]+;/gi, " ");
   }
-  return "";
+  return [plain.join("\n"), strippedHtml].filter(Boolean).join("\n\n");
 }
+export function extractPoMapFromBody(bodyText) {
+  if (!bodyText) return {};
+  const out = {};
+  const re = new RegExp(
+    "\\b(W\\d{5,})\\s+([A-Za-z][A-Za-z0-9 .\u0027\\-&]{1,60}?)\\s+\\d{2}-\\d{2}-\\d{4}\\s+\\d{2}-\\d{2}-\\d{4}\\s+\\$",
+    "g"
+  );
+  let m;
+  while ((m = re.exec(bodyText)) !== null) {
+    const inv = m[1].toUpperCase();
+    const po = m[2].trim();
+    if (po && !/^(Issued|Due|Balance|PO|Invoice)$/i.test(po)) {
+      out[inv] = po;
+    }
+  }
+  return out;
+}
+return {extractBodyText, extractPoMapFromBody};
+
