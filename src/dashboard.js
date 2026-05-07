@@ -621,5 +621,35 @@ export function buildDashboardRouter() {
   });
 
 
+  // ----- Gross Profit page -----
+  router.get("/gross-profit", async (req, res) => {
+    try {
+      const { GpJobs, GpAttachments, GpUnmatched, GpInventory } = await import("./gross-profit.js");
+      const jobberSync = await import("./jobber-sync.js");
+      const sheets = await import("./sheets.js");
+      const gmail = await import("./gmail.js");
+      const jobs = GpJobs.list({ limit: 200 });
+      const unmatched = GpUnmatched.list();
+      const inventory = GpInventory.list();
+      const status = {
+        jobber: jobberSync.isConfigured ? jobberSync.isConfigured() : false,
+        sheets: sheets.isConfigured ? sheets.isConfigured() : false,
+        gmail: gmail.isConfigured(),
+        ...(sheets.status ? sheets.status() : {}),
+        ...(gmail.status ? gmail.status() : {}),
+      };
+      res.send(views.grossProfitPage({
+        user: req.user,
+        jobs, unmatched, inventory, status,
+        flash: req.session.flash,
+      }));
+      delete req.session.flash;
+    } catch (e) {
+      console.error("[gross-profit] page failed", e);
+      res.status(500).send("Gross Profit page failed: " + e.message);
+    }
+  });
+
+
   return router;
 }
