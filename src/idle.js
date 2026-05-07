@@ -76,23 +76,29 @@ export async function checkIdleDispatchers() {
 
     let lastEventAt = state.get(emp.name)?.lastEventAt || null;
 
-    // Walk recent messages
+    // Walk recent messages — count ANY outbound activity from this dispatcher
+    // as evidence they're working. Includes:
+    //   - calls (type=1 / TYPE_CALL)
+    //   - SMS (type=2 / TYPE_SMS)
+    //   - emails (TYPE_EMAIL)
+    //   - INTERNAL_COMMENT (where dispatchers log Vonage calls)
+    //   - any other outbound action
+    // The point is: if the dispatcher took ANY action on this contact, they're
+    // not idle. We don't need to be picky about message type — we already
+    // filter by userId and direction=outbound, which is enough.
     for (const conv of conversations) {
       for (const m of convMessages.get(conv.id) || []) {
         if (m.userId !== userId) continue;
         if (String(m.direction || "").toLowerCase() !== "outbound") continue;
-        // Count calls + SMS as activity
-        const isCall =
-          m.type === 1 ||
-          m.messageType === "TYPE_CALL" ||
-          m.messageType === "TYPE_SMS" ||
-          m.type === 2;
-        if (!isCall) continue;
+        // Skip system-generated workflow events (no user attribution implies bot)
+        // — but we already check userId === this dispatcher above, so any match
+        // is a real user action.
         const dt = DateTime.fromISO(m.dateAdded || m.createdAt || "").setZone(TZ);
         if (!dt.isValid) continue;
         if (!lastEventAt || dt > lastEventAt) lastEventAt = dt;
       }
-      // Vonage notes
+      // Also check contact notes (some dispatchers add Vonage notes there
+      // instead of as conversation comments). Same "Called" prefix detector.
       if (conv.contactId) {
         const notes = await ghl.getContactNotes(conv.contactId).catch(() => []);
         for (const n of notes) {
