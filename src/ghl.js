@@ -128,6 +128,29 @@ export async function listActiveConversations({ from, to, maxPages = 10 }) {
   return all;
 }
 
+// Look up conversations by contactId — the ONLY reliable way to find the
+// conversation for an alert lookup. Date-filtered search misses conversations
+// that existed before the lead webhook fired.
+//
+// GHL's /conversations/search supports a contactId filter directly. Returns
+// at most a couple of conversations per contact in practice.
+export async function getConversationsByContactId(contactId) {
+  if (!contactId) return [];
+  try {
+    const r = await http.get("/conversations/search", {
+      params: {
+        locationId: config.ghl.locationId,
+        contactId,
+        limit: 20,
+      },
+    });
+    return r.data?.conversations ?? [];
+  } catch (e) {
+    console.error("[ghl] getConversationsByContactId failed", e?.message);
+    return [];
+  }
+}
+
 // Notes on a specific contact. Used to detect "Vonage call" notes —
 // dispatchers add a note that starts with "Called" any time they call via
 // Vonage (since Vonage doesn't expose an API on regular accounts). Treats
