@@ -713,15 +713,21 @@ export async function buildDailyExcel(dateStr) {
     buildContactPipelineMap(pipelineIndex),
     buildContactMap(rows.map((r) => r.contact_id), dateStr),
   ]);
+  const sizeBeforeMerge = contactMap.size;
   let newContacts = [];
+  let searchError = null;
   try {
     newContacts = await ghl.searchContacts({ from: fromIso, to: toIso, limit: 100 });
-  } catch (e) { console.error("[excel] searchContacts failed", e?.message); }
+  } catch (e) {
+    searchError = e?.response?.data || e?.message;
+    console.error("[excel] searchContacts failed", searchError);
+  }
   // Prefer searchContacts data over per-call getContact data — searchContacts
   // filters by dateAdded and reliably returns the source field, while getContact
   // sometimes returns subset shapes. Overwrite so the New Leads tab gets the
   // canonical contact record.
   for (const c of newContacts) if (c?.id) contactMap.set(c.id, c);
+  console.log(`[excel] contactMap before merge: ${sizeBeforeMerge}, after: ${contactMap.size}, searchContacts returned: ${newContacts.length}, searchError: ${searchError ? JSON.stringify(searchError) : "none"}`);
   const calls = enrichCalls({ rows, dateStr, dispatcherMap, pipelineMap, contactMap });
   const { rows: newLeadRows, stats: newLeadStats } = buildNewLeads({ contactMap, calls, dateStr });
   const totals = {
@@ -748,6 +754,19 @@ export async function buildDailyExcel(dateStr) {
   addByOutboundTab(wb, calls);
   addHourXDispatcherTab(wb, calls);
   addNotesTab(wb);
+
+  // Diagnostic tab with counts useful for debugging
+  const dws = wb.addWorksheet("_Diagnostic");
+  dws.getCell("A1").value = "Diagnostic — counts at build time";
+  dws.getCell("A1").font = { bold: true, size: 14 };
+  dws.getCell("A2").value = `contactMap before searchContacts merge: ${sizeBeforeMerge}`;
+  dws.getCell("A3").value = `contactMap after searchContacts merge: ${contactMap.size}`;
+  dws.getCell("A4").value = `searchContacts returned: ${newContacts.length}`;
+  dws.getCell("A5").value = `searchContacts error: ${searchError ? JSON.stringify(searchError) : "none"}`;
+  dws.getCell("A6").value = `total calls in window: ${rows.length}`;
+  dws.getCell("A7").value = `unique contact_ids in calls: ${new Set(rows.map((r) => r.contact_id).filter(Boolean)).size}`;
+  dws.getColumn(1).width = 90;
+
   const buffer = await wb.xlsx.writeBuffer();
   const filename = `Local_AC_Daily_Report_${dateStr}.xlsx`;
   return { filename, buffer };
