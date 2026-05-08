@@ -21,10 +21,11 @@ const REAL_CALL_THRESHOLD_SEC = 30;
 const VOICEMAIL_MIN_SEC = 5;
 
 // Pipeline scope: dispatcher report only counts calls into leads that have an
-// opportunity in this pipeline. Other Orlando-named pipelines (Generator,
-// Water Filtration ×2) are inactive for now per Alex (May 6 2026). When other
-// pipelines become active, add their names here and the report widens automatically.
-const REPORTED_PIPELINE_NAMES = ["Orlando Pipeline"];
+// opportunity in one of these pipelines. Tampa Pipeline added May 7 2026 per
+// Alex — Tampa is now active. Other named pipelines (Generator, Water
+// Filtration ×2) are still inactive. To widen scope, add the pipeline NAME
+// (must match the GHL pipeline name exactly) to this array.
+const REPORTED_PIPELINE_NAMES = ["Orlando Pipeline", "Tampa Pipeline"];
 
 function bucketCall(durationSec, status) {
   const dur = Number(durationSec) || 0;
@@ -77,10 +78,23 @@ async function buildHubstaffSection({ from, to, includeTotals }) {
   });
   const userIds = matched.map((m) => m.hubstaffUserId).filter(Boolean);
 
-  const [activities, timesheets] = await Promise.all([
+  // Daily activity rows give us the TRUE percentage (0–100). The per-slot
+  // /activities endpoint returns `overall` as raw input-event counts, NOT a
+  // percentage — that's what produced the 531% / 156% nonsense in the v5
+  // report. We pull both: per-slot for the hourly breakdown, daily for the
+  // headline activity %.
+  const dailyDate = from.setZone(TZ).toFormat("yyyy-LL-dd");
+  const [activities, timesheets, dailyActivities] = await Promise.all([
     hubstaff.getActivities({ from: fromIso, to: toIso, userIds }).catch(() => []),
     hubstaff.getTimesheets({ from: fromIso, to: toIso, userIds }).catch(() => []),
+    hubstaff
+      .getDailyActivities({ date: dailyDate, userIds })
+      .catch(() => []),
   ]);
+  const dailyByUser = new Map();
+  for (const d of dailyActivities) {
+    dailyByUser.set(d.user_id, d);
+  }
 
   // Aggregate per-employee: hourly activity %, total tracked, clock in/out
   const perEmp = new Map();
@@ -135,14 +149,46 @@ async function buildHubstaffSection({ from, to, includeTotals }) {
   }
 
   // Per-employee detail rows (the heart of the new section 1)
+  // We DO NOT skip employees without a hubstaffUserId any more — Mark is in
+  // GHL but not yet in Hubstaff and we still need him on the report. He's
+  // rendered with a "no Hubstaff yet" status so the row is visibly partial.
   const perEmployee = [];
   for (const e of matched) {
-    if (!e.hubstaffUserId) continue;
+    const shift = expectedShiftFor(e, today);
+
+    if (!e.hubstaffUserId) {
+      // Mark / any other GHL-only employee — render a placeholder row.
+      // Section 2 (GHL dispatcher analysis) still includes them by ghlEmail.
+      perEmployee.push({
+        name: e.name,
+        role: e.role,
+        clockIn: null,
+        clockOut: null,
+        workedMinutes: 0,
+        breakMinutes: null,
+        breakOver: false,
+        activityPct: null,
+        activityFlag: false,
+        statusFlag: { text: "no Hubstaff yet", color: "gray" },
+        noHubstaff: true,
+      });
+      continue;
+    }
+
     const slot = perEmp.get(e.hubstaffUserId);
     if (!slot) continue;
     const workedMinutes = slot.totalTrackedSec / 60;
+    // Use Hubstaff's DAILY activity % (a real 0–100 percentage) rather than
+    // synthesising from per-slot `overall` (which is event-count, not %).
+    const dailyRow = dailyByUser.get(e.hubstaffUserId);
+    const rawDailyPct = Number(
+      dailyRow?.overall ??
+        dailyRow?.overall_activity ??
+        dailyRow?.activity ??
+        0
+    );
     const activityPct = slot.totalTrackedSec
-      ? Math.round((slot.totalActiveSec / slot.totalTrackedSec) * 100)
+      ? Math.max(0, Math.min(100, Math.round(rawDailyPct)))
       : 0;
     // Break = (clockOut - clockIn) - tracked. Approximate.
     let breakMinutes = null;
@@ -153,17 +199,22 @@ async function buildHubstaffSection({ from, to, includeTotals }) {
     const breakBudget = e.breakMinutesPerShift ?? 0;
     const breakOver = breakMinutes != null && breakMinutes > breakBudget + 5; // 5-min grace
 
+    // Smarter "really not working" red flag: combine signals rather than fire
+    // on activity-% alone. Activity % can dip during phone calls (no kbd/mouse)
+    // so we only flag red when activity is low AND the dispatcher's GHL call
+    // count for the same window is also tiny. Computed lower, after we know
+    // each dispatcher's GHL totals — see `applyCombinedStatusFlags` below.
     let statusFlag = null;
-    const shift = expectedShiftFor(e, today);
     if (!slot.firstClockIn && shift) {
       statusFlag = { text: "no clock-in", color: "amber" };
     } else if (workedMinutes < 60 && shift) {
       statusFlag = { text: "under 1h tracked", color: "amber" };
-    } else if (activityPct > 0 && activityPct < 40) {
-      statusFlag = { text: "low activity", color: "red" };
     } else if (breakOver) {
       statusFlag = { text: `break over (${Math.round(breakMinutes - breakBudget)}m extra)`, color: "amber" };
     }
+    // The "low activity" red flag is no longer set here; it's set in the
+    // composeReport step once we can correlate Hubstaff activity with GHL
+    // outbound-call counts.
 
     perEmployee.push({
       name: e.name,
@@ -174,7 +225,7 @@ async function buildHubstaffSection({ from, to, includeTotals }) {
       breakMinutes,
       breakOver,
       activityPct,
-      activityFlag: activityPct > 0 && activityPct < 40,
+      activityFlag: false, // set in composeReport once GHL data is joined
       statusFlag,
     });
   }
@@ -403,6 +454,25 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
     }
   }
 
+  // Notes are CONTACT-scoped, not conversation-scoped. If a contact has 2
+  // conversations (e.g. one for SMS, one for calls — extremely common in GHL)
+  // we used to fetch and count its notes once per conversation, double-counting
+  // every Vonage "Called …" record. We now dedupe two ways:
+  //   1. Cache `getContactNotes` results per contactId so we make one HTTP call.
+  //   2. Track which (contactId, noteId) pairs we've already counted so
+  //      walking the same contact twice never tallies the same note twice.
+  // This is the root cause of Angel's wildly inflated 13-voicemail count.
+  const contactNotesCache = new Map();
+  const countedVonageNotes = new Set(); // `${contactId}:${noteId}` keys
+  async function notesFor(contactId) {
+    if (!contactId) return [];
+    if (contactNotesCache.has(contactId))
+      return contactNotesCache.get(contactId);
+    const list = await ghl.getContactNotes(contactId).catch(() => []);
+    contactNotesCache.set(contactId, list);
+    return list;
+  }
+
   // Walk every active conversation: count outbound calls (split by bucket) and outbound SMS.
   for (const conv of conversations) {
     const leadAge = leadAgeBucket(conv.dateAdded);
@@ -456,12 +526,17 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
     }
 
     // Vonage notes: any note from a known dispatcher starting with "Called"
-    // counts as a call, with bucket inferred from the suffix.
+    // counts as a call, with bucket inferred from the suffix. Notes are cached
+    // per-contact and deduped by note id so a contact with multiple
+    // conversations does not over-count.
     if (conv.contactId) {
-      const notes = await ghl.getContactNotes(conv.contactId).catch(() => []);
+      const notes = await notesFor(conv.contactId);
       for (const n of notes) {
         const parsed = parseVonageNote(n.body);
         if (!parsed) continue;
+        const dedupeKey = `${conv.contactId}:${n.id || n.dateAdded || n.body}`;
+        if (countedVonageNotes.has(dedupeKey)) continue;
+        countedVonageNotes.add(dedupeKey);
         const dispatcher = [...byDispatcher.values()].find(
           (d) => d.ghlUserId === n.userId
         );
@@ -519,14 +594,24 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
       .catch(() => []);
     for (const o of opps) {
       const stage = String(o.pipelineStageName ?? "").toLowerCase();
-      const updated = DateTime.fromISO(
-        o.updatedAt || o.dateAdded || new Date().toISOString()
-      ).setZone(TZ);
-      if (updated < from || updated > to) continue;
       const isPhys = stage.includes("appointment booked") || stage.includes("appt. booked") || stage.includes("appt booked");
       const isPh = stage.includes("over phone sale") || stage.includes("over phone booked") || stage.includes("phone sale");
       const isXfer = stage.includes("live transfer");
       if (!isPhys && !isPh && !isXfer) continue;
+
+      // Only count bookings whose OPP was CREATED inside this report window.
+      // Previously we used `updatedAt`, which changes on any opp edit (a call
+      // logged, a tag added, even a phone-format cleanup). That made already-
+      // booked leads show up as "newly booked today" the moment a dispatcher
+      // touched them — exactly the bug Alex saw with Frank's 2 bookings on
+      // May 7. `dateAdded` is when the opp was first created, which is a
+      // tighter (and accurate-by-default) proxy for "booked in this window."
+      const created = DateTime.fromISO(
+        o.dateAdded || o.createdAt || ""
+      ).setZone(TZ);
+      if (!created.isValid) continue;
+      if (created < from || created > to) continue;
+
       const dispatcher =
         [...byDispatcher.values()].find((d) => d.ghlUserId === o.assignedTo) || {
           name: "—",
@@ -537,12 +622,12 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
         dispatcher.liveTransfers += 1;
       appointmentsBooked.push({
         leadName: o.contact?.name || o.name || "(unnamed)",
-        time: fmtTime(updated),
+        time: fmtTime(created),
         dispatcher: dispatcher.name,
         stage: o.pipelineStageName,
         kind: isPhys ? "physical" : isPh ? "phone_sale" : "live_transfer",
       });
-      if (includeTimeOfDay) bucketBookings[bucketFor(updated)] += 1;
+      if (includeTimeOfDay) bucketBookings[bucketFor(created)] += 1;
     }
   }
 
@@ -584,7 +669,8 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
         )?.name;
       }
       // Also check Vonage notes — earliest "Called -" note from a dispatcher
-      const notes = await ghl.getContactNotes(c.id).catch(() => []);
+      // (uses the cached notes fetched earlier so we don't re-hit the API).
+      const notes = await notesFor(c.id);
       for (const n of notes) {
         if (!parseVonageNote(n.body)) continue;
         const noteAt = DateTime.fromISO(n.dateAdded || "").setZone(TZ);
@@ -874,6 +960,46 @@ function computeCrossSystemFlags(hub, dispatch) {
   return flags;
 }
 
+// Combined "really not working" flag. Set the red `low activity` status only
+// when BOTH signals point the same way:
+//   • Hubstaff activity % is below the role's expected band, AND
+//   • GHL output (calls + texts) for the day is below 5 events.
+// Activity % alone is unreliable for dispatchers — they're on the phone
+// without keyboard input for long stretches. GHL alone is unreliable for
+// Frank — he supervises and doesn't dial much. Combining the two suppresses
+// the noise we saw on May 7 (red flags everywhere from a 40 % cutoff).
+function applyCombinedStatusFlags(perEmployee, dispatcherRows) {
+  const ghlEventsByName = new Map();
+  for (const d of dispatcherRows) {
+    const total =
+      (d.real || 0) +
+      (d.voicemail || 0) +
+      (d.attempt || 0) +
+      (d.sms || 0) +
+      (d.physBookings || 0) +
+      (d.phBookings || 0) +
+      (d.liveTransfers || 0);
+    ghlEventsByName.set(d.name, total);
+  }
+  for (const row of perEmployee) {
+    if (row.noHubstaff) continue;
+    if (row.statusFlag) continue; // amber flag already set — don't override
+    const pct = row.activityPct;
+    if (pct == null) continue;
+    const ghlEvents = ghlEventsByName.get(row.name) ?? 0;
+    // Frank is `dispatcher_manager` — give him a wider band.
+    const lowActivity = row.role === "dispatcher_manager" ? pct < 25 : pct < 35;
+    const lowGhl = row.role === "dispatcher_manager" ? ghlEvents < 2 : ghlEvents < 5;
+    if (lowActivity && lowGhl) {
+      row.statusFlag = {
+        text: `low output (${pct}% / ${ghlEvents} events)`,
+        color: "red",
+      };
+      row.activityFlag = true;
+    }
+  }
+}
+
 // ---------- Top-level orchestrators ----------
 
 export async function runMorningReport() {
@@ -894,6 +1020,8 @@ export async function runMorningReport() {
 
   // v5: cross-system flags (Hubstaff active + GHL silent / GHL active + off clock)
   hub.crossSystemFlags = computeCrossSystemFlags(hub, dispatch);
+  // v6: combined "low output" red flag (Hubstaff low AND GHL low)
+  applyCombinedStatusFlags(hub.perEmployee, dispatch.byDispatcher);
 
   const html = renderEmail({
     title: "Morning Snapshot",
@@ -937,6 +1065,8 @@ export async function runEveningReport() {
 
   // v5: cross-system flags (Hubstaff active + GHL silent / GHL active + off clock)
   hub.crossSystemFlags = computeCrossSystemFlags(hub, dispatch);
+  // v6: combined "low output" red flag (Hubstaff low AND GHL low)
+  applyCombinedStatusFlags(hub.perEmployee, dispatch.byDispatcher);
 
   const html = renderEmail({
     title: "Full Day Summary",
