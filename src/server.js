@@ -7,6 +7,7 @@ import { config } from "./config.js";
 import { onNewLead } from "./alerts.js";
 import { buildSessionMiddleware } from "./auth.js";
 import { buildDashboardRouter } from "./dashboard.js";
+import { buildDebugRouter } from "./debug.js";
 import { Alerts } from "./db.js";
 import * as jobberSync from "./jobber-sync.js";
 import * as jobber from "./jobber.js";
@@ -153,6 +154,7 @@ JOBBER_REFRESH_TOKEN=${refresh_token || "(rotation off; reuse access token)"}
   app.use(cookieParser());
   app.use(buildSessionMiddleware());
   app.use(buildDashboardRouter());
+  app.use(buildDebugRouter());
 
   return app;
 }
