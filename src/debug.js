@@ -382,20 +382,33 @@ export function buildDebugRouter() {
         .catch((e) => ({ data: { error: e?.response?.data || e?.message } }));
       const calendars = calsResp.data?.calendars || [];
 
-      // 2) Pull appointments for the day (the same data /calendars/events
-      //    returns to the other chat). Try the two endpoints GHL exposes:
-      //    a) /calendars/events/appointments?startTime=...&endTime=...
-      //    b) /calendars/events?calendarId=...&startTime=...&endTime=...
-      const apptResp = await http
-        .get("/calendars/events/appointments", {
-          params: {
-            locationId: config.ghl.locationId,
-            startTime: fromMs,
-            endTime: toMs,
-          },
-        })
-        .catch((e) => ({ data: { error: e?.response?.data || e?.message } }));
-      const appointments = apptResp.data?.events || [];
+      // 2) Pull events from /calendars/events for EACH calendar
+      //    (the endpoint requires a calendarId; no all-calendars mode).
+      const appointments = [];
+      const calendarErrors = [];
+      for (const cal of calendars) {
+        try {
+          const er = await http.get("/calendars/events", {
+            params: {
+              locationId: config.ghl.locationId,
+              calendarId: cal.id,
+              startTime: fromMs,
+              endTime: toMs,
+            },
+          });
+          const events = er.data?.events || [];
+          for (const ev of events) {
+            appointments.push({ ...ev, _calendarId: cal.id, _calendarName: cal.name });
+          }
+        } catch (e) {
+          calendarErrors.push({
+            calendarId: cal.id,
+            calendarName: cal.name,
+            error: e?.response?.data?.message || e?.message,
+          });
+        }
+      }
+      const apptResp = { data: { error: calendarErrors.length ? calendarErrors : null } };
 
       // For each appointment, try to pull the contact name
       async function fetchContact(cid) {
@@ -417,15 +430,14 @@ export function buildDebugRouter() {
 
       const apptDetails = [];
       for (const a of appointments) {
-        const cal = calendars.find((c) => c.id === a.calendarId);
         const contact = await fetchContact(a.contactId);
         const startEt = a.startTime
           ? DateTime.fromISO(a.startTime).setZone(TZ).toFormat("h:mm a")
           : "(no start)";
         apptDetails.push({
           appointmentId: a.id,
-          calendarId: a.calendarId,
-          calendarName: cal?.name || "(unknown calendar)",
+          calendarId: a._calendarId || a.calendarId,
+          calendarName: a._calendarName || "(unknown calendar)",
           startTime: startEt,
           startTimeIso: a.startTime,
           contactId: a.contactId,
