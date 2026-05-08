@@ -39,6 +39,18 @@ const OUTBOUND_LABELS = {
   "18139061143": "Tampa 813-906-1143",
 };
 
+// Ad-source filter for the New Leads tab.
+// Only contacts whose `source` field matches one of these values are counted
+// as "new leads received today". This matches Alex's manual report: he tracks
+// only ad-driven leads (Instagram + Facebook), not inbound calls or contacts
+// that landed in the CRM through other paths. Match is lowercased + trimmed.
+const AD_SOURCES = new Set(["ig", "fb", "instagram", "facebook"]);
+
+function isAdSourceLead(c) {
+  const s = String(c?.source || "").toLowerCase().trim();
+  return AD_SOURCES.has(s);
+}
+
 const COLORS = {
   HEADER_BG: "FF1F4E78",
   HEADER_FG: "FFFFFFFF",
@@ -615,6 +627,7 @@ function buildNewLeads({ contactMap, calls, dateStr }) {
   const leads = [];
   for (const c of contactMap.values()) {
     if (!c?.dateAdded) continue;
+    if (!isAdSourceLead(c)) continue;  // ad-source only (Instagram + Facebook)
     const added = DateTime.fromISO(c.dateAdded);
     if (!added.isValid) continue;
     if (added < reportStart || added > reportEnd) continue;
