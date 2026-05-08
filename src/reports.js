@@ -110,19 +110,28 @@ async function buildHubstaffSection({ from, to, includeTotals }) {
     });
   }
 
+  // CRITICAL FIX (May 7 2026 22:00 ET): Hubstaff's per-slot `overall` field
+  // is the count of ACTIVE SECONDS in the slot (not a 0-100 percentage). The
+  // old code multiplied tracked × (overall/100), which only made sense if
+  // overall were already a percent. Verified against /admin/debug/raw:
+  // Frank's slots show tracked=600 + overall=14 etc. → activity=14/600=2.3%.
+  // The fix: `overall` is itself the active-seconds, use it directly.
   for (const a of activities) {
     const slot = perEmp.get(a.user_id);
     if (!slot) continue;
     const hour = hourBucket(DateTime.fromISO(a.starts_at || a.time_slot).setZone(TZ));
     const cur = slot.hourly.get(hour) || { trackedSec: 0, activeSec: 0 };
     cur.trackedSec += a.tracked || 0;
-    cur.activeSec += (a.tracked || 0) * ((a.overall || 0) / 100);
+    cur.activeSec += a.overall || 0;
     slot.hourly.set(hour, cur);
     slot.totalTrackedSec += a.tracked || 0;
-    slot.totalActiveSec += (a.tracked || 0) * ((a.overall || 0) / 100);
+    slot.totalActiveSec += a.overall || 0;
   }
 
-  // Clock-in / clock-out from timesheets
+  // Clock-in / clock-out from timesheets — but Hubstaff's /timesheets endpoint
+  // returns ZERO rows (verified May 7 2026 via /admin/debug/raw — Frank had
+  // 81 activity slots and 47738s tracked, but timesheets_count=0). Endpoint
+  // is broken/deprecated. Loop kept for forward-compat if Hubstaff fixes it.
   for (const ts of timesheets) {
     const slot = perEmp.get(ts.user_id);
     if (!slot) continue;
@@ -130,6 +139,29 @@ async function buildHubstaffSection({ from, to, includeTotals }) {
     const stop = ts.stops_at ? DateTime.fromISO(ts.stops_at).setZone(TZ) : null;
     if (start && (!slot.firstClockIn || start < slot.firstClockIn)) slot.firstClockIn = start;
     if (stop && (!slot.lastClockOut || stop > slot.lastClockOut)) slot.lastClockOut = stop;
+  }
+
+  // FALLBACK (added May 7 2026): derive clock-in/out from the activities
+  // array since /timesheets is broken. First activity's starts_at = clock-in.
+  // Last activity's starts_at + 10 min slot duration = clock-out.
+  for (const [userId, slot] of perEmp.entries()) {
+    if (slot.firstClockIn && slot.lastClockOut) continue;
+    const acts = activities
+      .filter((a) => a.user_id === userId && (a.starts_at || a.time_slot))
+      .sort((a, b) =>
+        new Date(a.starts_at || a.time_slot) - new Date(b.starts_at || b.time_slot)
+      );
+    if (acts.length === 0) continue;
+    if (!slot.firstClockIn) {
+      slot.firstClockIn = DateTime.fromISO(acts[0].starts_at || acts[0].time_slot).setZone(TZ);
+    }
+    if (!slot.lastClockOut) {
+      // Each Hubstaff activity slot covers 10 minutes
+      slot.lastClockOut = DateTime
+        .fromISO(acts[acts.length - 1].starts_at || acts[acts.length - 1].time_slot)
+        .setZone(TZ)
+        .plus({ minutes: 10 });
+    }
   }
 
   // Discrepancies: scheduled today but no tracked time yet
@@ -149,16 +181,24 @@ async function buildHubstaffSection({ from, to, includeTotals }) {
   }
 
   // Per-employee detail rows (the heart of the new section 1)
-  // We DO NOT skip employees without a hubstaffUserId any more — Mark is in
-  // GHL but not yet in Hubstaff and we still need him on the report. He's
-  // rendered with a "no Hubstaff yet" status so the row is visibly partial.
+  //
+  // Inclusion rule: only employees we actually want to MEASURE on this report.
+  // That's everyone with a Hubstaff record (so we have hours/activity for them)
+  // PLUS dispatchers (so Mark — dispatcher_training, no Hubstaff yet — still
+  // shows up). Sal (sales_manager) and Christopher (service_manager) are
+  // back-office and were never supposed to appear here, so we explicitly
+  // filter them out even though they live in the EMPLOYEES array (they are
+  // kept there only so live-transfer attribution can resolve to them).
   const perEmployee = [];
   for (const e of matched) {
     const shift = expectedShiftFor(e, today);
+    const showInReport = isDispatcher(e) || e.role === "office_manager" || !!e.hubstaffUserId;
+    if (!showInReport) continue;
 
     if (!e.hubstaffUserId) {
-      // Mark / any other GHL-only employee — render a placeholder row.
-      // Section 2 (GHL dispatcher analysis) still includes them by ghlEmail.
+      // Mark / any other dispatcher in GHL but not yet in Hubstaff — render a
+      // placeholder row. Section 2 (GHL dispatcher analysis) still includes
+      // them by ghlEmail.
       perEmployee.push({
         name: e.name,
         role: e.role,
@@ -178,18 +218,19 @@ async function buildHubstaffSection({ from, to, includeTotals }) {
     const slot = perEmp.get(e.hubstaffUserId);
     if (!slot) continue;
     const workedMinutes = slot.totalTrackedSec / 60;
-    // Use Hubstaff's DAILY activity % (a real 0–100 percentage) rather than
-    // synthesising from per-slot `overall` (which is event-count, not %).
+    // CRITICAL FIX (May 7 2026): Hubstaff's daily.overall is ACTIVE-SECONDS
+    // (not a percentage). Real activity % = overall / tracked × 100.
+    // Verified: Frank today overall=7358 tracked=47738 → 15% activity.
+    // Old code treated `overall` as a percent and capped it at 100, hiding the
+    // bug for high-tracked users (everyone showed 100%) and inflating it
+    // bizarrely for short shifts.
     const dailyRow = dailyByUser.get(e.hubstaffUserId);
-    const rawDailyPct = Number(
-      dailyRow?.overall ??
-        dailyRow?.overall_activity ??
-        dailyRow?.activity ??
-        0
-    );
-    const activityPct = slot.totalTrackedSec
-      ? Math.max(0, Math.min(100, Math.round(rawDailyPct)))
-      : 0;
+    const dailyOverall = Number(dailyRow?.overall || 0);
+    const dailyTracked = Number(dailyRow?.tracked || 0);
+    const activityPct =
+      dailyTracked > 0
+        ? Math.max(0, Math.min(100, Math.round((dailyOverall / dailyTracked) * 100)))
+        : 0;
     // Break = (clockOut - clockIn) - tracked. Approximate.
     let breakMinutes = null;
     if (slot.firstClockIn && slot.lastClockOut) {
