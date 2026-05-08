@@ -717,7 +717,11 @@ export async function buildDailyExcel(dateStr) {
   try {
     newContacts = await ghl.searchContacts({ from: fromIso, to: toIso, limit: 100 });
   } catch (e) { console.error("[excel] searchContacts failed", e?.message); }
-  for (const c of newContacts) if (c?.id && !contactMap.has(c.id)) contactMap.set(c.id, c);
+  // Prefer searchContacts data over per-call getContact data — searchContacts
+  // filters by dateAdded and reliably returns the source field, while getContact
+  // sometimes returns subset shapes. Overwrite so the New Leads tab gets the
+  // canonical contact record.
+  for (const c of newContacts) if (c?.id) contactMap.set(c.id, c);
   const calls = enrichCalls({ rows, dateStr, dispatcherMap, pipelineMap, contactMap });
   const { rows: newLeadRows, stats: newLeadStats } = buildNewLeads({ contactMap, calls, dateStr });
   const totals = {
