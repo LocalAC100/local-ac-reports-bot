@@ -827,5 +827,191 @@ export function buildDebugRouter() {
     }
   });
 
+  // POST /admin/ghl-jwt — store the HighLevel session JWT (the same token
+  // their browser uses for backend.leadconnectorhq.com calls). Persisted to
+  // Render disk so it survives restarts.
+  router.post(
+    "/admin/ghl-jwt",
+    requireAdmin,
+    express.json({ limit: "1mb" }),
+    async (req, res) => {
+      try {
+        const fs = await import("fs");
+        const path = await import("path");
+        const dataDir = process.env.DATA_DIR || "/var/data";
+        const file = path.default.join(dataDir, "ghl-internal-jwt.json");
+        try {
+          fs.default.mkdirSync(dataDir, { recursive: true });
+        } catch {}
+        const payload = JSON.stringify(
+          { ...req.body, savedAt: new Date().toISOString() },
+          null,
+          2
+        );
+        fs.default.writeFileSync(file, payload, "utf8");
+        res.json({
+          ok: true,
+          savedAt: new Date().toISOString(),
+          keysReceived: Object.keys(req.body || {}),
+          file,
+        });
+      } catch (e) {
+        res.status(500).json({ ok: false, error: e?.message });
+      }
+    }
+  );
+
+  // GET /admin/debug/firehose — call HighLevel's INTERNAL Call Reporting
+  // endpoint (the same one the dashboard's "Call Reporting" page uses).
+  // Requires the session JWT stored via /admin/ghl-jwt.
+  // Query params: date (YYYY-MM-DD ET), direction (outbound|inbound, default
+  // outbound). Returns totalRows, plus a count + sample of the response rows.
+  router.get("/admin/debug/firehose", requireAdmin, async (req, res) => {
+    try {
+      const { DateTime } = await import("luxon");
+      const axios = (await import("axios")).default;
+      const fs = await import("fs");
+      const path = await import("path");
+      const { config } = await import("./config.js");
+
+      const dataDir = process.env.DATA_DIR || "/var/data";
+      const file = path.default.join(dataDir, "ghl-internal-jwt.json");
+      let jwt;
+      try {
+        jwt = JSON.parse(fs.default.readFileSync(file, "utf8"));
+      } catch (e) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "no JWT stored. POST { token-id: 'eyJ...', or full localStorage.refreshedToken JSON } to /admin/ghl-jwt first.",
+        });
+      }
+
+      const TZ = "America/New_York";
+      const dateStr =
+        req.query.date || DateTime.now().setZone(TZ).toFormat("yyyy-LL-dd");
+      const direction = req.query.direction || "outbound";
+      const dayStart = DateTime.fromISO(dateStr, { zone: TZ }).startOf("day");
+      const dayEnd = dayStart.endOf("day");
+
+      const body = {
+        locationId: config.ghl.locationId,
+        source: [],
+        sourceType: [],
+        keyword: [],
+        landingPage: [],
+        referrer: [],
+        campaign: [],
+        callStatus: [],
+        dispositions: [],
+        deviceType: [],
+        qualifiedLead: false,
+        firstTime: false,
+        duration: null,
+        selectedPool: "all",
+        direction,
+        startDate: dayStart.toUTC().toISO(),
+        endDate: dayEnd.toUTC().toISO(),
+        userId: "",
+        limit: 1000,
+        skip: 0,
+      };
+
+      // The "token-id" header is set to the access token. The other chat's
+      // pseudocode was JSON.parse(localStorage.getItem('refreshedToken'))
+      // which suggests the value stored in localStorage is JSON-wrapped. We
+      // accept several shapes: raw string, {token-id:...}, {accessToken:...},
+      // or pass the full payload through.
+      const tokenIdValue =
+        jwt["token-id"] ||
+        jwt.tokenId ||
+        jwt.accessToken ||
+        jwt.access_token ||
+        jwt.token ||
+        jwt.raw ||
+        (typeof jwt === "string" ? jwt : null);
+
+      if (!tokenIdValue) {
+        return res.status(400).json({
+          ok: false,
+          error: "stored JWT object has no recognizable token field",
+          haveKeys: Object.keys(jwt),
+        });
+      }
+
+      let resp, errInfo;
+      try {
+        resp = await axios.post(
+          "https://backend.leadconnectorhq.com/reporting/calls/get-all-phone-calls-new",
+          body,
+          {
+            headers: {
+              "token-id": tokenIdValue,
+              channel: "APP",
+              source: "WEB_USER",
+              version: "2021-04-15",
+              "Content-Type": "application/json",
+              Accept: "application/json",
+            },
+            timeout: 30000,
+          }
+        );
+      } catch (err) {
+        errInfo = {
+          status: err?.response?.status,
+          data: err?.response?.data,
+          message: err?.message,
+        };
+      }
+
+      if (errInfo) {
+        return res.json({
+          ok: false,
+          callError: errInfo,
+          tokenSnippet:
+            String(tokenIdValue).slice(0, 8) +
+            "..." +
+            String(tokenIdValue).slice(-6),
+          requestBody: body,
+        });
+      }
+
+      const data = resp.data || {};
+      const rows = Array.isArray(data.rows) ? data.rows : [];
+
+      // Per-userId tally + sample
+      const byUserCount = {};
+      for (const r of rows) {
+        const u = r.userId || "(none)";
+        byUserCount[u] = (byUserCount[u] || 0) + 1;
+      }
+      const sample = rows.slice(0, 3).map((r) => ({
+        callSid: r.callSid,
+        status: r.callStatus,
+        duration: r.duration,
+        direction: r.direction,
+        userId: r.userId,
+        contactId: r.contactId,
+        dateAdded: r.dateAdded,
+      }));
+
+      res.json({
+        ok: true,
+        date: dateStr,
+        direction,
+        totalRows: data.totalRows,
+        totalPages: data.totalPages,
+        rowCountReturned: rows.length,
+        traceId: data.traceId,
+        byUserCount,
+        sample,
+      });
+    } catch (e) {
+      res
+        .status(500)
+        .json({ ok: false, error: e?.message, stack: e?.stack });
+    }
+  });
+
   return router;
 }
