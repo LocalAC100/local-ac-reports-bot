@@ -77,9 +77,30 @@ CREATE TABLE IF NOT EXISTS chat_history (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Persistent call log. Sources: 'webhook' (live), 'firehose' (backfill/reconcile).
+-- Primary key is HighLevel's callSid (unique per call). UPSERT on conflict so the
+-- nightly firehose reconcile job can fill in dispositions / duration / status that
+-- weren't known when the webhook fired (calls are reported BEFORE final disposition).
+CREATE TABLE IF NOT EXISTS calls (
+  call_sid TEXT PRIMARY KEY,
+  direction TEXT,                 -- 'outbound' | 'inbound'
+  status TEXT,                    -- 'completed' | 'no-answer' | 'failed' | 'busy' | 'ringing'
+  duration INTEGER,               -- seconds
+  user_id TEXT,                   -- GHL user (dispatcher) ID; null for inbound
+  contact_id TEXT,
+  phone TEXT,
+  source TEXT NOT NULL,           -- 'webhook' | 'firehose'
+  date_added TEXT NOT NULL,       -- ISO timestamp from GHL (call event time)
+  raw_event TEXT,                 -- JSON of the original event/row
+  inserted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_alerts_fired_at ON alerts_history(fired_at);
 CREATE INDEX IF NOT EXISTS idx_reports_generated_at ON reports_history(generated_at);
 CREATE INDEX IF NOT EXISTS idx_chat_user_created ON chat_history(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_calls_date ON calls(date_added);
+CREATE INDEX IF NOT EXISTS idx_calls_user ON calls(user_id, date_added);
 `);
 
 // ---------- Idempotent migrations (for DBs created before a column existed) ----------
@@ -187,6 +208,131 @@ export const Reports = {
       .all(limit),
   byId: (id) =>
     db.prepare("SELECT * FROM reports_history WHERE id = ?").get(id),
+};
+
+// Bucket classification for the 5-category daily breakdown:
+//   Live Transfer   = completed + duration >= 30s + transferred=true
+//   Real Call       = completed + duration >= 30s + transferred!=true
+//   No Answer       = status='no-answer' OR (status='completed' AND duration<30s)
+//   Failed          = status in ('failed','busy')
+//   Ringing         = status in ('ringing','queued','initiated','in-progress')
+export function classifyCall(row) {
+  const s = (row.status || row.callStatus || "").toLowerCase();
+  const d = Number(row.duration || 0);
+  const transferred = !!(row.transferred || row.isTransferred ||
+    (row.dispositions && /transfer/i.test(JSON.stringify(row.dispositions))));
+  if (s === "completed" && d >= 30 && transferred) return "live_transfer";
+  if (s === "completed" && d >= 30) return "real_call";
+  if (s === "no-answer" || (s === "completed" && d < 30)) return "no_answer";
+  if (s === "failed" || s === "busy") return "failed";
+  return "ringing";
+}
+
+export const Calls = {
+  // Idempotent upsert. Webhooks (real-time) and firehose (reconcile) both call this.
+  // The webhook may arrive before HL has a final status; the firehose reconcile
+  // overwrites status/duration when the call is finalized.
+  upsert: (c) => {
+    const stmt = db.prepare(`
+      INSERT INTO calls (call_sid, direction, status, duration, user_id, contact_id, phone, source, date_added, raw_event, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(call_sid) DO UPDATE SET
+        direction = COALESCE(excluded.direction, direction),
+        status = COALESCE(excluded.status, status),
+        duration = COALESCE(excluded.duration, duration),
+        user_id = COALESCE(excluded.user_id, user_id),
+        contact_id = COALESCE(excluded.contact_id, contact_id),
+        phone = COALESCE(excluded.phone, phone),
+        -- Prefer 'firehose' as source-of-truth once it's seen the call
+        source = CASE WHEN excluded.source = 'firehose' THEN 'firehose' ELSE source END,
+        date_added = COALESCE(excluded.date_added, date_added),
+        raw_event = excluded.raw_event,
+        updated_at = CURRENT_TIMESTAMP
+    `);
+    return stmt.run(
+      c.callSid,
+      c.direction || null,
+      c.status || null,
+      c.duration ?? null,
+      c.userId || null,
+      c.contactId || null,
+      c.phone || null,
+      c.source || "webhook",
+      c.dateAdded,
+      c.raw ? JSON.stringify(c.raw) : null
+    );
+  },
+  // Bulk upsert in a single transaction (used by firehose backfill).
+  bulkUpsert: (rows) => {
+    const tx = db.transaction((items) => {
+      for (const r of items) Calls.upsert(r);
+    });
+    tx(rows);
+    return rows.length;
+  },
+  // Total count between two ISO timestamps (UTC), optionally by direction.
+  countInWindow: (fromIso, toIso, direction) => {
+    if (direction) {
+      return db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM calls WHERE date_added >= ? AND date_added < ? AND direction = ?"
+        )
+        .get(fromIso, toIso, direction).n;
+    }
+    return db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM calls WHERE date_added >= ? AND date_added < ?"
+      )
+      .get(fromIso, toIso).n;
+  },
+  // Per-userId counts for outbound calls in a window (drives the dispatcher rollup).
+  byUserCount: (fromIso, toIso, direction = "outbound") =>
+    db
+      .prepare(
+        `SELECT user_id, COUNT(*) AS n
+         FROM calls
+         WHERE date_added >= ? AND date_added < ? AND direction = ?
+         GROUP BY user_id`
+      )
+      .all(fromIso, toIso, direction),
+  // 5-bucket counts (live_transfer / real_call / no_answer / failed / ringing).
+  // Computed in JS so the classifyCall() rule stays in one place.
+  bucketCounts: (fromIso, toIso) => {
+    const rows = db
+      .prepare(
+        "SELECT status, duration, raw_event FROM calls WHERE date_added >= ? AND date_added < ?"
+      )
+      .all(fromIso, toIso);
+    const counts = {
+      live_transfer: 0,
+      real_call: 0,
+      no_answer: 0,
+      failed: 0,
+      ringing: 0,
+    };
+    for (const r of rows) {
+      let raw = {};
+      try {
+        if (r.raw_event) raw = JSON.parse(r.raw_event);
+      } catch {}
+      const bucket = classifyCall({
+        status: r.status,
+        duration: r.duration,
+        transferred: raw.transferred,
+        isTransferred: raw.isTransferred,
+        dispositions: raw.dispositions,
+      });
+      counts[bucket]++;
+    }
+    return counts;
+  },
+  // Direct row fetch (debug/admin).
+  listInWindow: (fromIso, toIso, limit = 1000) =>
+    db
+      .prepare(
+        "SELECT * FROM calls WHERE date_added >= ? AND date_added < ? ORDER BY date_added DESC LIMIT ?"
+      )
+      .all(fromIso, toIso, limit),
 };
 
 export const Chat = {
