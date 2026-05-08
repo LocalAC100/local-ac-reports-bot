@@ -238,10 +238,21 @@ export function transferDestination(row) {
   return lbl ? lbl.slice("transfer:".length) : "";
 }
 
+// Real-call duration threshold (seconds). Calls under this duration that
+// completed (i.e. picked up but didn't actually engage, or stayed on the line
+// briefly during a transfer attempt) are bucketed as No Answer rather than
+// Real Call. The user calibrated this at 70s — short conversations under 70s
+// are reliably "didn't really talk" and shouldn't count as real engagement.
+// DO NOT lower without explicit user instruction. Override via env var if
+// ever needed; default stays 70.
+const REAL_CALL_MIN_DURATION = Number(
+  process.env.REAL_CALL_MIN_DURATION || 70
+);
+
 // Bucket classification for the 5-category daily breakdown:
-//   Live Transfer   = completed + duration >= 30s + isLiveTransfer(row)
-//   Real Call       = completed + duration >= 30s + NOT isLiveTransfer(row)
-//   No Answer       = status='no-answer' OR (status='completed' AND duration<30s)
+//   Live Transfer   = completed + duration >= 70s + isLiveTransfer(row)
+//   Real Call       = completed + duration >= 70s + NOT isLiveTransfer(row)
+//   No Answer       = status='no-answer' OR (status='completed' AND duration<70s)
 //   Failed          = status in ('failed','busy')
 //   Ringing         = status in ('ringing','queued','initiated','in-progress')
 //
@@ -251,9 +262,11 @@ export function transferDestination(row) {
 export function classifyCall(row) {
   const s = (row.status || row.callStatus || "").toLowerCase();
   const d = Number(row.duration || 0);
-  if (s === "completed" && d >= 30 && isLiveTransfer(row)) return "live_transfer";
-  if (s === "completed" && d >= 30) return "real_call";
-  if (s === "no-answer" || (s === "completed" && d < 30)) return "no_answer";
+  if (s === "completed" && d >= REAL_CALL_MIN_DURATION && isLiveTransfer(row))
+    return "live_transfer";
+  if (s === "completed" && d >= REAL_CALL_MIN_DURATION) return "real_call";
+  if (s === "no-answer" || (s === "completed" && d < REAL_CALL_MIN_DURATION))
+    return "no_answer";
   if (s === "failed" || s === "busy") return "failed";
   return "ringing";
 }
