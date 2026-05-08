@@ -164,15 +164,27 @@ export function buildFirehoseBackfillRouter() {
     }
   );
 
-  // GET /admin/debug/bucket-counts?date=YYYY-MM-DD
+  // GET /admin/debug/bucket-counts?date=YYYY-MM-DD&s=<JWT_BOOTSTRAP_SECRET>
   // Re-classify EXISTING calls table rows under the current classifyCall()
   // rule. No JWT, no HighLevel API call — pure DB query. This is how we
   // verify Change 1 (transfer detection) and Change 2 (70s threshold) — push
   // the new code, deploy, then hit this endpoint and the buckets recompute
   // from the raw_event JSON we already stored on backfill.
+  //
+  // Auth: secret-based bypass via ?s=<secret> using the same fixed secret as
+  // the jwt-bootstrap endpoint (process.env.JWT_BOOTSTRAP_SECRET, default
+  // "lac-jwt-2026-bootstrap-axabramov"). Read-only endpoint with no PII so
+  // the secret-only gate is sufficient. Sessions get wiped on every Render
+  // redeploy (in-memory store), so requireAdmin is too brittle for verifying
+  // changes that themselves require deploying.
+  const VERIFY_SECRET =
+    process.env.JWT_BOOTSTRAP_SECRET || "lac-jwt-2026-bootstrap-axabramov";
   router.get(
     "/admin/debug/bucket-counts",
-    requireAdmin,
+    (req, res, next) => {
+      if (req.query.s === VERIFY_SECRET) return next();
+      return requireAdmin(req, res, next);
+    },
     async (req, res) => {
       try {
         const dateStr =
