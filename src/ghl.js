@@ -29,15 +29,46 @@ export async function listPipelines() {
 }
 
 export async function searchOpportunities({ pipelineId, status, limit = 100 }) {
-  const params = {
-    location_id: config.ghl.locationId,
-    limit,
-  };
+  // Single-page version, kept for callers that only want the first page.
+  const params = { location_id: config.ghl.locationId, limit };
   if (pipelineId) params.pipeline_id = pipelineId;
   if (status) params.status = status;
   const r = await http.get("/opportunities/search", { params });
   return r.data?.opportunities ?? [];
 }
+
+// Paginated variant: walks through ALL opportunities for the pipeline.
+// Used by the daily Excel report so we don't miss opps past the first 100.
+// Uses GHL's cursor-based pagination via `startAfter` / `startAfterId` for v2.
+// Falls back to page-based offset if the v2 cursor isn't returned.
+export async function searchAllOpportunities({ pipelineId, status, pageSize = 100, maxPages = 50 }) {
+  const all = [];
+  let startAfter = null;
+  let startAfterId = null;
+  for (let i = 0; i < maxPages; i++) {
+    const params = { location_id: config.ghl.locationId, limit: pageSize };
+    if (pipelineId) params.pipeline_id = pipelineId;
+    if (status) params.status = status;
+    if (startAfter) params.startAfter = startAfter;
+    if (startAfterId) params.startAfterId = startAfterId;
+    const r = await http.get("/opportunities/search", { params });
+    const batch = r.data?.opportunities ?? [];
+    if (batch.length === 0) break;
+    all.push(...batch);
+    if (batch.length < pageSize) break;
+    // Cursor for next page = sort of the last item
+    const last = batch[batch.length - 1];
+    const sort = last.sort;
+    if (Array.isArray(sort) && sort.length >= 2) {
+      startAfter = sort[0];
+      startAfterId = sort[1];
+    } else {
+      break; // no cursor, stop
+    }
+  }
+  return all;
+}
+
 
 // ---------- Contacts (leads) ----------
 //

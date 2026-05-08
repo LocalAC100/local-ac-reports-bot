@@ -168,8 +168,8 @@ async function buildContactPipelineMap(pipelineIndex) {
   const map = new Map();
   for (const p of pipelineIndex.pipelines) {
     let opps = [];
-    try { opps = await ghl.searchOpportunities({ pipelineId: p.id, limit: 100 }); }
-    catch (e) { console.error(`[excel] searchOpportunities pipeline=${p.id} failed`, e?.message); }
+    try { opps = await ghl.searchAllOpportunities({ pipelineId: p.id, pageSize: 100, maxPages: 50 }); }
+    catch (e) { console.error(`[excel] searchAllOpportunities pipeline=${p.id} failed`, e?.message); }
     for (const o of opps) {
       const cid = o.contactId || o.contact?.id;
       if (!cid) continue;
@@ -191,7 +191,9 @@ async function buildContactPipelineMap(pipelineIndex) {
         .filter((n) => !Number.isNaN(n));
       const oppLastActivity = tses.length ? new Date(Math.max(...tses)).toISOString() : null;
       const oppCreatedAt = o.createdAt || o.dateAdded || null;
-      map.set(cid, { pipelineName: p.name, stageName, oppCreatedAt, oppLastActivity });
+      const oppStageChangedAt = o.lastStageChangeAt || null;
+      const oppStatusChangedAt = o.lastStatusChangeAt || null;
+      map.set(cid, { pipelineName: p.name, stageName, oppCreatedAt, oppLastActivity, oppStageChangedAt, oppStatusChangedAt });
     }
   }
   return map;
@@ -715,16 +717,30 @@ function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
     if (!c?.id) continue;
     const opp = pipelineMap.get(c.id);
     const contactAdded = c.dateAdded ? DateTime.fromISO(c.dateAdded) : null;
-    const oppActivity = opp?.oppLastActivity ? DateTime.fromISO(opp.oppLastActivity) : null;
 
     const contactToday = contactAdded?.isValid && contactAdded >= reportStart && contactAdded <= reportEnd;
-    const oppToday = oppActivity?.isValid && oppActivity >= reportStart && oppActivity <= reportEnd;
+
+    // Repeat Submission detection: only count opp activity that's a real
+    // resubmission signal, not auto-aging or lost-stage moves.
+    // - lastStatusChangeAt today: usually means new opp created (form re-submit) or status flipped
+    // - lastStageChangeAt today: count ONLY if destination stage is NOT an aging/lost bucket
+    //   (e.g. excluding "(3) Days Old Leads", "Lost", "Outside Service Area", "Junk")
+    const AGING_STAGES = new Set([
+      "(3) Days Old Leads", "Lost", "Outside Service Area",
+      "Junk", "Not Interested", "Lead Not Ready",
+    ]);
+    const oppStatus = opp?.oppStatusChangedAt ? DateTime.fromISO(opp.oppStatusChangedAt) : null;
+    const oppStage  = opp?.oppStageChangedAt  ? DateTime.fromISO(opp.oppStageChangedAt)  : null;
+    const statusToday = oppStatus?.isValid && oppStatus >= reportStart && oppStatus <= reportEnd;
+    const stageToday  = oppStage?.isValid  && oppStage  >= reportStart && oppStage  <= reportEnd;
+    const stageIsAging = AGING_STAGES.has(opp?.stageName || "");
+
+    // Repeat-submission signal: status changed today, OR stage changed today
+    // and the destination is NOT an aging/lost bucket.
+    const oppToday = statusToday || (stageToday && !stageIsAging);
 
     if (!contactToday && !oppToday) continue;
 
-    // Lead type: "New Lead" = contact created today (first time we've ever seen them).
-    // "Repeat Submission" = older contact whose opportunity had activity today
-    // (resubmitted ad form, workflow re-fired, stage changed, etc.).
     const leadType = contactToday ? "New Lead" : "Repeat Submission";
 
     leads.push({ ...c, _leadType: leadType, _opp: opp });
@@ -900,6 +916,12 @@ function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr }) {
     const added = DateTime.fromISO(contact.dateAdded);
     if (!added.isValid) continue;
     if (added >= reportStart) continue;
+    // Require the move to a booked stage to have happened TODAY — otherwise
+    // we'd list every old lead currently in Appt. Booked, even if their
+    // booking happened months ago.
+    const stageChanged = pipeline.oppStageChangedAt ? DateTime.fromISO(pipeline.oppStageChangedAt) : null;
+    if (!stageChanged?.isValid) continue;
+    if (stageChanged < reportStart || stageChanged > reportStart.plus({ days: 1 })) continue;
 
     const ageDays = Math.floor((reportStart.toMillis() - added.toMillis()) / 86400000);
     out.push({
