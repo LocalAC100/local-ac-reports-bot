@@ -56,32 +56,29 @@ cron.schedule(
   { timezone: config.timezone }
 );
 
-// Hourly verification reports — TEMPORARY, while we iterate on report
-// accuracy. Fires the full-day summary every hour at the top of the hour
-// from 9 AM to 7 PM ET, so Alex can compare the running numbers against
-// reality after each fix. Skips 12 PM (morning report fires there) and
-// 7 PM (the 7:30 PM evening report is close enough). Remove when reports
-// are verified bug-free.
-cron.schedule(
-  "0 9-19 * * *",
-  async () => {
-    const hour = new Date().toLocaleString("en-US", {
-      timeZone: config.timezone,
-      hour: "numeric",
-      hour12: false,
-    });
-    if (hour === "12" || hour === "19") return;
-    console.log(`[cron] hourly report starting @ ${hour}:00`);
-    try {
-      await runEveningReport();
-      console.log(`[cron] hourly report sent`);
-    } catch (e) {
-      console.error(`[cron] hourly report failed`, e);
-    }
-  },
-  { timezone: config.timezone }
-);
+// Hourly verification reports — DISABLED May 7 2026 22:00 ET. Was sending too
+// many noisy reports to Alex while we iterate on Hubstaff/GHL data fixes.
+// Re-enable by uncommenting once Hubstaff bugs are fully fixed.
+// cron.schedule(
+//   "0 9-19 * * *",
+//   async () => {
+//     const hour = new Date().toLocaleString("en-US", {
+//       timeZone: config.timezone,
+//       hour: "numeric",
+//       hour12: false,
+//     });
+//     if (hour === "12" || hour === "19") return;
+//     console.log(`[cron] hourly report starting @ ${hour}:00`);
+//     try {
+//       await runEveningReport();
+//       console.log(`[cron] hourly report sent`);
+//     } catch (e) {
+//       console.error(`[cron] hourly report failed`, e);
+//     }
+//   },
+//   { timezone: config.timezone }
+// );
 
 console.log(
-  `[cron] scheduled morning=12:00 evening=19:30 hourly=9-19/skip-12-19 idle=*/5 8-20 tz=${config.timezone}`
+  `[cron] scheduled morning=12:00 evening=19:30 idle=*/5 8-20 tz=${config.timezone} (hourly disabled)`
 );
