@@ -356,7 +356,7 @@ export function buildFirehoseBackfillRouter() {
 
         // Use the GHL contacts/search with the same date filter
         const ghl = await import("./ghl.js");
-        const contacts = await ghl.searchContacts({ from: fromIso, to: toIso, limit: 200 });
+        const contacts = await ghl.searchContacts({ from: fromIso, to: toIso, limit: 100 });
 
         const out = (contacts || []).map((c) => ({
           id: c.id,
