@@ -316,22 +316,39 @@ function addSummaryTab(wb, { dateStr, totals, buckets, uniqueContacts, newLeadSt
     row.values = r;
     if (typeof r[2] === "number") row.getCell(3).numFmt = "0.0%";
   });
-  ws.getCell("A24").value = "NEW LEAD RESPONSE TIME (goal: ≤ 1 min, never > 3 min)";
+  ws.getCell("A24").value = "NEW LEADS — first-time contacts (goal: call back ≤ 1 min, never > 3 min)";
   applyHeaderStyle(ws.getRow(24));
+  const nl = newLeadStats.newLeads || {};
   const leadRows = [
-    ["Total new leads", newLeadStats.totalNewLeads],
-    ["Average response time", newLeadStats.avgResponseLabel || "—"],
-    ["Median response time", newLeadStats.medianResponseLabel || "—"],
-    [`Called within 1 minute`, `${newLeadStats.within1} (${newLeadStats.totalNewLeads ? Math.round(newLeadStats.within1 / newLeadStats.totalNewLeads * 100) : 0}%)`],
-    [`Called within 3 minutes`, `${newLeadStats.within3} (${newLeadStats.totalNewLeads ? Math.round(newLeadStats.within3 / newLeadStats.totalNewLeads * 100) : 0}%)`],
-    [`Took longer than 3 minutes`, `${newLeadStats.over3} (${newLeadStats.totalNewLeads ? Math.round(newLeadStats.over3 / newLeadStats.totalNewLeads * 100) : 0}%)`],
-    ["Never called", newLeadStats.neverCalled],
+    ["Total new leads", nl.total ?? 0],
+    ["Average response time", nl.avgResponseLabel || "—"],
+    ["Median response time", nl.medianResponseLabel || "—"],
+    [`Called within 1 minute`, `${nl.within1 ?? 0} (${nl.total ? Math.round((nl.within1 ?? 0) / nl.total * 100) : 0}%)`],
+    [`Called within 3 minutes`, `${nl.within3 ?? 0} (${nl.total ? Math.round((nl.within3 ?? 0) / nl.total * 100) : 0}%)`],
+    [`Took longer than 3 minutes`, `${nl.over3 ?? 0} (${nl.total ? Math.round((nl.over3 ?? 0) / nl.total * 100) : 0}%)`],
+    ["Never called", nl.neverCalled ?? 0],
   ];
   leadRows.forEach((r, i) => { ws.getRow(25 + i).values = r; });
 
-  // Reactivated leads block
+  // New Opportunities block (re-submitted leads — contact already existed)
+  const noStartRow = 25 + leadRows.length + 2;
+  ws.getCell(`A${noStartRow}`).value = "NEW OPPORTUNITIES — re-submissions from existing contacts";
+  applyHeaderStyle(ws.getRow(noStartRow));
+  const no = newLeadStats.newOpps || {};
+  const oppRows = [
+    ["Total new opportunities", no.total ?? 0],
+    ["Average response time", no.avgResponseLabel || "—"],
+    ["Median response time", no.medianResponseLabel || "—"],
+    [`Called within 1 minute`, `${no.within1 ?? 0} (${no.total ? Math.round((no.within1 ?? 0) / no.total * 100) : 0}%)`],
+    [`Called within 3 minutes`, `${no.within3 ?? 0} (${no.total ? Math.round((no.within3 ?? 0) / no.total * 100) : 0}%)`],
+    [`Took longer than 3 minutes`, `${no.over3 ?? 0} (${no.total ? Math.round((no.over3 ?? 0) / no.total * 100) : 0}%)`],
+    ["Never called", no.neverCalled ?? 0],
+  ];
+  oppRows.forEach((r, i) => { ws.getRow(noStartRow + 1 + i).values = r; });
+
+  // Reactivated leads block — placed below New Opportunities
   if (reactivatedStats) {
-    const startRow = 25 + leadRows.length + 2;
+    const startRow = noStartRow + 1 + oppRows.length + 2;
     ws.getCell(`A${startRow}`).value = "REACTIVATED LEADS (old leads with activity today)";
     applyHeaderStyle(ws.getRow(startRow));
     const reactRows = [
@@ -579,6 +596,32 @@ function addHourXDispatcherTab(wb, calls) {
   ws.getRow(totalRowIdx).font = { bold: true };
 }
 
+function addNewOpportunitiesTab(wb, newOppRows) {
+  const ws = wb.addWorksheet("New Opportunities");
+  ws.views = [{ state: "frozen", ySplit: 4 }];
+  setColumnWidths(ws, [24, 16, 12, 14, 20, 20, 14, 16, 18, 50, 12]);
+  applyTitleStyle(ws.getCell("A1"));
+  ws.getCell("A1").value = `New Opportunities Today — Re-submitted leads (${newOppRows.length} opportunities)`;
+  ws.getCell("A2").value = "These contacts already existed in GHL — they re-submitted the lead form today, so a fresh opportunity was created.";
+  ws.getCell("A2").font = { name: "Arial", size: 10, italic: true, color: { argb: "FF606060" } };
+
+  const headers = ["Contact", "Phone", "Lead Source", "Lead Type", "Came In (ET)", "First Call (ET)", "Response Time", "Bucket", "First Caller", "Other Dispatchers on Shift (within 30 min)", "Total calls today"];
+  ws.getRow(4).values = headers;
+  applyHeaderStyle(ws.getRow(4));
+
+  newOppRows.forEach((r, i) => {
+    const row = ws.getRow(5 + i);
+    row.values = [
+      r.leadName, r.phone, r.leadSource, r.leadType,
+      r.cameIn, r.firstCall, r.responseTime, r.bucket,
+      r.firstCaller, r.othersOnShift, r.totalCallsToday,
+    ];
+    row.eachCell((cell) => {
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: COLORS.LIVE_TRANSFER } };
+    });
+  });
+}
+
 function addNewLeadsTab(wb, newLeadRows) {
   const ws = wb.addWorksheet("New Leads");
   ws.views = [{ state: "frozen", ySplit: 4 }];
@@ -670,7 +713,7 @@ function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
 
     // Lead type: first-time if contact created today, re-submitted if only the
     // opportunity is fresh on an older contact.
-    const leadType = contactToday ? "First-time" : "Re-submitted";
+    const leadType = contactToday ? "New Lead" : "New Opportunity";
 
     leads.push({ ...c, _leadType: leadType, _opp: opp });
   }
@@ -696,7 +739,7 @@ function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
     let firstCallEt = "";
     if (first) {
       // Same logic as cameInIso below: re-submitted leads use opp.createdAt.
-      const cameInForResponse = l._leadType === "Re-submitted" && l._opp?.oppCreatedAt
+      const cameInForResponse = l._leadType === "New Opportunity" && l._opp?.oppCreatedAt
         ? l._opp.oppCreatedAt
         : l.dateAdded;
       const added = DateTime.fromISO(cameInForResponse);
@@ -714,7 +757,7 @@ function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
     // For "Came In" timestamp: prefer contact.dateAdded for first-time leads,
     // opportunity.createdAt for re-submitted leads (since contact.dateAdded
     // would point to the original sign-up date, not today's resubmission).
-    const cameInIso = l._leadType === "Re-submitted" && l._opp?.oppCreatedAt
+    const cameInIso = l._leadType === "New Opportunity" && l._opp?.oppCreatedAt
       ? l._opp.oppCreatedAt
       : l.dateAdded;
     return {
@@ -728,20 +771,47 @@ function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
       firstCaller: first?.dispatcher || "",
       othersOnShift: "",
       totalCallsToday: totalCallsByContact.get(l.id) || 0,
-      leadType: l._leadType || "First-time",
+      leadType: l._leadType || "New Lead",
+      _respSec: responseTimeSec,
     };
   });
   rows.sort((a, b) => a.cameIn < b.cameIn ? -1 : 1);
   const avg = responseSecs.length ? Math.round(responseSecs.reduce((a, b) => a + b, 0) / responseSecs.length) : null;
   const sorted = [...responseSecs].sort((a, b) => a - b);
   const median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : null;
+  // Split rows by lead type so Alex sees New Leads and New Opportunities
+  // as separate categories in the workbook.
+  const newLeadRows = rows.filter((r) => r.leadType === "New Lead");
+  const newOppRows  = rows.filter((r) => r.leadType === "New Opportunity");
+
+  // Per-group response-time stats for the Summary tab.
+  function statsFor(group) {
+    const respSecs = group.map((r) => r._respSec).filter((n) => n != null);
+    const w1 = group.filter((r) => r.bucket === "≤ 1 min").length;
+    const w3 = group.filter((r) => r.bucket === "≤ 1 min" || r.bucket === "≤ 3 min").length;
+    const o3 = group.filter((r) => r.bucket === "> 3 min" || r.bucket === "> 5 min (BAD)").length;
+    const nc = group.filter((r) => r.bucket === "Never called").length;
+    const avgS = respSecs.length ? Math.round(respSecs.reduce((a, b) => a + b, 0) / respSecs.length) : null;
+    const sortedS = [...respSecs].sort((a, b) => a - b);
+    const medS = sortedS.length ? sortedS[Math.floor(sortedS.length / 2)] : null;
+    return {
+      total: group.length,
+      within1: w1, within3: w3, over3: o3, neverCalled: nc,
+      avgResponseLabel: avgS != null ? fmtDuration(avgS) : null,
+      medianResponseLabel: medS != null ? fmtDuration(medS) : null,
+    };
+  }
+
   return {
-    rows,
+    newLeadRows,
+    newOppRows,
     stats: {
-      totalNewLeads: leads.length,
-      within1, within3, over3, neverCalled,
+      newLeads: statsFor(newLeadRows),
+      newOpps:  statsFor(newOppRows),
+      totalNewLeads: newLeadRows.length,
       avgResponseLabel: avg != null ? fmtDuration(avg) : null,
       medianResponseLabel: median != null ? fmtDuration(median) : null,
+      within1, within3, over3, neverCalled,
     },
   };
 }
@@ -922,7 +992,7 @@ export async function buildDailyExcel(dateStr) {
   }
   console.log(`[excel] searchContacts: ${newContacts.length}, getContact: ${fetched.size}, total contactMap: ${contactMap.size}, searchError: ${searchError ? JSON.stringify(searchError) : "none"}`);
   const calls = enrichCalls({ rows, dateStr, dispatcherMap, pipelineMap, contactMap });
-  const { rows: newLeadRows, stats: newLeadStats } = buildNewLeads({ contactMap, pipelineMap, calls, dateStr });
+  const { newLeadRows, newOppRows, stats: newLeadStats } = buildNewLeads({ contactMap, pipelineMap, calls, dateStr });
   const { rows: reactivatedRows, stats: reactivatedStats } = buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr });
   const totals = {
     outbound: rows.filter((r) => (r.direction || "").toLowerCase() === "outbound").length,
@@ -940,6 +1010,7 @@ export async function buildDailyExcel(dateStr) {
   addSummaryTab(wb, { dateStr, totals, buckets, uniqueContacts, newLeadStats, reactivatedStats });
   addAllCallsTab(wb, calls);
   addNewLeadsTab(wb, newLeadRows);
+  addNewOpportunitiesTab(wb, newOppRows);
   addReactivatedLeadsTab(wb, reactivatedRows, reactivatedStats);
   addByDispatcherTab(wb, calls);
   addByPipelineTab(wb, calls);
