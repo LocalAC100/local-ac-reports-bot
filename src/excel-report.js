@@ -704,30 +704,40 @@ export async function buildDailyExcel(dateStr) {
   const fromIso = dayStart.toUTC().toISO();
   const toIso = dayEnd.toUTC().toISO();
   const rows = Calls.listInWindow(fromIso, toIso, 5000);
-  const [users, pipelineIndex] = await Promise.all([
-    ghl.listUsers().catch((e) => { console.error("[excel] listUsers failed", e?.message); return []; }),
-    buildPipelineIndex(),
-  ]);
-  const dispatcherMap = buildDispatcherMap(users);
-  const [pipelineMap, contactMap] = await Promise.all([
-    buildContactPipelineMap(pipelineIndex),
-    buildContactMap(rows.map((r) => r.contact_id), dateStr),
-  ]);
-  const sizeBeforeMerge = contactMap.size;
+  // PHASE 1 — small, fast queries done FIRST, in parallel.
+  // searchContacts is the most rate-limit-sensitive query (returns up to 100
+  // contacts created today, matters for the New Leads tab). Running it before
+  // the heavy getContact storm avoids GHL 429s.
   let newContacts = [];
   let searchError = null;
-  try {
-    newContacts = await ghl.searchContacts({ from: fromIso, to: toIso, limit: 100 });
-  } catch (e) {
-    searchError = e?.response?.data || e?.message;
-    console.error("[excel] searchContacts failed", searchError);
-  }
-  // Prefer searchContacts data over per-call getContact data — searchContacts
-  // filters by dateAdded and reliably returns the source field, while getContact
-  // sometimes returns subset shapes. Overwrite so the New Leads tab gets the
-  // canonical contact record.
+  const [users, pipelineIndex, _newContacts] = await Promise.all([
+    ghl.listUsers().catch((e) => { console.error("[excel] listUsers failed", e?.message); return []; }),
+    buildPipelineIndex(),
+    ghl.searchContacts({ from: fromIso, to: toIso, limit: 100 }).catch((e) => {
+      searchError = e?.response?.data || e?.message;
+      console.error("[excel] searchContacts failed", searchError);
+      return [];
+    }),
+  ]);
+  newContacts = _newContacts || [];
+  const dispatcherMap = buildDispatcherMap(users);
+
+  // PHASE 2 — opportunities pull (one call per pipeline, max 4 pipelines).
+  const pipelineMap = await buildContactPipelineMap(pipelineIndex);
+
+  // PHASE 3 — seed contactMap from searchContacts, then fill in the remaining
+  // call-driven contact_ids via getContact. This keeps total getContact volume
+  // to (unique calls) - (already-known via search), reducing rate-limit risk.
+  const contactMap = new Map();
   for (const c of newContacts) if (c?.id) contactMap.set(c.id, c);
-  console.log(`[excel] contactMap before merge: ${sizeBeforeMerge}, after: ${contactMap.size}, searchContacts returned: ${newContacts.length}, searchError: ${searchError ? JSON.stringify(searchError) : "none"}`);
+  const sizeBeforeMerge = contactMap.size;
+  const callContactIds = [...new Set(rows.map((r) => r.contact_id).filter(Boolean))];
+  const idsToFetch = callContactIds.filter((id) => !contactMap.has(id));
+  const fetched = await buildContactMap(idsToFetch, dateStr);
+  for (const [id, c] of fetched.entries()) {
+    if (!contactMap.has(id)) contactMap.set(id, c);  // search wins on overlap
+  }
+  console.log(`[excel] searchContacts: ${newContacts.length}, getContact: ${fetched.size}, total contactMap: ${contactMap.size}, searchError: ${searchError ? JSON.stringify(searchError) : "none"}`);
   const calls = enrichCalls({ rows, dateStr, dispatcherMap, pipelineMap, contactMap });
   const { rows: newLeadRows, stats: newLeadStats } = buildNewLeads({ contactMap, calls, dateStr });
   const totals = {
