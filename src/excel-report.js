@@ -340,6 +340,10 @@ function addSummaryTab(wb, { dateStr, totals, buckets, uniqueContacts, newLeadSt
     [`Called within 3 minutes`, `${nl.within3 ?? 0} (${nl.total ? Math.round((nl.within3 ?? 0) / nl.total * 100) : 0}%)`],
     [`Took longer than 3 minutes`, `${nl.over3 ?? 0} (${nl.total ? Math.round((nl.over3 ?? 0) / nl.total * 100) : 0}%)`],
     ["Never called", nl.neverCalled ?? 0],
+    ["Real calls (≥70s)", nl.realCalls ?? 0],
+    ["Live transfers", nl.liveTransfers ?? 0],
+    ["Booked today", nl.bookedToday ?? 0],
+    ["Real Call → Booking conversion", `${nl.realCalls ? Math.round((nl.realCallToBookingRate ?? 0) * 100) : 0}%${nl.realCalls ? ` (${nl.bookedToday ?? 0} of ${nl.realCalls})` : ""}`],
   ];
   leadRows.forEach((r, i) => { ws.getRow(25 + i).values = r; });
 
@@ -356,6 +360,10 @@ function addSummaryTab(wb, { dateStr, totals, buckets, uniqueContacts, newLeadSt
     [`Called within 3 minutes`, `${no.within3 ?? 0} (${no.total ? Math.round((no.within3 ?? 0) / no.total * 100) : 0}%)`],
     [`Took longer than 3 minutes`, `${no.over3 ?? 0} (${no.total ? Math.round((no.over3 ?? 0) / no.total * 100) : 0}%)`],
     ["Never called", no.neverCalled ?? 0],
+    ["Real calls (≥70s)", no.realCalls ?? 0],
+    ["Live transfers", no.liveTransfers ?? 0],
+    ["Booked today", no.bookedToday ?? 0],
+    ["Real Call → Booking conversion", `${no.realCalls ? Math.round((no.realCallToBookingRate ?? 0) * 100) : 0}%${no.realCalls ? ` (${no.bookedToday ?? 0} of ${no.realCalls})` : ""}`],
   ];
   oppRows.forEach((r, i) => { ws.getRow(noStartRow + 1 + i).values = r; });
 
@@ -366,9 +374,12 @@ function addSummaryTab(wb, { dateStr, totals, buckets, uniqueContacts, newLeadSt
     applyHeaderStyle(ws.getRow(startRow));
     const reactRows = [
       ["Total reactivated", reactivatedStats.total],
-      ["Booked appointment", reactivatedStats.booked],
-      ["Did not book", reactivatedStats.notBooked],
-      [`Booking rate`, reactivatedStats.total > 0 ? `${reactivatedStats.booked} of ${reactivatedStats.total} (${Math.round(reactivatedStats.bookingRate * 100)}%)` : "—"],
+      ["Real calls (≥70s)", reactivatedStats.realCallCount ?? 0],
+      ["Booked today", reactivatedStats.bookedToday ?? 0],
+      ["Already booked (older)", reactivatedStats.booked - (reactivatedStats.bookedToday ?? 0)],
+      [`Real Call → Booking conversion (today)`, reactivatedStats.realCallCount > 0
+        ? `${reactivatedStats.bookedToday ?? 0} of ${reactivatedStats.realCallCount} (${Math.round((reactivatedStats.realCallToBooking ?? 0) * 100)}%)`
+        : "—"],
     ];
     reactRows.forEach((r, i) => { ws.getRow(startRow + 1 + i).values = r; });
   }
@@ -618,21 +629,33 @@ function addNewOpportunitiesTab(wb, newOppRows) {
   ws.getCell("A2").value = "Old contacts whose opportunity was touched today (createdAt / lastStatusChangeAt / lastStageChangeAt). Often means they re-submitted the lead form, but can also fire on workflow stage moves.";
   ws.getCell("A2").font = { name: "Arial", size: 10, italic: true, color: { argb: "FF606060" } };
 
-  const headers = ["Contact", "Phone", "Lead Source", "Lead Type", "Came In (ET)", "First Call (ET)", "Response Time", "Bucket", "First Caller", "Other Dispatchers on Shift (within 30 min)", "Total calls today"];
+  const headers = [
+    "Contact", "Phone", "Source", "Came In (ET)",
+    "First Call (ET)", "Response Time", "Resp. Bucket",
+    "First Caller", "Total Calls",
+    "Longest Real Call", "Real Call Dispatcher", "Live Transfer?",
+    "Final Stage", "Booked Today?",
+  ];
   ws.getRow(4).values = headers;
   applyHeaderStyle(ws.getRow(4));
 
   newOppRows.forEach((r, i) => {
     const row = ws.getRow(5 + i);
     row.values = [
-      r.leadName, r.phone, r.leadSource, r.leadType,
+      r.leadName, r.phone, r.leadSource,
       r.cameIn, r.firstCall, r.responseTime, r.bucket,
-      r.firstCaller, r.othersOnShift, r.totalCallsToday,
+      r.firstCaller, r.totalCallsToday,
+      r.longestCallDuration || "—", r.longestCallDispatcher || "",
+      r.hadLiveTransfer ? "Yes" : "",
+      r.finalStage || "",
+      r.bookedToday ? "Yes" : (r.booked ? "Already booked" : ""),
     ];
+    const fill = r.bookedToday ? COLORS.LIVE_TRANSFER : COLORS.TODAY_LEAD;
     row.eachCell((cell) => {
-      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: COLORS.LIVE_TRANSFER } };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fill } };
     });
   });
+  setColumnWidths(ws, [22, 16, 8, 20, 20, 14, 14, 18, 10, 16, 18, 12, 22, 16]);
 }
 
 function addNewLeadsTab(wb, newLeadRows) {
@@ -657,6 +680,157 @@ function addNewLeadsTab(wb, newLeadRows) {
       cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: COLORS.TODAY_LEAD } };
     });
   });
+}
+
+function addLeadActivityBreakdownTab(wb, { newLeadRows, newOppRows, reactivatedRows, calls }) {
+  const ws = wb.addWorksheet("Lead Activity Breakdown");
+  ws.views = [{ state: "frozen", ySplit: 1 }];
+  applyTitleStyle(ws.getCell("A1"));
+  ws.getCell("A1").value = "Lead Activity Breakdown — categorized counts by hour and by dispatcher";
+
+  // === SECTION A: By Hour ===
+  ws.getCell("A3").value = "BY HOUR (Eastern Time)";
+  applyHeaderStyle(ws.getRow(3));
+  const hourHeaders = ["Hour", "New Leads Received", "Repeat Submissions", "Reactivations (with real call)", "Bookings Made", "Real Calls Made", "Total Calls"];
+  ws.getRow(4).values = hourHeaders;
+  applyHeaderStyle(ws.getRow(4));
+
+  // Tally per hour
+  function hourBucket(r) {
+    // For lead rows, "received" hour = cameIn hour (parse "yyyy-LL-dd HH:mm:ss")
+    const m = (r.cameIn || "").match(/(\d{2}):/);
+    return m ? Number(m[1]) : null;
+  }
+  const newByHour = new Map();
+  for (const r of newLeadRows) {
+    const h = hourBucket(r);
+    if (h == null) continue;
+    newByHour.set(h, (newByHour.get(h) || 0) + 1);
+  }
+  const oppByHour = new Map();
+  for (const r of newOppRows) {
+    const h = hourBucket(r);
+    if (h == null) continue;
+    oppByHour.set(h, (oppByHour.get(h) || 0) + 1);
+  }
+  const reactByHour = new Map();
+  for (const r of reactivatedRows) {
+    if (!r.activityTime) continue;
+    const m = r.activityTime.match(/(\d{2}):/);
+    if (!m) continue;
+    const h = Number(m[1]);
+    reactByHour.set(h, (reactByHour.get(h) || 0) + 1);
+  }
+  const callsByHour = new Map();
+  const realCallsByHour = new Map();
+  const bookingsByHour = new Map();
+  for (const c of calls) {
+    if (c.hour == null) continue;
+    callsByHour.set(c.hour, (callsByHour.get(c.hour) || 0) + 1);
+    if (c.bucket === "real_call" || c.bucket === "live_transfer") {
+      realCallsByHour.set(c.hour, (realCallsByHour.get(c.hour) || 0) + 1);
+    }
+  }
+  // Bookings per hour: for each lead row that booked today, attribute to the hour of its longestCall (or cameIn for opps)
+  // We don't have explicit per-row hour for bookings, so use cameIn hour as a proxy
+  for (const r of [...newLeadRows, ...newOppRows]) {
+    if (!r.bookedToday) continue;
+    const h = hourBucket(r);
+    if (h == null) continue;
+    bookingsByHour.set(h, (bookingsByHour.get(h) || 0) + 1);
+  }
+  for (const r of reactivatedRows) {
+    if (!r.bookedToday) continue;
+    if (!r.activityTime) continue;
+    const m = r.activityTime.match(/(\d{2}):/);
+    if (!m) continue;
+    const h = Number(m[1]);
+    bookingsByHour.set(h, (bookingsByHour.get(h) || 0) + 1);
+  }
+
+  const allHours = new Set([
+    ...newByHour.keys(),
+    ...oppByHour.keys(),
+    ...reactByHour.keys(),
+    ...callsByHour.keys(),
+    ...bookingsByHour.keys(),
+  ]);
+  const sortedHours = [...allHours].sort((a, b) => a - b);
+  sortedHours.forEach((h, i) => {
+    ws.getRow(5 + i).values = [
+      hourLabel(h),
+      newByHour.get(h) || 0,
+      oppByHour.get(h) || 0,
+      reactByHour.get(h) || 0,
+      bookingsByHour.get(h) || 0,
+      realCallsByHour.get(h) || 0,
+      callsByHour.get(h) || 0,
+    ];
+  });
+
+  // === SECTION B: By Dispatcher ===
+  const sectionBStart = 5 + sortedHours.length + 2;
+  ws.getCell(`A${sectionBStart}`).value = "BY DISPATCHER";
+  applyHeaderStyle(ws.getRow(sectionBStart));
+  const dispHeaders = ["Dispatcher", "Total Calls", "Real Calls (≥70s)", "Live Transfers", "New Leads Engaged", "Repeats Engaged", "Reactivations Engaged", "Bookings Made", "Real Call → Book %"];
+  ws.getRow(sectionBStart + 1).values = dispHeaders;
+  applyHeaderStyle(ws.getRow(sectionBStart + 1));
+
+  // Build per-dispatcher counts. For "engaged" we count contacts where this
+  // dispatcher made the longest real call (i.e. they had the conversation).
+  const dispMap = new Map();
+  function getDisp(name) {
+    if (!dispMap.has(name)) dispMap.set(name, {
+      total: 0, real: 0, lt: 0,
+      newLeads: 0, repeats: 0, reactivations: 0,
+      bookings: 0,
+    });
+    return dispMap.get(name);
+  }
+
+  for (const c of calls) {
+    const d = getDisp(c.dispatcher);
+    d.total++;
+    if (c.bucket === "real_call" || c.bucket === "live_transfer") d.real++;
+    if (c.bucket === "live_transfer") d.lt++;
+  }
+
+  // Engagement: count which dispatcher had the longest real call for each lead
+  for (const r of newLeadRows) {
+    if (!r.longestCallDispatcher) continue;
+    const d = getDisp(r.longestCallDispatcher);
+    d.newLeads++;
+    if (r.bookedToday) d.bookings++;
+  }
+  for (const r of newOppRows) {
+    if (!r.longestCallDispatcher) continue;
+    const d = getDisp(r.longestCallDispatcher);
+    d.repeats++;
+    if (r.bookedToday) d.bookings++;
+  }
+  for (const r of reactivatedRows) {
+    if (!r.dispatcher) continue;
+    const d = getDisp(r.dispatcher);
+    d.reactivations++;
+    if (r.bookedToday) d.bookings++;
+  }
+
+  const ordered = [...dispMap.entries()].sort((a, b) => {
+    if (a[0] === "INBOUND") return 1;
+    if (b[0] === "INBOUND") return -1;
+    return b[1].total - a[1].total;
+  });
+  ordered.forEach(([name, d], i) => {
+    const conv = d.real > 0 ? d.bookings / d.real : 0;
+    const row = ws.getRow(sectionBStart + 2 + i);
+    row.values = [
+      name, d.total, d.real, d.lt,
+      d.newLeads, d.repeats, d.reactivations, d.bookings, conv,
+    ];
+    row.getCell(9).numFmt = "0.0%";
+  });
+
+  setColumnWidths(ws, [22, 18, 18, 22, 18, 22, 16, 18]);
 }
 
 function addNotesTab(wb) {
@@ -758,6 +932,19 @@ function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
     if (!k) continue;
     totalCallsByContact.set(k, (totalCallsByContact.get(k) || 0) + 1);
   }
+  // Longest real_call/live_transfer per contact — used to surface "they actually
+  // talked for N minutes" on the lead row.
+  const longestCallByContact = new Map();
+  const hadLiveTransferByContact = new Map();
+  for (const call of calls) {
+    const k = call.raw.contact_id;
+    if (!k) continue;
+    if (call.bucket === "live_transfer") hadLiveTransferByContact.set(k, true);
+    if (call.bucket === "real_call" || call.bucket === "live_transfer") {
+      const prev = longestCallByContact.get(k);
+      if (!prev || call.durationSec > prev.durationSec) longestCallByContact.set(k, call);
+    }
+  }
   const responseSecs = [];
   let within1 = 0, within3 = 0, over3 = 0, neverCalled = 0;
   const rows = leads.map((l) => {
@@ -789,6 +976,7 @@ function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
       ? l._opp.oppLastActivity
       : l.dateAdded;
     return {
+      _id: l.id,
       leadName: `${l.firstName || ""} ${l.lastName || ""}`.trim() || l.contactName || "(no name)",
       phone: l.phone,
       leadSource: l.source || "",
@@ -801,6 +989,22 @@ function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
       totalCallsToday: totalCallsByContact.get(l.id) || 0,
       leadType: l._leadType || "New Lead",
       _respSec: responseTimeSec,
+      // Booking + outcome
+      finalStage: pipelineMap?.get(l.id)?.stageName || "",
+      bookedToday: (() => {
+        const opp = pipelineMap?.get(l.id);
+        if (!opp) return false;
+        const bookingStages = ["Appt. Booked", "Over Phone Booked"];
+        if (!bookingStages.includes(opp.stageName)) return false;
+        const sc = opp.oppStageChangedAt ? DateTime.fromISO(opp.oppStageChangedAt) : null;
+        if (!sc?.isValid) return false;
+        return sc >= reportStart && sc <= reportEnd;
+      })(),
+      booked: ["Appt. Booked", "Over Phone Booked"].includes(pipelineMap?.get(l.id)?.stageName || ""),
+      longestCallDuration: longestCallByContact.get(l.id)?.durationFmt || "",
+      longestCallDispatcher: longestCallByContact.get(l.id)?.dispatcher || "",
+      longestCallSec: longestCallByContact.get(l.id)?.durationSec || 0,
+      hadLiveTransfer: !!hadLiveTransferByContact.get(l.id),
     };
   });
   rows.sort((a, b) => a.cameIn < b.cameIn ? -1 : 1);
@@ -822,11 +1026,18 @@ function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
     const avgS = respSecs.length ? Math.round(respSecs.reduce((a, b) => a + b, 0) / respSecs.length) : null;
     const sortedS = [...respSecs].sort((a, b) => a - b);
     const medS = sortedS.length ? sortedS[Math.floor(sortedS.length / 2)] : null;
+    // Booking + conversion
+    const realCalls = group.filter((r) => (r.longestCallSec || 0) >= 70).length;
+    const liveTransfers = group.filter((r) => r.hadLiveTransfer).length;
+    const bookedToday = group.filter((r) => r.bookedToday).length;
+    const realCallToBooking = realCalls > 0 ? bookedToday / realCalls : 0;
     return {
       total: group.length,
       within1: w1, within3: w3, over3: o3, neverCalled: nc,
       avgResponseLabel: avgS != null ? fmtDuration(avgS) : null,
       medianResponseLabel: medS != null ? fmtDuration(medS) : null,
+      realCalls, liveTransfers, bookedToday,
+      realCallToBookingRate: realCallToBooking,
     };
   }
 
@@ -844,7 +1055,7 @@ function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
   };
 }
 
-function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr }) {
+function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr, excludeIds }) {
   // OLD lead = contact whose dateAdded is BEFORE the report day.
   // We surface old leads who had a meaningful interaction today:
   //   - answered the phone (real_call: ≥70s, no transfer)
@@ -868,6 +1079,7 @@ function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr }) {
 
   // Pass 1: any old contact who got a real_call or live_transfer today
   for (const [id, contactCalls] of callsByContact.entries()) {
+    if (excludeIds?.has(id)) continue;
     const contact = contactMap.get(id);
     if (!contact?.dateAdded) continue;
     const added = DateTime.fromISO(contact.dateAdded);
@@ -887,6 +1099,11 @@ function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr }) {
     const ageDays = Math.floor((reportStart.toMillis() - added.toMillis()) / 86400000);
     const booked = BOOKING_STAGES.has(pipeline.stageName || "");
 
+    // Compute booking-today (stage moved into booking stage today)
+    const bookingStages = ["Appt. Booked", "Over Phone Booked"];
+    const stageChanged = pipeline.oppStageChangedAt ? DateTime.fromISO(pipeline.oppStageChangedAt) : null;
+    const bookedToday = bookingStages.includes(pipeline.stageName) && stageChanged?.isValid && stageChanged >= reportStart;
+
     seen.add(id);
     out.push({
       name: `${contact.firstName || ""} ${contact.lastName || ""}`.trim() || contact.contactName || "(no name)",
@@ -898,9 +1115,11 @@ function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr }) {
       dispatcher: best.dispatcher,
       activityTime: best.dt.toFormat("HH:mm:ss"),
       durationFmt: best.durationFmt,
+      durationSec: best.durationSec,
       pipeline: pipeline.pipelineName || "",
       stage: pipeline.stageName || "",
       booked,
+      bookedToday,
       _sortTs: best.dt.toMillis(),
     });
   }
@@ -911,6 +1130,7 @@ function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr }) {
   for (const [id, pipeline] of pipelineMap.entries()) {
     if (!BOOKING_STAGES.has(pipeline.stageName || "")) continue;
     if (seen.has(id)) continue;
+    if (excludeIds?.has(id)) continue;
     const contact = contactMap.get(id);
     if (!contact?.dateAdded) continue;
     const added = DateTime.fromISO(contact.dateAdded);
@@ -945,11 +1165,16 @@ function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr }) {
 
   // Aggregate stats for the Summary tab.
   const bookedCount = out.filter((r) => r.booked).length;
+  const bookedTodayCount = out.filter((r) => r.bookedToday).length;
+  const realCallCount = out.filter((r) => (r.durationSec || 0) >= 70).length;
   const stats = {
     total: out.length,
     booked: bookedCount,
+    bookedToday: bookedTodayCount,
     notBooked: out.length - bookedCount,
     bookingRate: out.length > 0 ? bookedCount / out.length : 0,
+    realCallToBooking: realCallCount > 0 ? bookedTodayCount / realCallCount : 0,
+    realCallCount,
   };
 
   return { rows: out, stats };
@@ -964,7 +1189,12 @@ function addReactivatedLeadsTab(wb, rows, stats) {
   ws.getCell("A2").value = "Old lead = contact created before today. Activity = real call ≥70s, live transfer, or pipeline stage moved to a booked stage.";
   ws.getCell("A2").font = { name: "Arial", size: 10, italic: true, color: { argb: "FF606060" } };
 
-  const headers = ["Contact", "Phone", "Source", "Created", "Age (days)", "Activity Today", "Dispatcher", "Time (ET)", "Duration", "Pipeline", "Stage", "Booked?"];
+  const headers = [
+    "Contact", "Phone", "Source", "Created", "Age (days)",
+    "Activity Today", "Dispatcher", "Time (ET)", "Duration",
+    "Pipeline", "Stage",
+    "Booked Today?", "Already Booked?",
+  ];
   ws.getRow(4).values = headers;
   applyHeaderStyle(ws.getRow(4));
   ws.autoFilter = { from: { row: 4, column: 1 }, to: { row: 4, column: headers.length } };
@@ -974,9 +1204,11 @@ function addReactivatedLeadsTab(wb, rows, stats) {
     row.values = [
       r.name, r.phone, r.source, r.dateAdded, r.ageDays,
       r.activity, r.dispatcher, r.activityTime, r.durationFmt,
-      r.pipeline, r.stage, r.booked ? "Yes" : "No",
+      r.pipeline, r.stage,
+      r.bookedToday ? "Yes" : "",
+      r.booked && !r.bookedToday ? "Yes" : "",
     ];
-    const fill = r.booked
+    const fill = r.bookedToday
       ? COLORS.LIVE_TRANSFER
       : (r.activity === "Live Transfer" ? COLORS.LIVE_TRANSFER : COLORS.REAL_CALL);
     row.eachCell((cell) => {
@@ -1027,7 +1259,12 @@ export async function buildDailyExcel(dateStr) {
   console.log(`[excel] searchContacts: ${newContacts.length}, getContact: ${fetched.size}, total contactMap: ${contactMap.size}, searchError: ${searchError ? JSON.stringify(searchError) : "none"}`);
   const calls = enrichCalls({ rows, dateStr, dispatcherMap, pipelineMap, contactMap });
   const { newLeadRows, newOppRows, stats: newLeadStats } = buildNewLeads({ contactMap, pipelineMap, calls, dateStr });
-  const { rows: reactivatedRows, stats: reactivatedStats } = buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr });
+  // Build the exclude set from new lead + repeat submission ids so the
+  // Reactivated tab doesn't double-count contacts.
+  const excludeIds = new Set();
+  for (const r of newLeadRows) if (r._id) excludeIds.add(r._id);
+  for (const r of newOppRows) if (r._id) excludeIds.add(r._id);
+  const { rows: reactivatedRows, stats: reactivatedStats } = buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr, excludeIds });
   const totals = {
     outbound: rows.filter((r) => (r.direction || "").toLowerCase() === "outbound").length,
     inbound:  rows.filter((r) => (r.direction || "").toLowerCase() === "inbound").length,
@@ -1053,6 +1290,7 @@ export async function buildDailyExcel(dateStr) {
   addHourlyTab(wb, calls);
   addByOutboundTab(wb, calls);
   addHourXDispatcherTab(wb, calls);
+  addLeadActivityBreakdownTab(wb, { newLeadRows, newOppRows, reactivatedRows, calls });
   addNotesTab(wb);
 
   // Diagnostic tab with counts useful for debugging
