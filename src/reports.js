@@ -1103,8 +1103,13 @@ function applyCombinedStatusFlags(perEmployee, dispatcherRows) {
 
 // ---------- Top-level orchestrators ----------
 
-export async function runMorningReport() {
-  const generatedAt = now();
+export async function runMorningReport({ dateOverride } = {}) {
+  // dateOverride lets the admin debug endpoint regenerate a report for a
+  // past date by anchoring `now()` to that date's noon ET (so morningWindow
+  // covers that day's morning).
+  const generatedAt = dateOverride
+    ? DateTime.fromISO(dateOverride, { zone: TZ }).set({ hour: 12, minute: 0 })
+    : now();
   const { from, to } = morningWindow(generatedAt);
 
   const hub = await buildHubstaffSection({ from, to, includeTotals: false });
@@ -1149,8 +1154,13 @@ export async function runMorningReport() {
   });
 }
 
-export async function runEveningReport() {
-  const generatedAt = now();
+export async function runEveningReport({ dateOverride } = {}) {
+  // dateOverride lets the admin debug endpoint regenerate a report for a
+  // past date by anchoring `now()` to that date's 7:30 PM ET (so
+  // eveningWindow covers that full day).
+  const generatedAt = dateOverride
+    ? DateTime.fromISO(dateOverride, { zone: TZ }).set({ hour: 19, minute: 30 })
+    : now();
   const { from, to } = eveningWindow(generatedAt);
 
   const hub = await buildHubstaffSection({ from, to, includeTotals: true });
