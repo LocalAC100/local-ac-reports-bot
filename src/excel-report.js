@@ -174,7 +174,13 @@ async function buildContactPipelineMap(pipelineIndex) {
       const cid = o.contactId || o.contact?.id;
       if (!cid) continue;
       const stageName = pipelineIndex.byId.get(p.id)?.stagesById?.get(o.pipelineStageId) || "";
-      map.set(cid, { pipelineName: p.name, stageName });
+      // GHL returns createdAt on the opportunity. Fall back to dateAdded.
+      // When a known phone/email re-submits the lead form, GHL dedupes the
+      // contact but creates a NEW opportunity with createdAt = now. So
+      // opportunity.createdAt is the most reliable "lead came in" signal —
+      // more reliable than contact.dateAdded which only fires on FIRST submit.
+      const oppCreatedAt = o.createdAt || o.dateAdded || null;
+      map.set(cid, { pipelineName: p.name, stageName, oppCreatedAt });
     }
   }
   return map;
@@ -576,18 +582,18 @@ function addHourXDispatcherTab(wb, calls) {
 function addNewLeadsTab(wb, newLeadRows) {
   const ws = wb.addWorksheet("New Leads");
   ws.views = [{ state: "frozen", ySplit: 4 }];
-  setColumnWidths(ws, [24, 16, 12, 20, 20, 14, 16, 18, 50, 12]);
+  setColumnWidths(ws, [24, 16, 12, 14, 20, 20, 14, 16, 18, 50, 12]);
   applyTitleStyle(ws.getCell("A1"));
   ws.getCell("A1").value = `New Leads Today — Response Time (${newLeadRows.length} leads)`;
   ws.getCell("A2").value = "Goal: call back within 1 minute, never beyond 3 minutes.";
   ws.getCell("A2").font = { name: "Arial", size: 10, italic: true, color: { argb: "FF606060" } };
-  const headers = ["Lead Name", "Phone", "Lead Source", "Came In (ET)", "First Call (ET)", "Response Time", "Bucket", "First Caller", "Other Dispatchers on Shift (within 30 min)", "Total calls today"];
+  const headers = ["Lead Name", "Phone", "Lead Source", "Lead Type", "Came In (ET)", "First Call (ET)", "Response Time", "Bucket", "First Caller", "Other Dispatchers on Shift (within 30 min)", "Total calls today"];
   ws.getRow(4).values = headers;
   applyHeaderStyle(ws.getRow(4));
   newLeadRows.forEach((r, i) => {
     const row = ws.getRow(5 + i);
     row.values = [
-      r.leadName, r.phone, r.leadSource,
+      r.leadName, r.phone, r.leadSource, r.leadType,
       r.cameIn, r.firstCall, r.responseTime, r.bucket,
       r.firstCaller, r.othersOnShift, r.totalCallsToday,
     ];
@@ -639,19 +645,34 @@ function addNotesTab(wb) {
   }
 }
 
-function buildNewLeads({ contactMap, calls, dateStr }) {
+function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
   const reportStart = DateTime.fromISO(`${dateStr}T00:00:00`, { zone: TZ }).toUTC();
   const reportEnd   = DateTime.fromISO(`${dateStr}T23:59:59.999`, { zone: TZ }).toUTC();
   const leads = [];
   // Per Alex: count ANY contact created today, regardless of source — manual
-  // entries, ad leads, inbound, all of it. The text-notification system fires
-  // on every new lead so he wants the report to match that breadth.
+  // entries, ad leads, inbound, all of it. ALSO count contacts whose
+  // opportunity was created today even if their contact dateAdded is older —
+  // GHL dedupes contacts on phone/email match, so a re-submitted lead form
+  // updates the existing contact (dateAdded stays old) but creates a fresh
+  // opportunity with createdAt = today. The text-notification system fires
+  // on the workflow tied to opportunity creation, so this matches what Alex
+  // sees in his text history.
   for (const c of contactMap.values()) {
-    if (!c?.dateAdded) continue;
-    const added = DateTime.fromISO(c.dateAdded);
-    if (!added.isValid) continue;
-    if (added < reportStart || added > reportEnd) continue;
-    leads.push(c);
+    if (!c?.id) continue;
+    const opp = pipelineMap.get(c.id);
+    const contactAdded = c.dateAdded ? DateTime.fromISO(c.dateAdded) : null;
+    const oppAdded = opp?.oppCreatedAt ? DateTime.fromISO(opp.oppCreatedAt) : null;
+
+    const contactToday = contactAdded?.isValid && contactAdded >= reportStart && contactAdded <= reportEnd;
+    const oppToday = oppAdded?.isValid && oppAdded >= reportStart && oppAdded <= reportEnd;
+
+    if (!contactToday && !oppToday) continue;
+
+    // Lead type: first-time if contact created today, re-submitted if only the
+    // opportunity is fresh on an older contact.
+    const leadType = contactToday ? "First-time" : "Re-submitted";
+
+    leads.push({ ...c, _leadType: leadType, _opp: opp });
   }
   const firstCallByContact = new Map();
   for (const call of calls) {
@@ -674,7 +695,11 @@ function buildNewLeads({ contactMap, calls, dateStr }) {
     let bucket = "Never called";
     let firstCallEt = "";
     if (first) {
-      const added = DateTime.fromISO(l.dateAdded);
+      // Same logic as cameInIso below: re-submitted leads use opp.createdAt.
+      const cameInForResponse = l._leadType === "Re-submitted" && l._opp?.oppCreatedAt
+        ? l._opp.oppCreatedAt
+        : l.dateAdded;
+      const added = DateTime.fromISO(cameInForResponse);
       const fcEt = first.dt;
       responseTimeSec = Math.round((fcEt.toMillis() - added.toMillis()) / 1000);
       responseSecs.push(responseTimeSec);
@@ -686,17 +711,24 @@ function buildNewLeads({ contactMap, calls, dateStr }) {
     } else {
       neverCalled++;
     }
+    // For "Came In" timestamp: prefer contact.dateAdded for first-time leads,
+    // opportunity.createdAt for re-submitted leads (since contact.dateAdded
+    // would point to the original sign-up date, not today's resubmission).
+    const cameInIso = l._leadType === "Re-submitted" && l._opp?.oppCreatedAt
+      ? l._opp.oppCreatedAt
+      : l.dateAdded;
     return {
       leadName: `${l.firstName || ""} ${l.lastName || ""}`.trim() || l.contactName || "(no name)",
       phone: l.phone,
       leadSource: l.source || "",
-      cameIn: DateTime.fromISO(l.dateAdded).setZone(TZ).toFormat("yyyy-LL-dd HH:mm:ss"),
+      cameIn: DateTime.fromISO(cameInIso).setZone(TZ).toFormat("yyyy-LL-dd HH:mm:ss"),
       firstCall: firstCallEt,
       responseTime: responseTimeSec != null ? fmtDuration(responseTimeSec) : "Never",
       bucket,
       firstCaller: first?.dispatcher || "",
       othersOnShift: "",
       totalCallsToday: totalCallsByContact.get(l.id) || 0,
+      leadType: l._leadType || "First-time",
     };
   });
   rows.sort((a, b) => a.cameIn < b.cameIn ? -1 : 1);
@@ -890,7 +922,7 @@ export async function buildDailyExcel(dateStr) {
   }
   console.log(`[excel] searchContacts: ${newContacts.length}, getContact: ${fetched.size}, total contactMap: ${contactMap.size}, searchError: ${searchError ? JSON.stringify(searchError) : "none"}`);
   const calls = enrichCalls({ rows, dateStr, dispatcherMap, pipelineMap, contactMap });
-  const { rows: newLeadRows, stats: newLeadStats } = buildNewLeads({ contactMap, calls, dateStr });
+  const { rows: newLeadRows, stats: newLeadStats } = buildNewLeads({ contactMap, pipelineMap, calls, dateStr });
   const { rows: reactivatedRows, stats: reactivatedStats } = buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr });
   const totals = {
     outbound: rows.filter((r) => (r.direction || "").toLowerCase() === "outbound").length,
