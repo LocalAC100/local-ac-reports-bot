@@ -9,7 +9,7 @@ import { onNewLead } from "./alerts.js";
 import { buildSessionMiddleware } from "./auth.js";
 import { buildDashboardRouter } from "./dashboard.js";
 import { buildDebugRouter } from "./debug.js";
-import { Alerts } from "./db.js";
+import { Alerts, Calls } from "./db.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -63,6 +63,47 @@ export function buildServer() {
       onNewLead({ contactId, contactName, phone, leadAddedAt }).catch((e) =>
         console.error("[webhook] onNewLead failed", e?.message)
       );
+    }
+
+    // ─── Call events ────────────────────────────────────────────────────
+    // HighLevel sends call events with these shapes (varies by Workflow trigger):
+    //   { type: 'CallStatus', callSid, callStatus, direction, duration, userId, contactId, dateAdded, ... }
+    //   { type: 'OutboundCallCompleted', ... }
+    //   { type: 'InboundCallCompleted', ... }
+    //
+    // We accept any event that has a callSid (or messageId of type=CALL) and
+    // upsert into the calls table. The nightly firehose reconcile job fills
+    // in dispositions/duration that weren't final at webhook time.
+    const callSid =
+      body.callSid ||
+      body.call_sid ||
+      body.messageId ||
+      body.message_id ||
+      body.id;
+    const looksLikeCall =
+      eventType.includes("call") ||
+      String(body.messageType || body.message_type || "").toLowerCase() === "call" ||
+      Number(body.type) === 1; // GHL legacy numeric type for calls
+    if (callSid && looksLikeCall) {
+      try {
+        Calls.upsert({
+          callSid: String(callSid),
+          direction:
+            body.direction ||
+            (eventType.includes("outbound") ? "outbound" : null) ||
+            (eventType.includes("inbound") ? "inbound" : null),
+          status: body.callStatus || body.call_status || body.status || null,
+          duration: body.duration ?? body.callDuration ?? null,
+          userId: body.userId || body.user_id || body.assignedUserId || null,
+          contactId: contactId || null,
+          phone: phone || body.from || body.to || null,
+          source: "webhook",
+          dateAdded: leadAddedAt,
+          raw: body,
+        });
+      } catch (e) {
+        console.error("[webhook] Calls.upsert failed", e?.message);
+      }
     }
     return res.json({ ok: true });
   });
