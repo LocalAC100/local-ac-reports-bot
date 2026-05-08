@@ -335,5 +335,63 @@ export function buildFirehoseBackfillRouter() {
     }
   );
 
+
+  // GET /admin/debug/inspect-leads?date=YYYY-MM-DD&s=<secret>
+  // Diagnostic: dump every contact whose dateAdded falls on the given date,
+  // showing the raw source field value. Used to figure out which source
+  // strings GHL actually returns (so the New Leads filter in excel-report.js
+  // can match them). No filtering — returns everything as-is.
+  router.get(
+    "/admin/debug/inspect-leads",
+    secretBypass,
+    async (req, res) => {
+      try {
+        const dateStr =
+          req.query.date ||
+          DateTime.now().setZone(TZ).toFormat("yyyy-LL-dd");
+        const dayStart = DateTime.fromISO(dateStr, { zone: TZ }).startOf("day");
+        const dayEnd = dayStart.endOf("day");
+        const fromIso = dayStart.toUTC().toISO();
+        const toIso = dayEnd.toUTC().toISO();
+
+        // Use the GHL contacts/search with the same date filter
+        const ghl = await import("./ghl.js");
+        const contacts = await ghl.searchContacts({ from: fromIso, to: toIso, limit: 200 });
+
+        const out = (contacts || []).map((c) => ({
+          id: c.id,
+          name: `${c.firstName || ""} ${c.lastName || ""}`.trim() || c.contactName || "",
+          phone: c.phone,
+          source: c.source,
+          sourceType: c.sourceType,
+          tags: c.tags,
+          dateAdded: c.dateAdded,
+        }));
+
+        // Also tally source values
+        const sourceCounts = {};
+        for (const c of out) {
+          const k = c.source || "(no source)";
+          sourceCounts[k] = (sourceCounts[k] || 0) + 1;
+        }
+
+        res.json({
+          ok: true,
+          date: dateStr,
+          window: { fromIso, toIso },
+          totalContacts: out.length,
+          sourceCounts,
+          contacts: out,
+        });
+      } catch (e) {
+        res.status(500).json({
+          ok: false,
+          error: e?.message,
+          stack: e?.stack,
+        });
+      }
+    }
+  );
+
   return router;
 }
