@@ -149,6 +149,7 @@ export function isDispatcher(emp) {
 
 export function expectedShiftFor(emp, dateLuxon) {
   // dateLuxon is a Luxon DateTime in America/New_York
+  if (!emp.schedule) return null; // Sal / Christopher have no schedule (back-office)
   const dow = dateLuxon.weekday % 7; // luxon: 1=Mon..7=Sun → convert to 0=Sun..6=Sat
   const key = dow; // already 0=Sun .. 6=Sat after % 7
   return emp.schedule[key];
