@@ -100,6 +100,7 @@ export async function listActiveConversations({ from, to, maxPages = 10 }) {
   const fromMs = new Date(from).getTime();
   const toMs = new Date(to).getTime();
   let cursor = toMs + 1;
+  const seen = new Set(); // dedupe by conversation id across pages
   const all = [];
   for (let i = 0; i < maxPages; i++) {
     const r = await http.get("/conversations/search", {
@@ -113,17 +114,32 @@ export async function listActiveConversations({ from, to, maxPages = 10 }) {
     });
     const batch = r.data?.conversations ?? [];
     if (batch.length === 0) break;
-    const inWindow = batch.filter((c) => {
+    let addedThisPage = 0;
+    for (const c of batch) {
       const t = new Date(c.lastMessageDate || 0).getTime();
-      return t >= fromMs && t <= toMs;
-    });
-    all.push(...inWindow);
-    // Stop paginating when this batch goes past our floor
+      if (t < fromMs || t > toMs) continue;
+      if (seen.has(c.id)) continue;
+      seen.add(c.id);
+      all.push(c);
+      addedThisPage++;
+    }
+    // CRITICAL FIX (May 7 2026): the cursor advance was bugged. GHL's
+    // `lastMessageDate` filter is inclusive, so setting cursor = oldestInBatch
+    // re-fetched the same batch on the next iteration. With maxPages=10 every
+    // conversation got duplicated up to 10 times → that's exactly why the v6
+    // report showed "1,630 voicemails", "360 calls", "273,320 attempts" —
+    // multiples of ~10 because the same data was being walked 10 times.
+    // Two defenses now: (1) Set-based id dedupe above, (2) cursor jumps to
+    // ONE MILLISECOND BEFORE the oldest in batch so the boundary conversation
+    // doesn't repeat. Plus we break early if we made zero progress this page.
     const oldestInBatch = new Date(
       batch[batch.length - 1].lastMessageDate || 0
     ).getTime();
     if (oldestInBatch < fromMs) break;
-    cursor = oldestInBatch;
+    if (addedThisPage === 0) break; // cursor stuck — bail to avoid infinite waste
+    const nextCursor = oldestInBatch - 1;
+    if (nextCursor >= cursor) break; // safety: cursor must move backward
+    cursor = nextCursor;
   }
   return all;
 }
