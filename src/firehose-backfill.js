@@ -24,6 +24,7 @@ import { DateTime } from "luxon";
 import { requireAdmin } from "./auth.js";
 import { config } from "./config.js";
 import { Calls, classifyCall } from "./db.js";
+import { runMorningReport, runEveningReport } from "./reports.js";
 
 const TZ = "America/New_York";
 
@@ -215,6 +216,66 @@ export function buildFirehoseBackfillRouter() {
         res
           .status(500)
           .json({ ok: false, error: e?.message, stack: e?.stack });
+      }
+    }
+  );
+
+  // GET /admin/debug/run-evening-report?date=YYYY-MM-DD&s=<secret>
+  // GET /admin/debug/run-morning-report?date=YYYY-MM-DD&s=<secret>
+  // Triggers the same orchestrators the cron jobs call, but lets us specify
+  // a past date via dateOverride. Same secret-bypass auth as bucket-counts —
+  // sessions get wiped on every Render redeploy so requireAdmin is too brittle
+  // here (and the cron itself runs without auth, so this is closer to how
+  // the real automated path works).
+  function secretBypass(req, res, next) {
+    if (req.query.s === VERIFY_SECRET) return next();
+    return requireAdmin(req, res, next);
+  }
+  router.get(
+    "/admin/debug/run-evening-report",
+    secretBypass,
+    async (req, res) => {
+      const t0 = Date.now();
+      try {
+        const dateOverride = req.query.date || undefined;
+        await runEveningReport({ dateOverride });
+        res.json({
+          ok: true,
+          kind: "evening-report",
+          dateOverride: dateOverride || "(now)",
+          durationMs: Date.now() - t0,
+        });
+      } catch (e) {
+        res.status(500).json({
+          ok: false,
+          kind: "evening-report",
+          error: e?.message,
+          stack: e?.stack,
+        });
+      }
+    }
+  );
+  router.get(
+    "/admin/debug/run-morning-report",
+    secretBypass,
+    async (req, res) => {
+      const t0 = Date.now();
+      try {
+        const dateOverride = req.query.date || undefined;
+        await runMorningReport({ dateOverride });
+        res.json({
+          ok: true,
+          kind: "morning-report",
+          dateOverride: dateOverride || "(now)",
+          durationMs: Date.now() - t0,
+        });
+      } catch (e) {
+        res.status(500).json({
+          ok: false,
+          kind: "morning-report",
+          error: e?.message,
+          stack: e?.stack,
+        });
       }
     }
   );
