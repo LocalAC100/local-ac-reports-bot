@@ -437,5 +437,68 @@ export function buildFirehoseBackfillRouter() {
     }
   );
 
+
+  // GET /admin/debug/inspect-opps?date=YYYY-MM-DD&s=<secret>
+  // Diagnostic: dump every opportunity returned by searchOpportunities across
+  // all pipelines, with all of its fields. Used to figure out the real field
+  // name for opportunity creation timestamp (createdAt vs dateAdded vs other).
+  router.get(
+    "/admin/debug/inspect-opps",
+    secretBypass,
+    async (req, res) => {
+      try {
+        const dateStr =
+          req.query.date ||
+          DateTime.now().setZone(TZ).toFormat("yyyy-LL-dd");
+        const dayStart = DateTime.fromISO(dateStr, { zone: TZ }).startOf("day");
+        const dayEnd = dayStart.endOf("day");
+        const fromIso = dayStart.toUTC().toISO();
+        const toIso = dayEnd.toUTC().toISO();
+
+        const pipelines = await ghl.listPipelines();
+        const allOpps = [];
+        for (const p of pipelines) {
+          try {
+            const opps = await ghl.searchOpportunities({ pipelineId: p.id, limit: 100 });
+            for (const o of opps) {
+              allOpps.push({ pipelineName: p.name, ...o });
+            }
+          } catch (e) {
+            allOpps.push({ pipelineName: p.name, error: e?.message });
+          }
+        }
+
+        // Identify any timestamp-like field on the first opp so we can see what's available
+        const sampleKeys = allOpps.length ? Object.keys(allOpps[0]) : [];
+
+        // Find opps with any timestamp on the report day
+        const matches = [];
+        for (const o of allOpps) {
+          for (const k of Object.keys(o)) {
+            const v = o[k];
+            if (typeof v !== "string") continue;
+            if (!v.match(/^\d{4}-\d{2}-\d{2}T/)) continue;
+            const t = new Date(v).getTime();
+            if (t >= new Date(fromIso).getTime() && t <= new Date(toIso).getTime()) {
+              matches.push({ field: k, value: v, oppId: o.id, contactId: o.contactId, name: o.name, pipeline: o.pipelineName, stage: o.pipelineStageName });
+              break;
+            }
+          }
+        }
+
+        res.json({
+          ok: true,
+          totalOpps: allOpps.length,
+          sampleKeys,
+          firstOpp: allOpps[0] || null,
+          matchesOnReportDay: matches.length,
+          matches: matches.slice(0, 30),
+        });
+      } catch (e) {
+        res.status(500).json({ ok: false, error: e?.message, stack: e?.stack });
+      }
+    }
+  );
+
   return router;
 }
