@@ -533,5 +533,291 @@ export function buildDebugRouter() {
     }
   });
 
+  // /admin/debug/calls-spec — implements the verified GHL extraction spec.
+  // Goal: produce numbers that match the regression target for 2026-05-07:
+  //   Total 548 / Outbound 545 / Inbound 3
+  //   Live Transfer 2, Real Call 58, No Answer 427, Failed 60, Ringing 1
+  //   Mark 213, Ellie 171, Angel 101, Frank 53, Chris 7
+  //
+  // Method (per spec):
+  //   1. /conversations/search?lastMessageType=TYPE_CALL paginated by
+  //      startAfterDate / endBeforeDate (DESC by last_message_date)
+  //   2. /conversations/{id}/messages?type=TYPE_CALL paginated by lastMessageId
+  //      Note the response shape: data.messages.messages (DOUBLE NESTED)
+  //   3. Categorize per the 5-bucket rule below
+  //
+  // Categorization (do NOT trust "Answered" alone — voicemail pickups read as
+  // completed, which is what broke the old report):
+  //   Live Transfer = duration >= 30 AND meta.call.participants has a label
+  //                   starting with "transfer:"
+  //   Real Call     = duration >= 30, no live transfer
+  //   No Answer     = status == "no-answer" OR (status == "completed" AND
+  //                   duration < 30)
+  //   Failed        = status in {failed, busy}
+  //   Ringing       = status == "ringing"
+  router.get("/admin/debug/calls-spec", requireAdmin, async (req, res) => {
+    try {
+      const { DateTime } = await import("luxon");
+      const axios = (await import("axios")).default;
+      const { config } = await import("./config.js");
+      const { EMPLOYEES } = await import("./employees.js");
+
+      const TZ = "America/New_York";
+      const dateStr =
+        req.query.date || DateTime.now().setZone(TZ).toFormat("yyyy-LL-dd");
+      const dayStart = DateTime.fromISO(dateStr, { zone: TZ }).startOf("day");
+      const dayEnd = dayStart.endOf("day");
+      const fromMs = dayStart.toMillis();
+      const toMs = dayEnd.toMillis();
+
+      const http = axios.create({
+        baseURL: "https://services.leadconnectorhq.com",
+        timeout: 30000,
+        headers: {
+          Authorization: `Bearer ${config.ghl.apiKey}`,
+          Version: "2021-07-28",
+          Accept: "application/json",
+        },
+      });
+
+      // ---- Step 1: pull all conversations with calls today ----
+      // Use lastMessageType=TYPE_CALL hint, paginate DESC by last_message_date.
+      // Dedupe by conversation id, advance cursor below oldest in batch.
+      const convSeen = new Set();
+      const conversations = [];
+      let cursor = toMs + 1;
+      let convPages = 0;
+      const MAX_CONV_PAGES = 50;
+      while (convPages < MAX_CONV_PAGES) {
+        convPages++;
+        let r;
+        try {
+          r = await http.get("/conversations/search", {
+            params: {
+              locationId: config.ghl.locationId,
+              lastMessageType: "TYPE_CALL",
+              startAfterDate: fromMs,
+              endBeforeDate: cursor,
+              limit: 100,
+              sort: "desc",
+              sortBy: "last_message_date",
+            },
+          });
+        } catch (e) {
+          // Some GHL accounts don't accept lastMessageType filter — fall back
+          // to the no-filter version that returns everything in window.
+          r = await http
+            .get("/conversations/search", {
+              params: {
+                locationId: config.ghl.locationId,
+                startAfterDate: fromMs,
+                endBeforeDate: cursor,
+                limit: 100,
+                sort: "desc",
+                sortBy: "last_message_date",
+              },
+            })
+            .catch(() => ({ data: { conversations: [] } }));
+        }
+        const batch = r.data?.conversations || [];
+        if (batch.length === 0) break;
+        let added = 0;
+        for (const c of batch) {
+          if (convSeen.has(c.id)) continue;
+          convSeen.add(c.id);
+          conversations.push(c);
+          added++;
+        }
+        const oldest = batch[batch.length - 1].lastMessageDate;
+        if (!oldest) break;
+        const oldestMs = new Date(oldest).getTime();
+        if (oldestMs < fromMs) break;
+        if (added === 0) break;
+        const next = oldestMs - 1;
+        if (next >= cursor) break;
+        cursor = next;
+      }
+
+      // ---- Step 2: pull all call messages from each conversation ----
+      // Paginate via lastMessageId. Filter by ?type=TYPE_CALL. Time-window
+      // filter on dateAdded.
+      const calls = [];
+      let messagePages = 0;
+      for (const conv of conversations) {
+        let lastMessageId = null;
+        let convMessagePages = 0;
+        while (convMessagePages < 20) {
+          convMessagePages++;
+          messagePages++;
+          const params = {
+            locationId: config.ghl.locationId,
+            limit: 100,
+            type: "TYPE_CALL",
+          };
+          if (lastMessageId) params.lastMessageId = lastMessageId;
+          let r;
+          try {
+            r = await http.get(`/conversations/${conv.id}/messages`, {
+              params,
+            });
+          } catch (e) {
+            break;
+          }
+          // Note: response is { messages: { messages: [...], nextPage, lastMessageId } }
+          const block = r.data?.messages || {};
+          const msgs = block.messages || [];
+          if (msgs.length === 0) break;
+          for (const m of msgs) {
+            if (!m.dateAdded) continue;
+            const dt = new Date(m.dateAdded).getTime();
+            if (dt < fromMs || dt > toMs) continue;
+
+            const direction = String(m.direction || "").toLowerCase();
+            const duration = Number(
+              m.meta?.call?.duration ?? m.callDuration ?? m.duration ?? 0
+            );
+            const status = String(m.meta?.call?.status || "").toLowerCase();
+
+            // Live Transfer detection — try meta.call.participants
+            const participants =
+              m.meta?.call?.participants || m.meta?.participants || [];
+            let hasTransfer = false;
+            if (Array.isArray(participants)) {
+              for (const p of participants) {
+                const label = String(p?.label || p || "");
+                if (label.startsWith("transfer:")) {
+                  hasTransfer = true;
+                  break;
+                }
+              }
+            } else if (typeof participants === "object" && participants) {
+              for (const k of Object.keys(participants)) {
+                if (String(k).startsWith("transfer:")) {
+                  hasTransfer = true;
+                  break;
+                }
+                const val = participants[k];
+                if (typeof val === "string" && val.startsWith("transfer:")) {
+                  hasTransfer = true;
+                  break;
+                }
+              }
+            }
+
+            let category;
+            if (duration >= 30 && hasTransfer) category = "live_transfer";
+            else if (duration >= 30) category = "real_call";
+            else if (status === "no-answer") category = "no_answer";
+            else if (status === "completed" && duration < 30)
+              category = "no_answer";
+            else if (status === "failed" || status === "busy")
+              category = "failed";
+            else if (status === "ringing") category = "ringing";
+            else category = "no_answer"; // catch-all
+
+            calls.push({
+              id: m.id,
+              dateAddedIso: m.dateAdded,
+              direction,
+              duration,
+              status,
+              category,
+              hasTransfer,
+              contactId: conv.contactId,
+              userId: m.userId,
+              hour: DateTime.fromISO(m.dateAdded).setZone(TZ).hour,
+            });
+          }
+          // Pagination
+          if (!block.nextPage || !block.lastMessageId) break;
+          if (block.lastMessageId === lastMessageId) break;
+          lastMessageId = block.lastMessageId;
+        }
+      }
+
+      // ---- Aggregate ----
+      const totals = {
+        total: 0,
+        outbound: 0,
+        inbound: 0,
+        byCategory: {
+          live_transfer: 0,
+          real_call: 0,
+          no_answer: 0,
+          failed: 0,
+          ringing: 0,
+        },
+      };
+      const byUser = {};
+      const byHour = {};
+      const uniqueContacts = new Set();
+      for (const c of calls) {
+        totals.total++;
+        if (c.direction === "outbound") totals.outbound++;
+        else if (c.direction === "inbound") totals.inbound++;
+        totals.byCategory[c.category] =
+          (totals.byCategory[c.category] || 0) + 1;
+        const u = c.userId || "(none)";
+        if (!byUser[u]) {
+          byUser[u] = {
+            userId: u,
+            total: 0,
+            real_call: 0,
+            no_answer: 0,
+            failed: 0,
+            live_transfer: 0,
+            ringing: 0,
+          };
+        }
+        byUser[u].total++;
+        byUser[u][c.category] = (byUser[u][c.category] || 0) + 1;
+        byHour[c.hour] = (byHour[c.hour] || 0) + 1;
+        if (c.contactId) uniqueContacts.add(c.contactId);
+      }
+
+      // Map userId -> dispatcher name for known dispatchers
+      const ghlUsers = await http
+        .get("/users/", { params: { locationId: config.ghl.locationId } })
+        .then((r) => r.data?.users || [])
+        .catch(() => []);
+      const userById = new Map(ghlUsers.map((u) => [u.id, u]));
+      const dispatcherSummary = [];
+      for (const userId of Object.keys(byUser)) {
+        const u = userById.get(userId);
+        const fullName = u
+          ? `${u.firstName || ""} ${u.lastName || ""}`.trim() ||
+            u.name ||
+            userId
+          : userId === "(none)"
+            ? "(no userId — likely inbound)"
+            : `(unmatched ${userId})`;
+        dispatcherSummary.push({
+          name: fullName,
+          ...byUser[userId],
+        });
+      }
+      dispatcherSummary.sort((a, b) => b.total - a.total);
+
+      res.json({
+        ok: true,
+        date: dateStr,
+        timezone: TZ,
+        windowMs: { from: fromMs, to: toMs },
+        scan: {
+          conversationsFound: conversations.length,
+          conversationPages: convPages,
+          messagePages,
+          callsExtracted: calls.length,
+        },
+        totals,
+        uniqueContacts: uniqueContacts.size,
+        byHour,
+        byDispatcher: dispatcherSummary,
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e?.message, stack: e?.stack });
+    }
+  });
+
   return router;
 }
