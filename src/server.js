@@ -160,9 +160,13 @@ export function buildServer() {
   // Dashboard: session-based, requires login
   app.use(cookieParser());
   app.use(buildSessionMiddleware());
+  // Firehose-backfill router mounted BEFORE the dashboard router so its
+  // secret-bypass route (/admin/debug/bucket-counts?s=...) can reach the
+  // handler without dashboardRouter's requireAuth middleware redirecting
+  // to /login. The router still gates the OTHER endpoints with requireAdmin.
+  app.use(buildFirehoseBackfillRouter());
   app.use(buildDashboardRouter());
   app.use(buildDebugRouter());
-  app.use(buildFirehoseBackfillRouter());
 
   return app;
 }
