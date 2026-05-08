@@ -355,22 +355,62 @@ export function buildFirehoseBackfillRouter() {
         const fromIso = dayStart.toUTC().toISO();
         const toIso = dayEnd.toUTC().toISO();
 
-        // Use the GHL contacts/search with the same date filter
-        const contacts = await ghl.searchContacts({ from: fromIso, to: toIso, limit: 100 });
+        // Pull every contact_id that had a call on this date — direct DB query.
+        const rows = Calls.listInWindow(fromIso, toIso, 5000);
+        const ids = [...new Set(rows.map((r) => r.contact_id).filter(Boolean))];
 
-        const out = (contacts || []).map((c) => ({
-          id: c.id,
-          name: `${c.firstName || ""} ${c.lastName || ""}`.trim() || c.contactName || "",
-          phone: c.phone,
-          source: c.source,
-          sourceType: c.sourceType,
-          tags: c.tags,
-          dateAdded: c.dateAdded,
-        }));
+        // Try GHL searchContacts as a secondary source. If it 422s, swallow and
+        // continue — we still want the per-call contacts.
+        let searchResults = [];
+        let searchError = null;
+        try {
+          searchResults = await ghl.searchContacts({ from: fromIso, to: toIso, limit: 100 });
+        } catch (e) {
+          searchError = e?.response?.data || e?.message;
+        }
+        const searchById = new Map();
+        for (const c of searchResults || []) if (c?.id) searchById.set(c.id, c);
 
-        // Also tally source values
+        // Fetch each call-contact in parallel
+        const fetched = [];
+        const CONCURRENCY = 8;
+        let i = 0;
+        async function worker() {
+          while (i < ids.length) {
+            const id = ids[i++];
+            try {
+              const c = await ghl.getContact(id);
+              if (c) fetched.push(c);
+            } catch (e) {}
+          }
+        }
+        await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+
+        // Combine: prefer search results, fall back to fetched
+        const byId = new Map();
+        for (const c of fetched) if (c?.id) byId.set(c.id, c);
+        for (const c of searchById.values()) byId.set(c.id, c);
+
+        // Filter to contacts whose dateAdded falls on the report day
+        const todayContacts = [];
+        for (const c of byId.values()) {
+          if (!c.dateAdded) continue;
+          const t = new Date(c.dateAdded).getTime();
+          if (t < new Date(fromIso).getTime() || t > new Date(toIso).getTime()) continue;
+          todayContacts.push({
+            id: c.id,
+            name: `${c.firstName || ""} ${c.lastName || ""}`.trim() || c.contactName || "",
+            phone: c.phone,
+            source: c.source,
+            sourceType: c.sourceType,
+            tags: c.tags,
+            dateAdded: c.dateAdded,
+            fromSearch: searchById.has(c.id),
+          });
+        }
+
         const sourceCounts = {};
-        for (const c of out) {
+        for (const c of todayContacts) {
           const k = c.source || "(no source)";
           sourceCounts[k] = (sourceCounts[k] || 0) + 1;
         }
@@ -379,9 +419,13 @@ export function buildFirehoseBackfillRouter() {
           ok: true,
           date: dateStr,
           window: { fromIso, toIso },
-          totalContacts: out.length,
+          uniqueContactIdsInCalls: ids.length,
+          fetchedFromGetContact: fetched.length,
+          fetchedFromSearch: searchResults.length,
+          searchError,
+          todayContactsCount: todayContacts.length,
           sourceCounts,
-          contacts: out,
+          contacts: todayContacts,
         });
       } catch (e) {
         res.status(500).json({
