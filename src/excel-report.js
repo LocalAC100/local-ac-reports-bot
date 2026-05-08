@@ -267,7 +267,7 @@ function enrichCalls({ rows, dateStr, dispatcherMap, pipelineMap, contactMap }) 
   return enriched;
 }
 
-function addSummaryTab(wb, { dateStr, totals, buckets, uniqueContacts, newLeadStats }) {
+function addSummaryTab(wb, { dateStr, totals, buckets, uniqueContacts, newLeadStats, reactivatedStats }) {
   const ws = wb.addWorksheet("Summary");
   setColumnWidths(ws, [36, 14, 12, 13, 13, 13]);
   applyTitleStyle(ws.getCell("A1"));
@@ -322,6 +322,20 @@ function addSummaryTab(wb, { dateStr, totals, buckets, uniqueContacts, newLeadSt
     ["Never called", newLeadStats.neverCalled],
   ];
   leadRows.forEach((r, i) => { ws.getRow(25 + i).values = r; });
+
+  // Reactivated leads block
+  if (reactivatedStats) {
+    const startRow = 25 + leadRows.length + 2;
+    ws.getCell(`A${startRow}`).value = "REACTIVATED LEADS (old leads with activity today)";
+    applyHeaderStyle(ws.getRow(startRow));
+    const reactRows = [
+      ["Total reactivated", reactivatedStats.total],
+      ["Booked appointment", reactivatedStats.booked],
+      ["Did not book", reactivatedStats.notBooked],
+      [`Booking rate`, reactivatedStats.total > 0 ? `${reactivatedStats.booked} of ${reactivatedStats.total} (${Math.round(reactivatedStats.bookingRate * 100)}%)` : "—"],
+    ];
+    reactRows.forEach((r, i) => { ws.getRow(startRow + 1 + i).values = r; });
+  }
 }
 
 function addAllCallsTab(wb, calls) {
@@ -700,6 +714,141 @@ function buildNewLeads({ contactMap, calls, dateStr }) {
   };
 }
 
+function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr }) {
+  // OLD lead = contact whose dateAdded is BEFORE the report day.
+  // We surface old leads who had a meaningful interaction today:
+  //   - answered the phone (real_call: ≥70s, no transfer)
+  //   - got transferred to sales (live_transfer)
+  //   - reached "Appt. Booked" or "Over Phone Booked" stage in their pipeline
+  // Each row is also flagged with whether the contact ENDED up booked, so we
+  // can show a booking-rate metric (e.g. "3 of 8 reactivated leads booked").
+  const reportStart = DateTime.fromISO(`${dateStr}T00:00:00`, { zone: TZ }).toUTC();
+  const BOOKING_STAGES = new Set(["Appt. Booked", "Over Phone Booked"]);
+
+  const callsByContact = new Map();
+  for (const c of calls) {
+    const id = c.raw.contact_id;
+    if (!id) continue;
+    if (!callsByContact.has(id)) callsByContact.set(id, []);
+    callsByContact.get(id).push(c);
+  }
+
+  const out = [];
+  const seen = new Set();
+
+  // Pass 1: any old contact who got a real_call or live_transfer today
+  for (const [id, contactCalls] of callsByContact.entries()) {
+    const contact = contactMap.get(id);
+    if (!contact?.dateAdded) continue;
+    const added = DateTime.fromISO(contact.dateAdded);
+    if (!added.isValid) continue;
+    if (added >= reportStart) continue;
+
+    const meaningful = contactCalls.filter((c) => c.bucket === "real_call" || c.bucket === "live_transfer");
+    if (meaningful.length === 0) continue;
+
+    meaningful.sort((a, b) => {
+      const rank = { live_transfer: 0, real_call: 1 };
+      if (rank[a.bucket] !== rank[b.bucket]) return rank[a.bucket] - rank[b.bucket];
+      return b.dt.toMillis() - a.dt.toMillis();
+    });
+    const best = meaningful[0];
+    const pipeline = pipelineMap.get(id) || {};
+    const ageDays = Math.floor((reportStart.toMillis() - added.toMillis()) / 86400000);
+    const booked = BOOKING_STAGES.has(pipeline.stageName || "");
+
+    seen.add(id);
+    out.push({
+      name: `${contact.firstName || ""} ${contact.lastName || ""}`.trim() || contact.contactName || "(no name)",
+      phone: contact.phone,
+      source: contact.source || "",
+      dateAdded: added.setZone(TZ).toFormat("yyyy-LL-dd"),
+      ageDays,
+      activity: best.bucket === "live_transfer" ? "Live Transfer" : "Real Call",
+      dispatcher: best.dispatcher,
+      activityTime: best.dt.toFormat("HH:mm:ss"),
+      durationFmt: best.durationFmt,
+      pipeline: pipeline.pipelineName || "",
+      stage: pipeline.stageName || "",
+      booked,
+      _sortTs: best.dt.toMillis(),
+    });
+  }
+
+  // Pass 2: old contacts whose opportunity is in a booked stage but had no
+  // qualifying call today — still counts as a reactivation (link click,
+  // manual entry, etc.).
+  for (const [id, pipeline] of pipelineMap.entries()) {
+    if (!BOOKING_STAGES.has(pipeline.stageName || "")) continue;
+    if (seen.has(id)) continue;
+    const contact = contactMap.get(id);
+    if (!contact?.dateAdded) continue;
+    const added = DateTime.fromISO(contact.dateAdded);
+    if (!added.isValid) continue;
+    if (added >= reportStart) continue;
+
+    const ageDays = Math.floor((reportStart.toMillis() - added.toMillis()) / 86400000);
+    out.push({
+      name: `${contact.firstName || ""} ${contact.lastName || ""}`.trim() || contact.contactName || "(no name)",
+      phone: contact.phone,
+      source: contact.source || "",
+      dateAdded: added.setZone(TZ).toFormat("yyyy-LL-dd"),
+      ageDays,
+      activity: pipeline.stageName === "Appt. Booked" ? "Appt. Booked (no call)" : "Phone Sale (no call)",
+      dispatcher: "",
+      activityTime: "",
+      durationFmt: "",
+      pipeline: pipeline.pipelineName || "",
+      stage: pipeline.stageName || "",
+      booked: true,
+      _sortTs: 0,
+    });
+  }
+
+  out.sort((a, b) => b._sortTs - a._sortTs);
+
+  // Aggregate stats for the Summary tab.
+  const bookedCount = out.filter((r) => r.booked).length;
+  const stats = {
+    total: out.length,
+    booked: bookedCount,
+    notBooked: out.length - bookedCount,
+    bookingRate: out.length > 0 ? bookedCount / out.length : 0,
+  };
+
+  return { rows: out, stats };
+}
+
+function addReactivatedLeadsTab(wb, rows, stats) {
+  const ws = wb.addWorksheet("Reactivated Leads");
+  ws.views = [{ state: "frozen", ySplit: 4 }];
+  setColumnWidths(ws, [22, 16, 8, 13, 8, 22, 18, 12, 11, 22, 22, 10]);
+  applyTitleStyle(ws.getCell("A1"));
+  ws.getCell("A1").value = `Reactivated Leads — Old contacts with activity today (${rows.length} leads, ${stats.booked} booked)`;
+  ws.getCell("A2").value = "Old lead = contact created before today. Activity = real call ≥70s, live transfer, or pipeline stage moved to a booked stage.";
+  ws.getCell("A2").font = { name: "Arial", size: 10, italic: true, color: { argb: "FF606060" } };
+
+  const headers = ["Contact", "Phone", "Source", "Created", "Age (days)", "Activity Today", "Dispatcher", "Time (ET)", "Duration", "Pipeline", "Stage", "Booked?"];
+  ws.getRow(4).values = headers;
+  applyHeaderStyle(ws.getRow(4));
+  ws.autoFilter = { from: { row: 4, column: 1 }, to: { row: 4, column: headers.length } };
+
+  rows.forEach((r, i) => {
+    const row = ws.getRow(5 + i);
+    row.values = [
+      r.name, r.phone, r.source, r.dateAdded, r.ageDays,
+      r.activity, r.dispatcher, r.activityTime, r.durationFmt,
+      r.pipeline, r.stage, r.booked ? "Yes" : "No",
+    ];
+    const fill = r.booked
+      ? COLORS.LIVE_TRANSFER
+      : (r.activity === "Live Transfer" ? COLORS.LIVE_TRANSFER : COLORS.REAL_CALL);
+    row.eachCell((cell) => {
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fill } };
+    });
+  });
+}
+
 export async function buildDailyExcel(dateStr) {
   const dayStart = DateTime.fromISO(dateStr, { zone: TZ }).startOf("day");
   const dayEnd = dayStart.endOf("day");
@@ -742,6 +891,7 @@ export async function buildDailyExcel(dateStr) {
   console.log(`[excel] searchContacts: ${newContacts.length}, getContact: ${fetched.size}, total contactMap: ${contactMap.size}, searchError: ${searchError ? JSON.stringify(searchError) : "none"}`);
   const calls = enrichCalls({ rows, dateStr, dispatcherMap, pipelineMap, contactMap });
   const { rows: newLeadRows, stats: newLeadStats } = buildNewLeads({ contactMap, calls, dateStr });
+  const { rows: reactivatedRows, stats: reactivatedStats } = buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr });
   const totals = {
     outbound: rows.filter((r) => (r.direction || "").toLowerCase() === "outbound").length,
     inbound:  rows.filter((r) => (r.direction || "").toLowerCase() === "inbound").length,
@@ -755,9 +905,10 @@ export async function buildDailyExcel(dateStr) {
   wb.lastModifiedBy = "Local AC Reports Bot";
   wb.created = new Date();
   wb.modified = new Date();
-  addSummaryTab(wb, { dateStr, totals, buckets, uniqueContacts, newLeadStats });
+  addSummaryTab(wb, { dateStr, totals, buckets, uniqueContacts, newLeadStats, reactivatedStats });
   addAllCallsTab(wb, calls);
   addNewLeadsTab(wb, newLeadRows);
+  addReactivatedLeadsTab(wb, reactivatedRows, reactivatedStats);
   addByDispatcherTab(wb, calls);
   addByPipelineTab(wb, calls);
   addByPipelineStageTab(wb, calls);
