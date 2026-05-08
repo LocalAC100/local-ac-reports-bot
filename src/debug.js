@@ -631,8 +631,10 @@ export function buildDebugRouter() {
         const oldest = batch[batch.length - 1].lastMessageDate;
         if (!oldest) break;
         const oldestMs = new Date(oldest).getTime();
-        if (oldestMs < fromMs) break;
-        if (added === 0) break;
+        if (added === 0) break; // dedupe stuck → bail
+        // Stop if oldest is more than 1 day BEFORE our window — we can't
+        // possibly find more relevant convs going further back.
+        if (oldestMs < fromMs - 86400000) break;
         const next = oldestMs - 1;
         if (next >= cursor) break;
         cursor = next;
@@ -652,7 +654,6 @@ export function buildDebugRouter() {
           const params = {
             locationId: config.ghl.locationId,
             limit: 100,
-            type: "TYPE_CALL",
           };
           if (lastMessageId) params.lastMessageId = lastMessageId;
           let r;
@@ -671,6 +672,13 @@ export function buildDebugRouter() {
             if (!m.dateAdded) continue;
             const dt = new Date(m.dateAdded).getTime();
             if (dt < fromMs || dt > toMs) continue;
+
+            // Only count CALL messages. type=1 numeric, or messageType=TYPE_CALL.
+            const isCallMsg =
+              m.type === 1 ||
+              m.messageType === "TYPE_CALL" ||
+              /CALL/i.test(String(m.type || ""));
+            if (!isCallMsg) continue;
 
             const direction = String(m.direction || "").toLowerCase();
             const duration = Number(
