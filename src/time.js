@@ -21,11 +21,19 @@ export function morningWindow(when = now()) {
 }
 
 // Evening report covers midnight ET → 7:30 PM ET (today).
+//
+// IMPORTANT (May 7 2026): when the report is triggered MANUALLY after 7:30 PM
+// (which is what happens any time we run `/admin/run/evening-report` to debug
+// or backfill), we extend `to` to the current time. Otherwise every call,
+// SMS, booking, and entire conversation whose lastMessageDate falls between
+// 7:30 PM and now is silently dropped — that's how we ended up reporting
+// 273 outbound calls when GHL's API actually had 388 today.
 export function eveningWindow(when = now()) {
   const day = when.startOf("day");
+  const cronEnd = day.set({ hour: 19, minute: 30, second: 0 });
   return {
     from: day,
-    to: day.set({ hour: 19, minute: 30, second: 0 }),
+    to: when > cronEnd ? when : cronEnd,
   };
 }
 
