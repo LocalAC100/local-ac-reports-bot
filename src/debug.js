@@ -171,5 +171,177 @@ export function buildDebugRouter() {
     }
   });
 
+  // /admin/debug/dispatcher-calls — count outbound calls/SMS for each
+  // dispatcher today, computed the SAME way reports.js does. Used to verify
+  // the headline numbers in the evening report against raw GHL data.
+  // Returns per-dispatcher breakdown + totals matching report's section 2.
+  router.get("/admin/debug/dispatcher-calls", requireAdmin, async (req, res) => {
+    try {
+      const { DateTime } = await import("luxon");
+      const { EMPLOYEES, isDispatcher } = await import("./employees.js");
+
+      const TZ = "America/New_York";
+      const dateStr =
+        req.query.date || DateTime.now().setZone(TZ).toFormat("yyyy-LL-dd");
+      const dayStart = DateTime.fromISO(dateStr, { zone: TZ }).startOf("day");
+      const dayEnd = dayStart.endOf("day");
+      const fromIso = dayStart.toUTC().toISO();
+      const toIso = dayEnd.toUTC().toISO();
+
+      const REPORTED_PIPELINE_NAMES = ["Orlando Pipeline", "Tampa Pipeline"];
+
+      const [pipelines, allConversations, ghlUsers] = await Promise.all([
+        ghl.listPipelines().catch(() => []),
+        ghl.listActiveConversations({ from: fromIso, to: toIso }).catch(() => []),
+        ghl.listUsers().catch(() => []),
+      ]);
+
+      const reportedPipelines = pipelines.filter((p) =>
+        REPORTED_PIPELINE_NAMES.includes(p.name)
+      );
+
+      // Build contactStage map (same as reports.js)
+      const contactStage = new Map();
+      for (const p of reportedPipelines) {
+        for (const status of ["open", "won", "lost", "abandoned"]) {
+          const opps = await ghl
+            .searchOpportunities({ pipelineId: p.id, status, limit: 100 })
+            .catch(() => []);
+          for (const o of opps) {
+            const cid = o.contactId || o.contact?.id;
+            if (cid) contactStage.set(cid, { pipeline: p.name });
+          }
+        }
+      }
+
+      const orlandoConvs = allConversations.filter(
+        (c) => c.contactId && contactStage.has(c.contactId)
+      );
+
+      const dispatchers = EMPLOYEES.filter(isDispatcher);
+      const ghlByEmail = new Map(
+        ghlUsers.map((u) => [(u.email || "").toLowerCase(), u])
+      );
+      const byDispatcher = {};
+      for (const e of dispatchers) {
+        const ghlUser = ghlByEmail.get(
+          (e.ghlEmail || e.hubstaffEmail || "").toLowerCase()
+        );
+        byDispatcher[e.name] = {
+          name: e.name,
+          ghlUserId: ghlUser?.id || null,
+          ghlEmail: e.ghlEmail,
+          real: 0,
+          voicemail: 0,
+          attempt: 0,
+          sms: 0,
+          unknownUserCalls: 0, // calls with no matching dispatcher
+        };
+      }
+      // Sentinel for unmatched
+      byDispatcher.__unknown = { name: "(unknown)", real: 0, voicemail: 0, attempt: 0, sms: 0 };
+
+      let totalOutboundCalls = 0;
+      let totalOutboundSms = 0;
+      let convsWalked = 0;
+      const sampleEvents = [];
+
+      for (const conv of orlandoConvs) {
+        const msgs = await ghl
+          .getConversationMessages(conv.id)
+          .catch(() => []);
+        convsWalked++;
+        for (const m of msgs) {
+          const dir = String(m.direction ?? "").toLowerCase();
+          if (dir !== "outbound") continue;
+          const dt = DateTime.fromISO(
+            m.dateAdded || m.createdAt || ""
+          ).setZone(TZ);
+          if (!dt.isValid) continue;
+          if (dt < dayStart || dt > dayEnd) continue;
+
+          const userId = m.userId || m.user || m.createdBy;
+          const isCall =
+            m.type === 1 ||
+            m.messageType === "TYPE_CALL" ||
+            /CALL/i.test(String(m.type ?? ""));
+          const isSms = m.type === 2 || m.messageType === "TYPE_SMS";
+
+          let target = null;
+          for (const k of Object.keys(byDispatcher)) {
+            if (byDispatcher[k].ghlUserId === userId) {
+              target = byDispatcher[k];
+              break;
+            }
+          }
+
+          if (isCall) {
+            totalOutboundCalls++;
+            const dur = Number(
+              m.meta?.call?.duration ?? m.callDuration ?? m.duration ?? 0
+            );
+            const status = String(m.meta?.call?.status || "").toLowerCase();
+            let bk = "attempt";
+            if (status === "voicemail" || (dur >= 5 && dur < 30)) bk = "voicemail";
+            else if (dur >= 30) bk = "real";
+
+            if (target) {
+              target[bk] += 1;
+            } else {
+              byDispatcher.__unknown[bk] += 1;
+              byDispatcher.__unknown.unknownUserCalls =
+                (byDispatcher.__unknown.unknownUserCalls || 0) + 1;
+            }
+            if (sampleEvents.length < 8) {
+              sampleEvents.push({
+                time: dt.toFormat("h:mm a"),
+                kind: bk,
+                durSec: dur,
+                status,
+                userId,
+                dispatcher: target?.name || "(unknown)",
+                contactId: conv.contactId,
+              });
+            }
+          } else if (isSms) {
+            if (!userId) continue; // skip workflow auto-texts
+            totalOutboundSms++;
+            if (target) target.sms += 1;
+            else byDispatcher.__unknown.sms += 1;
+          }
+        }
+      }
+
+      const totals = { real: 0, voicemail: 0, attempt: 0, sms: 0 };
+      for (const k of Object.keys(byDispatcher)) {
+        const d = byDispatcher[k];
+        totals.real += d.real;
+        totals.voicemail += d.voicemail;
+        totals.attempt += d.attempt;
+        totals.sms += d.sms;
+      }
+
+      res.json({
+        ok: true,
+        date: dateStr,
+        timezone: TZ,
+        windowUTC: { from: fromIso, to: toIso },
+        conversations: {
+          totalActive: allConversations.length,
+          orlandoFiltered: orlandoConvs.length,
+          walked: convsWalked,
+        },
+        totals,
+        totalOutboundCallsRaw: totalOutboundCalls,
+        totalOutboundSmsRaw: totalOutboundSms,
+        byDispatcher,
+        sampleEvents,
+        reportedPipelines: reportedPipelines.map((p) => p.name),
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e?.message, stack: e?.stack });
+    }
+  });
+
   return router;
 }
