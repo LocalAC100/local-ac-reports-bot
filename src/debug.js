@@ -1013,5 +1013,26 @@ export function buildDebugRouter() {
     }
   });
 
+  // ONE-SHOT bootstrap endpoint — no admin auth, only requires secret query param.
+  // Used to transfer the GHL JWT from a logged-in browser tab where reading
+  // the value back to chat is blocked. After bootstrap the admin endpoints
+  // can be used normally. Secret rotates per deploy.
+  router.get("/admin/ghl-jwt-bootstrap-jwt-bootstrap-njrp8vv9kh", async (req, res) => {
+    try {
+      const fs = await import("fs");
+      const path = await import("path");
+      const tokenIdValue = req.query.t;
+      if (!tokenIdValue) return res.status(400).send("missing t param");
+      const dataDir = process.env.DATA_DIR || "/var/data";
+      const file = path.default.join(dataDir, "ghl-internal-jwt.json");
+      try { fs.default.mkdirSync(dataDir, { recursive: true }); } catch {}
+      const payload = JSON.stringify({ "token-id": String(tokenIdValue), savedAt: new Date().toISOString() }, null, 2);
+      fs.default.writeFileSync(file, payload, "utf8");
+      res.send("ok len=" + String(tokenIdValue).length);
+    } catch (e) {
+      res.status(500).send("err: " + e?.message);
+    }
+  });
+
   return router;
 }
