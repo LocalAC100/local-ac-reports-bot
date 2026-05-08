@@ -121,9 +121,7 @@ export async function backfillDate(dateStr) {
       classifyCall({
         status: r.callStatus,
         duration: r.duration,
-        transferred: r.transferred,
-        isTransferred: r.isTransferred,
-        dispositions: r.dispositions,
+        participants: r.participants,
       })
     ]++;
   }
@@ -162,6 +160,49 @@ export function buildFirehoseBackfillRouter() {
           error: e?.message,
           stack: e?.stack,
         });
+      }
+    }
+  );
+
+  // GET /admin/debug/bucket-counts?date=YYYY-MM-DD
+  // Re-classify EXISTING calls table rows under the current classifyCall()
+  // rule. No JWT, no HighLevel API call — pure DB query. This is how we
+  // verify Change 1 (transfer detection) and Change 2 (70s threshold) — push
+  // the new code, deploy, then hit this endpoint and the buckets recompute
+  // from the raw_event JSON we already stored on backfill.
+  router.get(
+    "/admin/debug/bucket-counts",
+    requireAdmin,
+    async (req, res) => {
+      try {
+        const dateStr =
+          req.query.date || DateTime.now().setZone(TZ).toFormat("yyyy-LL-dd");
+        const dayStart = DateTime.fromISO(dateStr, { zone: TZ }).startOf("day");
+        const dayEnd = dayStart.endOf("day");
+        const fromIso = dayStart.toUTC().toISO();
+        const toIso = dayEnd.toUTC().toISO();
+        const buckets = Calls.bucketCounts(fromIso, toIso);
+        const totalOut = Calls.countInWindow(fromIso, toIso, "outbound");
+        const totalIn = Calls.countInWindow(fromIso, toIso, "inbound");
+        const byUser = Calls.byUserCount(fromIso, toIso, "outbound");
+        res.json({
+          ok: true,
+          date: dateStr,
+          window: { fromIso, toIso },
+          totals: {
+            outbound: totalOut,
+            inbound: totalIn,
+            both: totalOut + totalIn,
+          },
+          buckets,
+          byUserOutbound: Object.fromEntries(
+            byUser.map((r) => [r.user_id || "(none)", r.n])
+          ),
+        });
+      } catch (e) {
+        res
+          .status(500)
+          .json({ ok: false, error: e?.message, stack: e?.stack });
       }
     }
   );
