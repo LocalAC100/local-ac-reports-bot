@@ -10,14 +10,19 @@ import * as ghl from "./ghl.js";
 import { analyzeScreenshots } from "./screenshots.js";
 import { sendMail } from "./mailer.js";
 import { renderEmail, renderHubstaffSection, renderDispatcherSection } from "./template.js";
-import { Reports } from "./db.js";
+import { Reports, Calls, classifyCall, isLiveTransfer } from "./db.js";
 import { DateTime } from "luxon";
 
-// Three buckets for outbound calls (Alex's spec):
-//   real     >= 30s — actual conversation with the lead
-//   voicemail 5..30s OR meta.call.status === "voicemail" — left a message
+// Three buckets for outbound calls (legacy template shape):
+//   real     >= 70s — actual conversation with the lead
+//   voicemail 5..70s OR meta.call.status === "voicemail" — left a message
 //   attempt  < 5s OR status in {failed, no-answer, busy, canceled} — didn't connect
-const REAL_CALL_THRESHOLD_SEC = 30;
+//
+// May 8 2026: threshold raised from 30s → 70s per Alex. Short engagements
+// under 70s get bucketed as no-answer/voicemail rather than real calls.
+// Live Transfers (≥70s + transferred) are tracked SEPARATELY in dispatcher.liveTransfers
+// rather than being lumped into "real" — see classifyCall() in db.js.
+const REAL_CALL_THRESHOLD_SEC = 70;
 const VOICEMAIL_MIN_SEC = 5;
 
 // Pipeline scope: dispatcher report only counts calls into leads that have an
@@ -514,7 +519,11 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
     return list;
   }
 
-  // Walk every active conversation: count outbound calls (split by bucket) and outbound SMS.
+  // Walk every active conversation: count outbound SMS only. Calls are now
+  // counted from the local `calls` table (populated by the GHL webhook +
+  // firehose backfill) — see the Calls.listInWindow loop below. This swap
+  // fixed the "100-conversation pagination cap" undercount that made the
+  // old report show 273 outbound calls when GHL's API actually had 388.
   for (const conv of conversations) {
     const leadAge = leadAgeBucket(conv.dateAdded);
     const msgs = await ghl.getConversationMessages(conv.id).catch(() => []);
@@ -532,33 +541,9 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
       // Restrict to the report window
       if (dt < from || dt > to) continue;
 
-      if (isCallMessage(m)) {
-        const dur = Number(
-          m.meta?.call?.duration ?? m.callDuration ?? m.duration ?? 0
-        );
-        const status = m.meta?.call?.status;
-        const bk = bucketCall(dur, status);
-        dispatcher[bk] += 1;
-        if (bk === "real") dispatcher.callDurationsSec.push(dur);
-        recordEvent(dispatcher, dt, bk);
-        if (!dispatcher.firstCallAt || dt < dispatcher.firstCallAt)
-          dispatcher.firstCallAt = dt;
-        if (!dispatcher.lastCallAt || dt > dispatcher.lastCallAt)
-          dispatcher.lastCallAt = dt;
-        // Per-stage tally — use the contact's stage at report time
-        const stageInfo = contactStage.get(conv.contactId);
-        if (stageInfo) {
-          const sn = stageInfo.stage;
-          const slot = dispatcher.byStage.get(sn) || { real: 0, voicemail: 0, attempt: 0 };
-          slot[bk] += 1;
-          dispatcher.byStage.set(sn, slot);
-        }
-        // Track unique contact for per-dispatcher metrics
-        if (conv.contactId) dispatcher.uniqueContacts.add(conv.contactId);
-        // Lead-age bucket — counted on every call (so multiple calls to the
-        // same contact contribute multiple times — matches "calls by lead age")
-        if (leadAge) dispatcher.leadAge[leadAge] += 1;
-      } else if (m.type === 2 || m.messageType === "TYPE_SMS") {
+      // Calls used to be counted here from messages — now sourced from the
+      // calls table below. This branch only handles SMS now.
+      if (m.type === 2 || m.messageType === "TYPE_SMS") {
         // Skip workflow-bot auto-texts (no userId) — only count manual sends
         if (!userId) continue;
         dispatcher.sms += 1;
@@ -615,11 +600,86 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
     }
   }
 
+  // ---------- Calls from local DB (replaces /conversations/search call walk) ----------
+  // Source-of-truth for all HL native calls is the `calls` table, populated by
+  // the GHL webhook (real-time) + nightly firehose-backfill (reconcile). This
+  // is unfiltered — every outbound call from any dispatcher counts. The old
+  // /conversations/search path silently capped at 100 conversations and
+  // undercounted by ~30% (e.g. May 7: API said 273, firehose says 545).
+  //
+  // Bucket mapping (5-bucket → 3-bucket template shape):
+  //   live_transfer  → dispatcher.liveTransfers (separate field, not real)
+  //   real_call      → dispatcher.real
+  //   no_answer      → dispatcher.attempt
+  //   failed         → dispatcher.attempt
+  //   ringing        → dispatcher.attempt
+  //   (voicemail bucket dropped — under 70s gets bucketed as no_answer)
+  const callsFromDb = Calls.listInWindow(fromIso, toIso, 5000);
+  for (const c of callsFromDb) {
+    if (c.direction !== "outbound") continue;
+    const dispatcher = [...byDispatcher.values()].find(
+      (d) => d.ghlUserId === c.user_id
+    );
+    if (!dispatcher) continue;
+    const dt = DateTime.fromISO(c.date_added).setZone(TZ);
+    if (dt < from || dt > to) continue;
+
+    let raw = {};
+    try {
+      if (c.raw_event) raw = JSON.parse(c.raw_event);
+    } catch {}
+    const bucket = classifyCall({
+      status: c.status,
+      duration: c.duration,
+      participants: raw.participants,
+    });
+
+    let templateBucket = null;
+    if (bucket === "live_transfer") {
+      // Live transfers are tracked separately, NOT in real/voicemail/attempt
+      // (the bookings section initializes liveTransfers = 0 — increment safely
+      // even before that init by ensuring the field exists)
+      dispatcher.liveTransfers = (dispatcher.liveTransfers || 0) + 1;
+    } else if (bucket === "real_call") {
+      dispatcher.real += 1;
+      templateBucket = "real";
+      if (c.duration) dispatcher.callDurationsSec.push(c.duration);
+    } else {
+      // no_answer / failed / ringing all roll up into "attempt"
+      dispatcher.attempt += 1;
+      templateBucket = "attempt";
+    }
+
+    if (templateBucket) recordEvent(dispatcher, dt, templateBucket);
+    if (!dispatcher.firstCallAt || dt < dispatcher.firstCallAt)
+      dispatcher.firstCallAt = dt;
+    if (!dispatcher.lastCallAt || dt > dispatcher.lastCallAt)
+      dispatcher.lastCallAt = dt;
+
+    // Per-stage tally (Orlando Pipeline) — only when the contact is known
+    // and in our pipeline. Live transfers don't count toward the per-stage
+    // breakdown of real/voicemail/attempt because they're a fourth thing.
+    const stageInfo = c.contact_id ? contactStage.get(c.contact_id) : null;
+    if (stageInfo && templateBucket) {
+      const sn = stageInfo.stage;
+      const slot = dispatcher.byStage.get(sn) || {
+        real: 0,
+        voicemail: 0,
+        attempt: 0,
+      };
+      slot[templateBucket] += 1;
+      dispatcher.byStage.set(sn, slot);
+    }
+    if (c.contact_id) dispatcher.uniqueContacts.add(c.contact_id);
+  }
+
   // Initialize per-dispatcher booking counters (new shape).
+  // liveTransfers may have been incremented above by the calls walk; only
+  // initialize fields that don't already exist so we don't clobber it.
   for (const d of byDispatcher.values()) {
     d.physBookings = 0; // appointment booked, physical visit
-    d.phBookings = 0;   // over phone sale (booked phone appointment)
-    d.liveTransfers = 0; // transferred to phone sales rep in real-time
+    d.phBookings = 0; // over phone sale (booked phone appointment)
+    if (typeof d.liveTransfers !== "number") d.liveTransfers = 0;
   }
 
   // Appointments booked / Over Phone Sale / Live transfer
