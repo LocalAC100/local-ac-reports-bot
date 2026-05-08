@@ -14,8 +14,17 @@
 //     → Pulls both directions for the given date (default: today ET),
 //       upserts into calls table, returns per-direction counts + 5-bucket
 //       breakdown + per-user outbound rollup.
+//   GET /admin/debug/bucket-counts?date=YYYY-MM-DD&s=<secret>
+//     → Re-classifies existing rows under current classifyCall() rule.
+//   GET /admin/debug/run-evening-report?date=YYYY-MM-DD&s=<secret>
+//   GET /admin/debug/run-morning-report?date=YYYY-MM-DD&s=<secret>
+//     → Triggers the cron orchestrators for an arbitrary date.
+//   GET /admin/debug/build-excel?date=YYYY-MM-DD&s=<secret>&send=1
+//     → Builds the daily Excel deliverable. With send=1, emails it to the
+//       configured recipient. Without, streams the .xlsx for download.
 //
 // Mounted in server.js: app.use(buildFirehoseBackfillRouter()).
+
 import express from "express";
 import axios from "axios";
 import fs from "fs";
@@ -25,6 +34,8 @@ import { requireAdmin } from "./auth.js";
 import { config } from "./config.js";
 import { Calls, classifyCall } from "./db.js";
 import { runMorningReport, runEveningReport } from "./reports.js";
+import { buildDailyExcel } from "./excel-report.js";
+import { sendMail } from "./mailer.js";
 
 const TZ = "America/New_York";
 
@@ -93,6 +104,7 @@ export async function backfillDate(dateStr) {
     fetchFirehose({ date: dateStr, direction: "outbound", tokenId }),
     fetchFirehose({ date: dateStr, direction: "inbound", tokenId }),
   ]);
+
   const allRows = [...outRows, ...inRows];
 
   Calls.bulkUpsert(
@@ -152,7 +164,8 @@ export function buildFirehoseBackfillRouter() {
     async (req, res) => {
       try {
         const dateStr =
-          req.query.date || DateTime.now().setZone(TZ).toFormat("yyyy-LL-dd");
+          req.query.date ||
+          DateTime.now().setZone(TZ).toFormat("yyyy-LL-dd");
         const result = await backfillDate(dateStr);
         res.json({ ok: true, ...result });
       } catch (e) {
@@ -165,21 +178,9 @@ export function buildFirehoseBackfillRouter() {
     }
   );
 
-  // GET /admin/debug/bucket-counts?date=YYYY-MM-DD&s=<JWT_BOOTSTRAP_SECRET>
-  // Re-classify EXISTING calls table rows under the current classifyCall()
-  // rule. No JWT, no HighLevel API call — pure DB query. This is how we
-  // verify Change 1 (transfer detection) and Change 2 (70s threshold) — push
-  // the new code, deploy, then hit this endpoint and the buckets recompute
-  // from the raw_event JSON we already stored on backfill.
-  //
-  // Auth: secret-based bypass via ?s=<secret> using the same fixed secret as
-  // the jwt-bootstrap endpoint (process.env.JWT_BOOTSTRAP_SECRET, default
-  // "lac-jwt-2026-bootstrap-axabramov"). Read-only endpoint with no PII so
-  // the secret-only gate is sufficient. Sessions get wiped on every Render
-  // redeploy (in-memory store), so requireAdmin is too brittle for verifying
-  // changes that themselves require deploying.
   const VERIFY_SECRET =
     process.env.JWT_BOOTSTRAP_SECRET || "lac-jwt-2026-bootstrap-axabramov";
+
   router.get(
     "/admin/debug/bucket-counts",
     (req, res, next) => {
@@ -189,15 +190,18 @@ export function buildFirehoseBackfillRouter() {
     async (req, res) => {
       try {
         const dateStr =
-          req.query.date || DateTime.now().setZone(TZ).toFormat("yyyy-LL-dd");
+          req.query.date ||
+          DateTime.now().setZone(TZ).toFormat("yyyy-LL-dd");
         const dayStart = DateTime.fromISO(dateStr, { zone: TZ }).startOf("day");
         const dayEnd = dayStart.endOf("day");
         const fromIso = dayStart.toUTC().toISO();
         const toIso = dayEnd.toUTC().toISO();
+
         const buckets = Calls.bucketCounts(fromIso, toIso);
         const totalOut = Calls.countInWindow(fromIso, toIso, "outbound");
         const totalIn = Calls.countInWindow(fromIso, toIso, "inbound");
         const byUser = Calls.byUserCount(fromIso, toIso, "outbound");
+
         res.json({
           ok: true,
           date: dateStr,
@@ -220,17 +224,11 @@ export function buildFirehoseBackfillRouter() {
     }
   );
 
-  // GET /admin/debug/run-evening-report?date=YYYY-MM-DD&s=<secret>
-  // GET /admin/debug/run-morning-report?date=YYYY-MM-DD&s=<secret>
-  // Triggers the same orchestrators the cron jobs call, but lets us specify
-  // a past date via dateOverride. Same secret-bypass auth as bucket-counts —
-  // sessions get wiped on every Render redeploy so requireAdmin is too brittle
-  // here (and the cron itself runs without auth, so this is closer to how
-  // the real automated path works).
   function secretBypass(req, res, next) {
     if (req.query.s === VERIFY_SECRET) return next();
     return requireAdmin(req, res, next);
   }
+
   router.get(
     "/admin/debug/run-evening-report",
     secretBypass,
@@ -255,6 +253,7 @@ export function buildFirehoseBackfillRouter() {
       }
     }
   );
+
   router.get(
     "/admin/debug/run-morning-report",
     secretBypass,
@@ -273,6 +272,62 @@ export function buildFirehoseBackfillRouter() {
         res.status(500).json({
           ok: false,
           kind: "morning-report",
+          error: e?.message,
+          stack: e?.stack,
+        });
+      }
+    }
+  );
+
+  // GET /admin/debug/build-excel?date=YYYY-MM-DD&s=<secret>&send=1
+  // Builds the daily Excel deliverable. With send=1, emails it to the
+  // configured recipient. Without, streams the .xlsx for download.
+  router.get(
+    "/admin/debug/build-excel",
+    secretBypass,
+    async (req, res) => {
+      const t0 = Date.now();
+      try {
+        const dateStr =
+          req.query.date ||
+          DateTime.now().setZone(TZ).toFormat("yyyy-LL-dd");
+        const send = req.query.send === "1" || req.query.send === "true";
+
+        const { filename, buffer } = await buildDailyExcel(dateStr);
+
+        if (send) {
+          const subject = `Local AC — Daily Report (${dateStr}) [Excel attached]`;
+          const html = `
+            <p>Local AC daily call activity for <b>${dateStr}</b> — see attached spreadsheet for the full breakdown.</p>
+            <p>Tabs: Summary, All Calls, New Leads, By Dispatcher, By Pipeline, By Pipeline Stage, By Lead Age, Hourly, By Outbound #, Hour x Dispatcher, Notes.</p>
+            <p style="color:#666;font-size:12px">This is a dryrun email triggered via /admin/debug/build-excel. Once Alex confirms the format, this attachment will be added to the regular morning + evening report emails.</p>
+          `;
+          await sendMail({
+            subject,
+            html,
+            attachments: [{ filename, content: Buffer.from(buffer) }],
+          });
+          res.json({
+            ok: true,
+            sent: true,
+            filename,
+            sizeBytes: buffer.byteLength || buffer.length,
+            sentTo: config.recipient,
+            durationMs: Date.now() - t0,
+          });
+        } else {
+          res.set({
+            "Content-Type":
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "Content-Disposition": `attachment; filename="${filename}"`,
+            "Content-Length": String(buffer.byteLength || buffer.length),
+          });
+          res.send(Buffer.from(buffer));
+        }
+      } catch (e) {
+        console.error("[build-excel] failed", e);
+        res.status(500).json({
+          ok: false,
           error: e?.message,
           stack: e?.stack,
         });
