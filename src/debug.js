@@ -343,5 +343,183 @@ export function buildDebugRouter() {
     }
   });
 
+  // /admin/debug/bookings — list today's bookings two ways:
+  //   1. GHL calendar appointments (the same source the other chat used)
+  //   2. Opportunities currently in Appt. Booked / Over Phone Sale / Live
+  //      Transfer stages with updatedAt today (proxy for "moved today")
+  // Returns both lists with contact names + times so we can eyeball-verify.
+  router.get("/admin/debug/bookings", requireAdmin, async (req, res) => {
+    try {
+      const { DateTime } = await import("luxon");
+      const axios = (await import("axios")).default;
+      const { config } = await import("./config.js");
+
+      const TZ = "America/New_York";
+      const dateStr =
+        req.query.date || DateTime.now().setZone(TZ).toFormat("yyyy-LL-dd");
+      const dayStart = DateTime.fromISO(dateStr, { zone: TZ }).startOf("day");
+      const dayEnd = dayStart.endOf("day");
+      const fromMs = dayStart.toMillis();
+      const toMs = dayEnd.toMillis();
+      const fromIso = dayStart.toUTC().toISO();
+      const toIso = dayEnd.toUTC().toISO();
+
+      const http = axios.create({
+        baseURL: "https://services.leadconnectorhq.com",
+        timeout: 30000,
+        headers: {
+          Authorization: `Bearer ${config.ghl.apiKey}`,
+          Version: "2021-07-28",
+          Accept: "application/json",
+        },
+      });
+
+      // 1) List all calendars (so we can show what calendars exist)
+      const calsResp = await http
+        .get("/calendars/", {
+          params: { locationId: config.ghl.locationId },
+        })
+        .catch((e) => ({ data: { error: e?.response?.data || e?.message } }));
+      const calendars = calsResp.data?.calendars || [];
+
+      // 2) Pull appointments for the day (the same data /calendars/events
+      //    returns to the other chat). Try the two endpoints GHL exposes:
+      //    a) /calendars/events/appointments?startTime=...&endTime=...
+      //    b) /calendars/events?calendarId=...&startTime=...&endTime=...
+      const apptResp = await http
+        .get("/calendars/events/appointments", {
+          params: {
+            locationId: config.ghl.locationId,
+            startTime: fromMs,
+            endTime: toMs,
+          },
+        })
+        .catch((e) => ({ data: { error: e?.response?.data || e?.message } }));
+      const appointments = apptResp.data?.events || [];
+
+      // For each appointment, try to pull the contact name
+      async function fetchContact(cid) {
+        if (!cid) return null;
+        try {
+          const r = await http.get(`/contacts/${cid}`, {
+            params: { locationId: config.ghl.locationId },
+          });
+          const c = r.data?.contact;
+          return {
+            name: `${c?.firstName ?? ""} ${c?.lastName ?? ""}`.trim() ||
+              c?.contactName || c?.email || `(unnamed:${cid})`,
+            phone: c?.phone || null,
+          };
+        } catch (e) {
+          return { name: `(lookup failed:${cid})`, phone: null };
+        }
+      }
+
+      const apptDetails = [];
+      for (const a of appointments) {
+        const cal = calendars.find((c) => c.id === a.calendarId);
+        const contact = await fetchContact(a.contactId);
+        const startEt = a.startTime
+          ? DateTime.fromISO(a.startTime).setZone(TZ).toFormat("h:mm a")
+          : "(no start)";
+        apptDetails.push({
+          appointmentId: a.id,
+          calendarId: a.calendarId,
+          calendarName: cal?.name || "(unknown calendar)",
+          startTime: startEt,
+          startTimeIso: a.startTime,
+          contactId: a.contactId,
+          contactName: contact?.name,
+          contactPhone: contact?.phone,
+          assignedUserId: a.assignedUserId,
+          status: a.appointmentStatus || a.status,
+          title: a.title,
+        });
+      }
+
+      // 3) Opportunities in booking stages, updatedAt today
+      //    Pull all pipelines (not just Orlando+Tampa) so we see everything.
+      const pipResp = await http
+        .get("/opportunities/pipelines", {
+          params: { locationId: config.ghl.locationId },
+        })
+        .catch((e) => ({ data: { error: e?.response?.data || e?.message } }));
+      const pipelines = pipResp.data?.pipelines || [];
+
+      const BOOKING_STAGE_KEYWORDS = [
+        "appointment booked",
+        "appt. booked",
+        "appt booked",
+        "over phone sale",
+        "over phone booked",
+        "phone sale",
+        "live transfer",
+      ];
+      const stageMovedBookings = [];
+      for (const p of pipelines) {
+        const opps = await http
+          .get("/opportunities/search", {
+            params: {
+              location_id: config.ghl.locationId,
+              pipeline_id: p.id,
+              limit: 100,
+            },
+          })
+          .then((r) => r.data?.opportunities || [])
+          .catch(() => []);
+        for (const o of opps) {
+          const stage = String(o.pipelineStageName || "").toLowerCase();
+          const matchedKeyword = BOOKING_STAGE_KEYWORDS.find((k) =>
+            stage.includes(k)
+          );
+          if (!matchedKeyword) continue;
+          const updated = o.updatedAt ? new Date(o.updatedAt).getTime() : 0;
+          if (updated < fromMs || updated > toMs) continue;
+          stageMovedBookings.push({
+            opportunityId: o.id,
+            pipeline: p.name,
+            stage: o.pipelineStageName,
+            contactId: o.contactId,
+            contactName:
+              o.contact?.name ||
+              o.name ||
+              `${o.contact?.firstName || ""} ${o.contact?.lastName || ""}`.trim() ||
+              "(unnamed)",
+            assignedUserId: o.assignedTo,
+            updatedAt: o.updatedAt,
+            updatedAtEt: DateTime.fromISO(o.updatedAt)
+              .setZone(TZ)
+              .toFormat("h:mm a"),
+          });
+        }
+      }
+
+      res.json({
+        ok: true,
+        date: dateStr,
+        timezone: TZ,
+        calendarsCount: calendars.length,
+        calendars: calendars.map((c) => ({
+          id: c.id,
+          name: c.name,
+          calendarType: c.calendarType,
+          isActive: c.isActive,
+        })),
+        calendarAppointments: {
+          count: apptDetails.length,
+          rows: apptDetails,
+          rawError: apptResp.data?.error || null,
+        },
+        opportunityStageMoves: {
+          count: stageMovedBookings.length,
+          rows: stageMovedBookings,
+        },
+        pipelines: pipelines.map((p) => p.name),
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e?.message, stack: e?.stack });
+    }
+  });
+
   return router;
 }
