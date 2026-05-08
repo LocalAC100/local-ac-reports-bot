@@ -8,7 +8,7 @@ import axios from "axios";
 import { config } from "./config.js";
 
 const BASE = "https://services.leadconnectorhq.com";
-const API_VERSION = "2021-07-28"; // GHL's required Version header
+const API_VERSION = "2021-07-28";
 
 const http = axios.create({
   baseURL: BASE,
@@ -21,7 +21,6 @@ const http = axios.create({
 });
 
 // ---------- Pipelines / Opportunities ----------
-
 export async function listPipelines() {
   const r = await http.get("/opportunities/pipelines", {
     params: { locationId: config.ghl.locationId },
@@ -41,17 +40,22 @@ export async function searchOpportunities({ pipelineId, status, limit = 100 }) {
 }
 
 // ---------- Contacts (leads) ----------
-
+//
+// FIXED 2026-05-08: GHL changed the contacts/search filter operator API.
+// The valid operators are: eq, not_eq, contains, not_contains, wildcard,
+// not_wildcard, match, not_match, exists, not_exists, range, not_range,
+// contains_set, contains_not_set, gt, gte, lt, lte, nested, nested_not,
+// has_child, has_parent. The old "between" was rejected with 422.
+// Use "range" with { gte, lte } shape for date-window queries.
 export async function searchContacts({ from, to, limit = 100 }) {
-  // GHL uses "dateAdded" filter in search. ISO strings expected.
   const r = await http.post("/contacts/search", {
     locationId: config.ghl.locationId,
     pageLimit: limit,
     filters: [
       {
         field: "dateAdded",
-        operator: "between",
-        value: [from, to],
+        operator: "range",
+        value: { gte: from, lte: to },
       },
     ],
   });
@@ -66,20 +70,7 @@ export async function getContact(contactId) {
 }
 
 // ---------- Conversations & Calls ----------
-// Calls in GHL are stored as messages of type CALL inside conversations.
-
 export async function searchConversations({ from, to, limit = 100 }) {
-  // NOTE: do NOT filter by lastMessageDirection here. The GHL filter only returns
-  // conversations whose MOST RECENT message is outbound, which silently drops any
-  // conversation where the lead replied last (very common). For both reports and
-  // alerts we need the full conversation set in the window.
-  //
-  // Important: tested empirically May 6 2026 — startDate/endDate parameters here
-  // filter on conversation CREATION date, not last_message_date. So passing
-  // today's window only returned 2 conversations (the 2 leads CREATED today),
-  // missing 69 other conversations that had activity today from older leads.
-  // Use listActiveConversations() instead for "what was worked on today".
-  // Keeping this single-call signature for callers that just want the bare search.
   const r = await http.get("/conversations/search", {
     params: {
       locationId: config.ghl.locationId,
@@ -91,17 +82,13 @@ export async function searchConversations({ from, to, limit = 100 }) {
   return r.data?.conversations ?? [];
 }
 
-// Pull every conversation whose LAST MESSAGE falls in [from, to].
-// Pages through GHL by descending lastMessageDate, stopping once the batch
-// dips below the `from` floor. This is the function dispatcher reports + the
-// per-contact alert lookup should use — it surfaces conversations from older
-// leads that had activity today, not just brand-new leads.
 export async function listActiveConversations({ from, to, maxPages = 10 }) {
   const fromMs = new Date(from).getTime();
   const toMs = new Date(to).getTime();
   let cursor = toMs + 1;
-  const seen = new Set(); // dedupe by conversation id across pages
+  const seen = new Set();
   const all = [];
+
   for (let i = 0; i < maxPages; i++) {
     const r = await http.get("/conversations/search", {
       params: {
@@ -123,29 +110,18 @@ export async function listActiveConversations({ from, to, maxPages = 10 }) {
       all.push(c);
       addedThisPage++;
     }
-    // CRITICAL FIX (May 7 2026): the cursor advance was bugged. GHL's
-    // `lastMessageDate` filter is inclusive, so setting cursor = oldestInBatch
-    // re-fetched the same batch on the next iteration. With maxPages=10 every
-    // conversation got duplicated up to 10 times → that's exactly why the v6
-    // report showed "1,630 voicemails", "360 calls", "273,320 attempts" —
-    // multiples of ~10 because the same data was being walked 10 times.
-    // Two defenses now: (1) Set-based id dedupe above, (2) cursor jumps to
-    // ONE MILLISECOND BEFORE the oldest in batch so the boundary conversation
-    // doesn't repeat. Plus we break early if we made zero progress this page.
     const oldestInBatch = new Date(
       batch[batch.length - 1].lastMessageDate || 0
     ).getTime();
     if (oldestInBatch < fromMs) break;
-    if (addedThisPage === 0) break; // cursor stuck — bail to avoid infinite waste
+    if (addedThisPage === 0) break;
     const nextCursor = oldestInBatch - 1;
-    if (nextCursor >= cursor) break; // safety: cursor must move backward
+    if (nextCursor >= cursor) break;
     cursor = nextCursor;
   }
   return all;
 }
 
-// Find contacts by phone number — used by the debug endpoint to look up
-// a lead from its phone (when only the phone is known, not the contactId).
 export async function searchContactsByPhone(phone) {
   if (!phone) return [];
   const cleaned = String(phone).replace(/[^\d+]/g, "");
@@ -168,12 +144,6 @@ export async function searchContactsByPhone(phone) {
   }
 }
 
-// Look up conversations by contactId — the ONLY reliable way to find the
-// conversation for an alert lookup. Date-filtered search misses conversations
-// that existed before the lead webhook fired.
-//
-// GHL's /conversations/search supports a contactId filter directly. Returns
-// at most a couple of conversations per contact in practice.
 export async function getConversationsByContactId(contactId) {
   if (!contactId) return [];
   try {
@@ -191,16 +161,11 @@ export async function getConversationsByContactId(contactId) {
   }
 }
 
-// Notes on a specific contact. Used to detect "Vonage call" notes —
-// dispatchers add a note that starts with "Called" any time they call via
-// Vonage (since Vonage doesn't expose an API on regular accounts). Treats
-// those notes as call records for both alerts and reports.
 export async function getContactNotes(contactId) {
   try {
     const r = await http.get(`/contacts/${contactId}/notes`);
     return r.data?.notes ?? [];
   } catch (e) {
-    // Some accounts don't have notes scope — fail soft, no notes returned.
     return [];
   }
 }
@@ -213,7 +178,6 @@ export async function getConversationMessages(conversationId) {
 }
 
 // ---------- Calendar / Appointments ----------
-
 export async function listAppointments({ from, to }) {
   const r = await http.get("/calendars/events/appointments", {
     params: {
@@ -226,7 +190,6 @@ export async function listAppointments({ from, to }) {
 }
 
 // ---------- Users ----------
-
 export async function listUsers() {
   const r = await http.get("/users/", {
     params: { locationId: config.ghl.locationId },

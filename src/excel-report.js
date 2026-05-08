@@ -44,7 +44,11 @@ const OUTBOUND_LABELS = {
 // as "new leads received today". This matches Alex's manual report: he tracks
 // only ad-driven leads (Instagram + Facebook), not inbound calls or contacts
 // that landed in the CRM through other paths. Match is lowercased + trimmed.
-const AD_SOURCES = new Set(["ig", "fb", "instagram", "facebook"]);
+// "an" appears in May 7 data — confirmed via inspect-leads endpoint as an
+// ad-source variant. Combined with ig/fb (Instagram + Facebook lead-form
+// codes), this covers all paid social leads. Add new codes here as we see
+// them in the inspect-leads source-tally output.
+const AD_SOURCES = new Set(["ig", "fb", "an", "instagram", "facebook"]);
 
 function isAdSourceLead(c) {
   const s = String(c?.source || "").toLowerCase().trim();
