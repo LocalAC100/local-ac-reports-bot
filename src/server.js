@@ -9,6 +9,7 @@ import { onNewLead } from "./alerts.js";
 import { buildSessionMiddleware } from "./auth.js";
 import { buildDashboardRouter } from "./dashboard.js";
 import { buildDebugRouter } from "./debug.js";
+import { buildFirehoseBackfillRouter } from "./firehose-backfill.js";
 import { Alerts, Calls } from "./db.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -161,6 +162,7 @@ export function buildServer() {
   app.use(buildSessionMiddleware());
   app.use(buildDashboardRouter());
   app.use(buildDebugRouter());
+  app.use(buildFirehoseBackfillRouter());
 
   return app;
 }
