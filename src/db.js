@@ -210,18 +210,48 @@ export const Reports = {
     db.prepare("SELECT * FROM reports_history WHERE id = ?").get(id),
 };
 
+// Detect whether a call was live-transferred. HighLevel encodes this in the
+// `participants` field — an OBJECT (not array) keyed by participant call SID.
+// Each value has a `label` string. When the call was transferred, one of
+// the labels starts with "transfer:" followed by the destination phone number.
+//   participants: {
+//     "CA<sid1>": { label: "dialer",   joinedAt, leftAt, callStatus },
+//     "CA<sid2>": { label: "contact",  joinedAt, leftAt, callStatus },
+//     "CA<sid3>": { label: "transfer:+15167847773", ... }
+//   }
+// Verified on May 7 against ground-truth call_ids 63b9DO6cUhkvEhOPHITv and
+// lcK3oKOgOPoN24FO2dQz, both transferred to +15167847773 (sales line).
+export function isLiveTransfer(row) {
+  const participants = row?.participants || {};
+  return Object.values(participants).some(
+    (p) => typeof p?.label === "string" && p.label.startsWith("transfer:")
+  );
+}
+
+// Extract the transfer destination phone number ("+15167847773") for the
+// "transferred to" column on the report. Empty string when not transferred.
+export function transferDestination(row) {
+  const participants = row?.participants || {};
+  const lbl = Object.values(participants)
+    .map((p) => p?.label || "")
+    .find((l) => l.startsWith("transfer:"));
+  return lbl ? lbl.slice("transfer:".length) : "";
+}
+
 // Bucket classification for the 5-category daily breakdown:
-//   Live Transfer   = completed + duration >= 30s + transferred=true
-//   Real Call       = completed + duration >= 30s + transferred!=true
+//   Live Transfer   = completed + duration >= 30s + isLiveTransfer(row)
+//   Real Call       = completed + duration >= 30s + NOT isLiveTransfer(row)
 //   No Answer       = status='no-answer' OR (status='completed' AND duration<30s)
 //   Failed          = status in ('failed','busy')
 //   Ringing         = status in ('ringing','queued','initiated','in-progress')
+//
+// row may be either a firehose row (has .participants directly) or a DB row
+// (raw participants live inside raw_event JSON, the caller of bucketCounts
+// re-hydrates that into row before passing here).
 export function classifyCall(row) {
   const s = (row.status || row.callStatus || "").toLowerCase();
   const d = Number(row.duration || 0);
-  const transferred = !!(row.transferred || row.isTransferred ||
-    (row.dispositions && /transfer/i.test(JSON.stringify(row.dispositions))));
-  if (s === "completed" && d >= 30 && transferred) return "live_transfer";
+  if (s === "completed" && d >= 30 && isLiveTransfer(row)) return "live_transfer";
   if (s === "completed" && d >= 30) return "real_call";
   if (s === "no-answer" || (s === "completed" && d < 30)) return "no_answer";
   if (s === "failed" || s === "busy") return "failed";
@@ -318,9 +348,7 @@ export const Calls = {
       const bucket = classifyCall({
         status: r.status,
         duration: r.duration,
-        transferred: raw.transferred,
-        isTransferred: raw.isTransferred,
-        dispositions: raw.dispositions,
+        participants: raw.participants,
       });
       counts[bucket]++;
     }
