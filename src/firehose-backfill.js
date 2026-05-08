@@ -36,6 +36,7 @@ import { Calls, classifyCall } from "./db.js";
 import { runMorningReport, runEveningReport } from "./reports.js";
 import { buildDailyExcel } from "./excel-report.js";
 import { sendMail } from "./mailer.js";
+import * as ghl from "./ghl.js";
 
 const TZ = "America/New_York";
 
@@ -355,7 +356,6 @@ export function buildFirehoseBackfillRouter() {
         const toIso = dayEnd.toUTC().toISO();
 
         // Use the GHL contacts/search with the same date filter
-        const ghl = await import("./ghl.js");
         const contacts = await ghl.searchContacts({ from: fromIso, to: toIso, limit: 100 });
 
         const out = (contacts || []).map((c) => ({
