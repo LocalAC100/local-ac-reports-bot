@@ -629,9 +629,11 @@ function buildNewLeads({ contactMap, calls, dateStr }) {
   const reportStart = DateTime.fromISO(`${dateStr}T00:00:00`, { zone: TZ }).toUTC();
   const reportEnd   = DateTime.fromISO(`${dateStr}T23:59:59.999`, { zone: TZ }).toUTC();
   const leads = [];
+  // Per Alex: count ANY contact created today, regardless of source — manual
+  // entries, ad leads, inbound, all of it. The text-notification system fires
+  // on every new lead so he wants the report to match that breadth.
   for (const c of contactMap.values()) {
     if (!c?.dateAdded) continue;
-    if (!isAdSourceLead(c)) continue;  // ad-source only (Instagram + Facebook)
     const added = DateTime.fromISO(c.dateAdded);
     if (!added.isValid) continue;
     if (added < reportStart || added > reportEnd) continue;
@@ -776,6 +778,26 @@ export async function buildDailyExcel(dateStr) {
   dws.getCell("A6").value = `total calls in window: ${rows.length}`;
   dws.getCell("A7").value = `unique contact_ids in calls: ${new Set(rows.map((r) => r.contact_id).filter(Boolean)).size}`;
   dws.getColumn(1).width = 90;
+
+  // Probe for specific names Alex mentioned that don't show in May-7 dateAdded.
+  // Lists every match in contactMap with its actual dateAdded so we can see
+  // what GHL has on file.
+  const probeNames = ["hardwood", "coggle", "rivadeneira", "rivedebeira"];
+  dws.getCell("A9").value = "Name probes (contacts in fetched set whose name contains the keyword, regardless of dateAdded):";
+  dws.getCell("A9").font = { bold: true };
+  let probeRow = 10;
+  for (const probe of probeNames) {
+    const matches = [];
+    for (const c of contactMap.values()) {
+      const fn = String(c?.firstName || "").toLowerCase();
+      const ln = String(c?.lastName || "").toLowerCase();
+      const cn = String(c?.contactName || "").toLowerCase();
+      if (fn.includes(probe) || ln.includes(probe) || cn.includes(probe)) {
+        matches.push(`${c.firstName || ""} ${c.lastName || ""}`.trim() + ` | source=${c.source} | dateAdded=${c.dateAdded} | phone=${c.phone}`);
+      }
+    }
+    dws.getCell(`A${probeRow++}`).value = `  "${probe}": ${matches.length === 0 ? "no match in contactMap" : matches.join(" || ")}`;
+  }
 
   const buffer = await wb.xlsx.writeBuffer();
   const filename = `Local_AC_Daily_Report_${dateStr}.xlsx`;
