@@ -179,8 +179,19 @@ async function buildContactPipelineMap(pipelineIndex) {
       // contact but creates a NEW opportunity with createdAt = now. So
       // opportunity.createdAt is the most reliable "lead came in" signal —
       // more reliable than contact.dateAdded which only fires on FIRST submit.
+      // Capture every "opp had activity today" candidate timestamp:
+      // - createdAt: original opp creation (rarely today on resubmission since GHL dedupes)
+      // - lastStatusChangeAt: bumped when status (open/won/lost) changes; ALSO bumped on opp creation
+      // - lastStageChangeAt: bumped when pipeline stage moves
+      // Take the most recent of the three as oppLastActivity — that's the
+      // "this opportunity touched something today" signal.
+      const tses = [o.createdAt, o.dateAdded, o.lastStatusChangeAt, o.lastStageChangeAt, o.updatedAt]
+        .filter(Boolean)
+        .map((t) => new Date(t).getTime())
+        .filter((n) => !Number.isNaN(n));
+      const oppLastActivity = tses.length ? new Date(Math.max(...tses)).toISOString() : null;
       const oppCreatedAt = o.createdAt || o.dateAdded || null;
-      map.set(cid, { pipelineName: p.name, stageName, oppCreatedAt });
+      map.set(cid, { pipelineName: p.name, stageName, oppCreatedAt, oppLastActivity });
     }
   }
   return map;
@@ -332,11 +343,11 @@ function addSummaryTab(wb, { dateStr, totals, buckets, uniqueContacts, newLeadSt
 
   // New Opportunities block (re-submitted leads — contact already existed)
   const noStartRow = 25 + leadRows.length + 2;
-  ws.getCell(`A${noStartRow}`).value = "NEW OPPORTUNITIES — re-submissions from existing contacts";
+  ws.getCell(`A${noStartRow}`).value = "REPEAT SUBMISSIONS — old contacts with opp activity today";
   applyHeaderStyle(ws.getRow(noStartRow));
   const no = newLeadStats.newOpps || {};
   const oppRows = [
-    ["Total new opportunities", no.total ?? 0],
+    ["Total repeat submissions", no.total ?? 0],
     ["Average response time", no.avgResponseLabel || "—"],
     ["Median response time", no.medianResponseLabel || "—"],
     [`Called within 1 minute`, `${no.within1 ?? 0} (${no.total ? Math.round((no.within1 ?? 0) / no.total * 100) : 0}%)`],
@@ -597,12 +608,12 @@ function addHourXDispatcherTab(wb, calls) {
 }
 
 function addNewOpportunitiesTab(wb, newOppRows) {
-  const ws = wb.addWorksheet("New Opportunities");
+  const ws = wb.addWorksheet("Repeat Submissions");
   ws.views = [{ state: "frozen", ySplit: 4 }];
   setColumnWidths(ws, [24, 16, 12, 14, 20, 20, 14, 16, 18, 50, 12]);
   applyTitleStyle(ws.getCell("A1"));
-  ws.getCell("A1").value = `New Opportunities Today — Re-submitted leads (${newOppRows.length} opportunities)`;
-  ws.getCell("A2").value = "These contacts already existed in GHL — they re-submitted the lead form today, so a fresh opportunity was created.";
+  ws.getCell("A1").value = `Repeat Submissions Today — Old contacts whose opp had activity today (${newOppRows.length} opportunities)`;
+  ws.getCell("A2").value = "Old contacts whose opportunity was touched today (createdAt / lastStatusChangeAt / lastStageChangeAt). Often means they re-submitted the lead form, but can also fire on workflow stage moves.";
   ws.getCell("A2").font = { name: "Arial", size: 10, italic: true, color: { argb: "FF606060" } };
 
   const headers = ["Contact", "Phone", "Lead Source", "Lead Type", "Came In (ET)", "First Call (ET)", "Response Time", "Bucket", "First Caller", "Other Dispatchers on Shift (within 30 min)", "Total calls today"];
@@ -704,16 +715,17 @@ function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
     if (!c?.id) continue;
     const opp = pipelineMap.get(c.id);
     const contactAdded = c.dateAdded ? DateTime.fromISO(c.dateAdded) : null;
-    const oppAdded = opp?.oppCreatedAt ? DateTime.fromISO(opp.oppCreatedAt) : null;
+    const oppActivity = opp?.oppLastActivity ? DateTime.fromISO(opp.oppLastActivity) : null;
 
     const contactToday = contactAdded?.isValid && contactAdded >= reportStart && contactAdded <= reportEnd;
-    const oppToday = oppAdded?.isValid && oppAdded >= reportStart && oppAdded <= reportEnd;
+    const oppToday = oppActivity?.isValid && oppActivity >= reportStart && oppActivity <= reportEnd;
 
     if (!contactToday && !oppToday) continue;
 
-    // Lead type: first-time if contact created today, re-submitted if only the
-    // opportunity is fresh on an older contact.
-    const leadType = contactToday ? "New Lead" : "New Opportunity";
+    // Lead type: "New Lead" = contact created today (first time we've ever seen them).
+    // "Repeat Submission" = older contact whose opportunity had activity today
+    // (resubmitted ad form, workflow re-fired, stage changed, etc.).
+    const leadType = contactToday ? "New Lead" : "Repeat Submission";
 
     leads.push({ ...c, _leadType: leadType, _opp: opp });
   }
@@ -739,8 +751,8 @@ function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
     let firstCallEt = "";
     if (first) {
       // Same logic as cameInIso below: re-submitted leads use opp.createdAt.
-      const cameInForResponse = l._leadType === "New Opportunity" && l._opp?.oppCreatedAt
-        ? l._opp.oppCreatedAt
+      const cameInForResponse = l._leadType === "Repeat Submission" && l._opp?.oppLastActivity
+        ? l._opp.oppLastActivity
         : l.dateAdded;
       const added = DateTime.fromISO(cameInForResponse);
       const fcEt = first.dt;
@@ -757,8 +769,8 @@ function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
     // For "Came In" timestamp: prefer contact.dateAdded for first-time leads,
     // opportunity.createdAt for re-submitted leads (since contact.dateAdded
     // would point to the original sign-up date, not today's resubmission).
-    const cameInIso = l._leadType === "New Opportunity" && l._opp?.oppCreatedAt
-      ? l._opp.oppCreatedAt
+    const cameInIso = l._leadType === "Repeat Submission" && l._opp?.oppLastActivity
+      ? l._opp.oppLastActivity
       : l.dateAdded;
     return {
       leadName: `${l.firstName || ""} ${l.lastName || ""}`.trim() || l.contactName || "(no name)",
@@ -782,7 +794,7 @@ function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
   // Split rows by lead type so Alex sees New Leads and New Opportunities
   // as separate categories in the workbook.
   const newLeadRows = rows.filter((r) => r.leadType === "New Lead");
-  const newOppRows  = rows.filter((r) => r.leadType === "New Opportunity");
+  const newOppRows  = rows.filter((r) => r.leadType === "Repeat Submission");
 
   // Per-group response-time stats for the Summary tab.
   function statsFor(group) {
