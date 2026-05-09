@@ -500,5 +500,36 @@ export function buildFirehoseBackfillRouter() {
     }
   );
 
+
+  // GET /admin/debug/send-mockup?to=<email>&s=<secret>
+  // Sends the static HTML mockup of the new daily-report email format. Lets
+  // Alex preview the new layout in Gmail. Reads from src/email-mockup.html.
+  router.get(
+    "/admin/debug/send-mockup",
+    secretBypass,
+    async (req, res) => {
+      try {
+        const to = req.query.to || undefined;
+        const fs = await import("fs");
+        const path = await import("path");
+        const fileURL = new URL("./email-mockup.html", import.meta.url);
+        const html = fs.readFileSync(fileURL, "utf8");
+        await sendMail({
+          to,
+          subject: "Local AC — NEW REPORT FORMAT MOCKUP (May 7)",
+          html,
+        });
+        res.json({
+          ok: true,
+          subject: "Local AC — NEW REPORT FORMAT MOCKUP (May 7)",
+          sentTo: to || config.recipient,
+          bytes: html.length,
+        });
+      } catch (e) {
+        res.status(500).json({ ok: false, error: e?.message, stack: e?.stack });
+      }
+    }
+  );
+
   return router;
 }
