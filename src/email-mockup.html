@@ -322,24 +322,62 @@
     <h3 style="margin-top:24px">Stage breakdown — calls per pipeline-stage today</h3>
     <table>
       <thead>
-        <tr><th>Pipeline → Stage</th><th>Total</th><th>Real</th><th>LT</th><th>NA</th><th>Failed</th><th>Unique</th><th>Bookings</th></tr>
+        <tr><th>Pipeline → Stage</th><th>Total</th><th>Real</th><th>LT</th><th>NA</th><th>Failed</th><th>Unique</th><th>Originated Bookings</th></tr>
       </thead>
       <tbody>
-        <tr><td><b>Orlando</b> → (3) Days Old Leads</td><td>322</td><td>25</td><td>0</td><td>259</td><td>37</td><td>64</td><td>—</td></tr>
-        <tr><td><b>Orlando</b> → New Lead In</td><td>165</td><td>23</td><td>0</td><td>120</td><td>22</td><td>18</td><td>—</td></tr>
-        <tr><td><b>Tampa</b> → (3) Days Old Leads</td><td>15</td><td>0</td><td>0</td><td>15</td><td>0</td><td>5</td><td>—</td></tr>
-        <tr><td><b>Orlando</b> → In Contact</td><td>11</td><td>3</td><td>0</td><td>8</td><td>0</td><td>3</td><td>—</td></tr>
-        <tr style="background:#ecfdf5"><td><b>Orlando</b> → Appt. Booked</td><td>9</td><td>3</td><td>0</td><td>6</td><td>0</td><td>6</td><td><span class="pill-physical">2 Physical</span></td></tr>
-        <tr style="background:#fffbeb"><td><b>Orlando</b> → Over Phone Booked</td><td>8</td><td>0</td><td>2</td><td>6</td><td>0</td><td>2</td><td><span class="pill-phone">1 Phone</span></td></tr>
-        <tr><td><b>Orlando</b> → Trying To Schedule</td><td>6</td><td>0</td><td>0</td><td>6</td><td>0</td><td>1</td><td>—</td></tr>
-        <tr><td><b>Orlando</b> → Replied to Reactivation</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td><td>5</td><td>—</td></tr>
-        <tr><td><b>Duct</b> → (3) Days Old Leads</td><td>2</td><td>0</td><td>0</td><td>1</td><td>1</td><td>2</td><td>—</td></tr>
-        <tr><td><b>Orlando</b> → Not Interested</td><td>2</td><td>2</td><td>0</td><td>0</td><td>0</td><td>2</td><td>—</td></tr>
-        <tr><td><b>Tampa</b> → New Lead In</td><td>1</td><td>0</td><td>0</td><td>1</td><td>0</td><td>1</td><td>—</td></tr>
-        <tr><td><b>Tampa</b> → In Contact</td><td>1</td><td>1</td><td>0</td><td>0</td><td>0</td><td>1</td><td>—</td></tr>
-        <tr><td><b>Orlando</b> → Outside Service Area</td><td>1</td><td>1</td><td>0</td><td>0</td><td>0</td><td>1</td><td>—</td></tr>
+        <tr><td><b>Orlando</b> → (3) Days Old Leads</td><td>322</td><td>25</td><td>0</td><td>259</td><td>37</td><td>64</td><td>0</td></tr>
+        <tr style="background:#ecfdf5"><td><b>Orlando</b> → New Lead In</td><td>165</td><td>23</td><td>0</td><td>120</td><td>22</td><td>18</td><td><b>2</b> <span class="pill-physical">1 Physical</span> <span class="pill-phone">1 Phone</span></td></tr>
+        <tr><td><b>Tampa</b> → (3) Days Old Leads</td><td>15</td><td>0</td><td>0</td><td>15</td><td>0</td><td>5</td><td>0</td></tr>
+        <tr><td><b>Orlando</b> → In Contact</td><td>11</td><td>3</td><td>0</td><td>8</td><td>0</td><td>3</td><td>0</td></tr>
+        <tr><td><b>Orlando</b> → Appt. Booked</td><td>9</td><td>3</td><td>0</td><td>6</td><td>0</td><td>6</td><td>0 <span class="small">(already booked)</span></td></tr>
+        <tr style="background:#ecfdf5"><td><b>Orlando</b> → Over Phone Booked</td><td>8</td><td>0</td><td>2</td><td>6</td><td>0</td><td>2</td><td><b>1</b> <span class="pill-physical">1 Physical</span></td></tr>
+        <tr><td><b>Orlando</b> → Trying To Schedule</td><td>6</td><td>0</td><td>0</td><td>6</td><td>0</td><td>1</td><td>0</td></tr>
+        <tr><td><b>Orlando</b> → Replied to Reactivation</td><td>5</td><td>0</td><td>0</td><td>5</td><td>0</td><td>5</td><td>0</td></tr>
+        <tr><td><b>Duct</b> → (3) Days Old Leads</td><td>2</td><td>0</td><td>0</td><td>1</td><td>1</td><td>2</td><td>0</td></tr>
+        <tr><td><b>Orlando</b> → Not Interested</td><td>2</td><td>2</td><td>0</td><td>0</td><td>0</td><td>2</td><td>0</td></tr>
+        <tr><td><b>Tampa</b> → New Lead In</td><td>1</td><td>0</td><td>0</td><td>1</td><td>0</td><td>1</td><td>0</td></tr>
+        <tr><td><b>Tampa</b> → In Contact</td><td>1</td><td>1</td><td>0</td><td>0</td><td>0</td><td>1</td><td>0</td></tr>
+        <tr><td><b>Orlando</b> → Outside Service Area</td><td>1</td><td>1</td><td>0</td><td>0</td><td>0</td><td>1</td><td>0</td></tr>
       </tbody>
     </table>
+    <p class="small"><b>Originated Bookings</b> = bookings made today whose stage at start of day was this one. Tells you which stages are <i>producing</i> bookings, not which stage they end up in (every booking lands in Appt. Booked or Over Phone Booked by definition).</p>
+
+    <!-- Booking Funnel narrative -->
+    <h3 style="margin-top:24px">Booking Funnel — where today's bookings came from</h3>
+    <div style="background:#f9fafb;border-radius:8px;padding:14px 18px">
+      <div style="font-size:14px;font-weight:700;color:#1f2937;margin-bottom:8px">3 bookings today</div>
+
+      <div style="display:flex;align-items:flex-start;gap:12px;padding:10px 0;border-top:1px solid #e5e7eb">
+        <div style="background:#dbeafe;color:#1e3a8a;font-weight:700;font-size:11px;padding:6px 10px;border-radius:8px;min-width:140px;text-align:center">From <b>New Leads</b><br><span style="font-size:18px">2</span></div>
+        <div style="flex:1">
+          <div style="font-size:12px;color:#6b7280;margin-bottom:4px">Brand-new contacts that came in today and booked the same day:</div>
+          <div style="font-size:13px;padding:3px 0">→ <b>HAGERTY,ROBIN</b> <span class="small">(fb)</span> &nbsp;became&nbsp; <span class="pill-physical">Physical Booking</span> &nbsp;<span class="small">via Frank · 3m 02s real call · response 46s</span></div>
+          <div style="font-size:13px;padding:3px 0">→ <b>James Southall</b> <span class="small">(ig)</span> &nbsp;became&nbsp; <span class="pill-phone">Phone Sale</span> &nbsp;<span class="small">via Frank · 2m 14s real call · response 47s</span></div>
+        </div>
+      </div>
+
+      <div style="display:flex;align-items:flex-start;gap:12px;padding:10px 0;border-top:1px solid #e5e7eb">
+        <div style="background:#fef3c7;color:#78350f;font-weight:700;font-size:11px;padding:6px 10px;border-radius:8px;min-width:140px;text-align:center">From <b>Over Phone Booked</b><br><span style="font-size:18px">1</span></div>
+        <div style="flex:1">
+          <div style="font-size:12px;color:#6b7280;margin-bottom:4px">Existing customer who already had a phone sale and converted to a physical appointment today:</div>
+          <div style="font-size:13px;padding:3px 0">→ <b>Stephanie Coggle</b> <span class="small">(fb · 319 days old · resubmission)</span> &nbsp;upgraded to&nbsp; <span class="pill-physical">Physical Booking</span> &nbsp;<span class="small">via Angel · 2m 35s real call</span></div>
+        </div>
+      </div>
+
+      <div style="display:flex;align-items:flex-start;gap:12px;padding:10px 0;border-top:1px solid #e5e7eb;color:#9ca3af">
+        <div style="background:#f3f4f6;color:#6b7280;font-weight:700;font-size:11px;padding:6px 10px;border-radius:8px;min-width:140px;text-align:center">From <b>Reactivation</b><br><span style="font-size:18px">0</span></div>
+        <div style="flex:1;font-size:13px">
+          <div style="font-size:12px;margin-top:4px">No old (3+ day) leads booked today. 3 reactivations had real calls but didn't convert.</div>
+        </div>
+      </div>
+
+      <div style="display:flex;align-items:flex-start;gap:12px;padding:10px 0;border-top:1px solid #e5e7eb;color:#9ca3af">
+        <div style="background:#f3f4f6;color:#6b7280;font-weight:700;font-size:11px;padding:6px 10px;border-radius:8px;min-width:140px;text-align:center">From <b>(3) Days Old</b><br><span style="font-size:18px">0</span></div>
+        <div style="flex:1;font-size:12px;margin-top:4px">322 calls placed to leads in this stage. Zero converted today.</div>
+      </div>
+    </div>
+    <p class="small" style="margin-top:8px">📊 <b>Read the funnel:</b> Today, 67% of bookings (2 of 3) came from fresh leads. The other 33% (Stephanie) was an existing phone-sale we converted to a physical appointment — pure upside. Nothing converted from the 322 calls placed to old (3+ day) leads.</p>
+
 
     <!-- Lead Age × Dispatcher matrix -->
     <h3 style="margin-top:24px">Lead Age × Dispatcher — who's working which age bucket</h3>
