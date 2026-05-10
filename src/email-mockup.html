@@ -69,7 +69,17 @@
   </div>
 
   <div class="placeholder-banner">
-    📋 Layout mockup v2. Hubstaff section + "On Shift" column use placeholder data (real numbers wire up next pass). All call/lead data is real May 7 from GHL.
+    📋 Layout mockup. Hubstaff section + "On Shift" column use placeholder data (real numbers wire up next pass). All call/lead data is real May 7 from GHL.
+  </div>
+
+  <div class="section" style="border-left:4px solid #2563eb">
+    <h2 style="font-size:16px">⚡ TL;DR — quick read</h2>
+    <ul style="margin:6px 0 0;padding-left:20px;font-size:13px;line-height:1.7;color:#1f2937">
+      <li><b>Hubstaff:</b> Chris, Frank, Ellie clocked out 30–90 min early — flagged. Angel was on track. Day cost $149.50 (3.5 hrs short of full schedule).</li>
+      <li><b>Calls:</b> 548 total · 8 real conversations · 2 live transfers · 477 no-answer.</li>
+      <li><b>Leads:</b> 15 new + 2 resubmissions + 3 reactivations. 3 leads (LARRY, Vic, TORRES) arrived after 9 PM — moved to tomorrow's report.</li>
+      <li><b>Bookings:</b> <b>3 today</b> — 2 Physical (HAGERTY by Frank, Stephanie via Angel→sales), 1 Phone Booking (James Southall by Frank). All 3 originated in New Lead In; 2 of 3 were brand-new ad leads closed in &lt; 1 min response.</li>
+    </ul>
   </div>
 
   <div class="section">
@@ -110,15 +120,20 @@
     </p>
   </div>
 
-  <div class="section">
-    <h2>Section 2 — Call Activity (Day Totals)</h2>
-    <div class="subhead">All buckets use REAL_CALL_THRESHOLD = 70 seconds</div>
-    <div class="stat-grid">
-      <div class="stat"><div class="label">Total Calls</div><div class="value">548</div><div class="sub">545 out · 3 in</div></div>
-      <div class="stat"><div class="label">Real Calls</div><div class="value">8</div><div class="sub">≥70s, no transfer</div></div>
-      <div class="stat"><div class="label">Live Transfers</div><div class="value">2</div><div class="sub">to sales</div></div>
-      <div class="stat"><div class="label">No Answer</div><div class="value">477</div><div class="sub">87.0%</div></div>
-      <div class="stat"><div class="label">Failed</div><div class="value">60</div><div class="sub">10.9%</div></div>
+  <div class="section" style="padding:14px 24px">
+    <h2 style="font-size:16px">Section 2 — Call Activity (Day Totals)</h2>
+    <div style="display:flex;flex-wrap:wrap;gap:0;align-items:baseline;font-size:13px;margin-top:6px;color:#1f2937;line-height:1.7">
+      <span><span style="color:#6b7280">Total:</span> <b style="font-size:16px;color:#1f4e78">548</b> <span class="small">(545 out · 3 in)</span></span>
+      <span style="color:#d1d5db;margin:0 12px">|</span>
+      <span><span style="color:#6b7280">Real:</span> <b style="color:#1f4e78">8</b></span>
+      <span style="color:#d1d5db;margin:0 12px">|</span>
+      <span><span style="color:#6b7280">Live Transfers:</span> <b style="color:#1f4e78">2</b></span>
+      <span style="color:#d1d5db;margin:0 12px">|</span>
+      <span><span style="color:#6b7280">No Answer:</span> <b style="color:#1f4e78">477</b> <span class="small">87.0%</span></span>
+      <span style="color:#d1d5db;margin:0 12px">|</span>
+      <span><span style="color:#6b7280">Failed:</span> <b style="color:#1f4e78">60</b> <span class="small">10.9%</span></span>
+      <span style="color:#d1d5db;margin:0 12px">|</span>
+      <span class="small">REAL_CALL_THRESHOLD = 70s</span>
     </div>
   </div>
 
