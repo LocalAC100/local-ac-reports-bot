@@ -1,29 +1,36 @@
-// Live alert: when a new lead comes in via the GHL webhook, start two timers:
-//   - 3 min  : 🔴 warning if no qualifying call attempt yet
-//   - 10 min : 🔴🔴🔴 escalation if STILL no qualifying call attempt
+// Live lead alert (v2 — local-first suppression).
 //
-// "Qualifying call attempt" = at least one outbound call >= 20 sec OR
-// at least two outbound short calls (the dispatcher tried, hung up, tried again).
-// Automated texts / SMS do NOT count — only outbound CALLs.
+// When a new lead arrives via the GHL webhook we schedule two timers:
+//   - 3 min  : 🔴       warning if the dispatchers haven't made a qualifying attempt
+//   - 10 min : 🔴🔴🔴   escalation if STILL no qualifying attempt
 //
-// Business-hours gate: alerts only fire for leads that arrived between
-// 8:00 AM and 8:00 PM America/New_York. A lead that comes in at 1 AM is ignored
-// because nobody is expected to be at the desk.
+// Suppression rules (any of these silences the alert):
+//   - 1+ outbound real call (≥ 70s)        — they had a real conversation
+//   - 1+ live transfer                     — they got transferred to sales
+//   - 2+ outbound call attempts (any dur)  — they tried hard
+//
+// Texts / SMS do NOT suppress. A text means the call wasn't answered.
+//
+// Suppression check uses the LOCAL SQLite `calls` table (populated in real time
+// by the GHL call webhook). Falls back to the GHL conversation API only if the
+// local table has zero rows for the contact (covers webhook misses).
+//
+// Business-hours gate: alerts only fire for leads that arrived 8 AM – 8 PM ET.
+
 import { config } from "./config.js";
 import * as ghl from "./ghl.js";
 import { sendMail } from "./mailer.js";
 import { renderLiveAlert } from "./template.js";
-import { Alerts } from "./db.js";
+import { Alerts, Calls, classifyCall } from "./db.js";
 import { DateTime } from "luxon";
 
 const TZ = "America/New_York";
-const BUSINESS_START_HOUR = 8;          // 8:00 AM ET inclusive
-const BUSINESS_END_HOUR = 20;           // 8:00 PM ET exclusive (so last lead window is 7:59 PM)
-const SHORT_CALL_THRESHOLD_SEC = 20;
+const BUSINESS_START_HOUR = 8;
+const BUSINESS_END_HOUR = 20;
 const WARNING_DELAY_MS = 3 * 60 * 1000;
 const ESCALATION_DELAY_MS = 10 * 60 * 1000;
 
-// contactId -> { t3, t10 } so we can clear timers if the lead is resolved
+// contactId -> { t3, t10 } so we can clear timers if the lead resolves before the timer fires.
 const pendingAlerts = new Map();
 
 function isBusinessHours(jsDate) {
@@ -32,23 +39,78 @@ function isBusinessHours(jsDate) {
 }
 
 function fmtETShort(jsDate) {
-  return (
-    DateTime.fromJSDate(jsDate).setZone(TZ).toFormat("LLL d, h:mm a") + " ET"
-  );
+  return DateTime.fromJSDate(jsDate).setZone(TZ).toFormat("LLL d, h:mm a") + " ET";
 }
 
-// Walk the conversation messages and pull out every OUTBOUND CALL placed
-// after the lead arrived. SMS/email/etc. are ignored. Returns:
-//   { calls: [{ duration, at, status }, ...], longCalls, shortCalls, attempted }
-function summarizeCalls(messages, leadAddedAt) {
-  const leadTime = new Date(leadAddedAt).getTime();
+// ---------- Suppression — primary source: local SQLite calls table ----------
+
+function checkSuppressionLocal(contactId, leadAddedAt) {
+  const fromIso = new Date(leadAddedAt).toISOString();
+  const toIso = new Date().toISOString();
+  const allRows = Calls.listInWindow(fromIso, toIso, 5000);
+
+  // Outbound only, this contact only.
+  const rows = allRows.filter(
+    (r) =>
+      r.contact_id === contactId &&
+      (r.direction || "").toLowerCase() === "outbound"
+  );
+
+  let realCalls = 0;
+  let liveTransfers = 0;
   const calls = [];
-  for (const m of messages || []) {
-    // GHL returns calls with type=1 (numeric) AND messageType="TYPE_CALL" (string).
-    // Some endpoints/payloads may also return the bare string "CALL".
-    // We match on ALL THREE forms because none alone is reliable —
-    // earlier we missed every call because we only checked /CALL/i against
-    // a stringified numeric type.
+  for (const r of rows) {
+    let raw = {};
+    try { if (r.raw_event) raw = JSON.parse(r.raw_event); } catch {}
+    const bucket = classifyCall({
+      status: r.status,
+      duration: r.duration,
+      participants: raw.participants,
+    });
+    if (bucket === "real_call") realCalls++;
+    if (bucket === "live_transfer") liveTransfers++;
+    calls.push({
+      duration: r.duration || 0,
+      at: r.date_added,
+      status: r.status,
+    });
+  }
+
+  const totalAttempts = rows.length;
+  const suppress = realCalls >= 1 || liveTransfers >= 1 || totalAttempts >= 2;
+
+  return {
+    realCalls,
+    liveTransfers,
+    totalAttempts,
+    longCalls: calls.filter((c) => (c.duration || 0) >= 70),
+    shortCalls: calls.filter((c) => (c.duration || 0) < 70),
+    calls,
+    attempted: suppress,
+    _source: "local",
+    _diag: { sourceTable: "calls", rowCount: rows.length },
+  };
+}
+
+// ---------- Suppression — fallback: GHL conversation API ----------
+
+async function checkSuppressionGHL(contactId, leadAddedAt) {
+  const leadTime = new Date(leadAddedAt).getTime();
+  const conversations = await ghl
+    .getConversationsByContactId(contactId)
+    .catch(() => []);
+
+  const allMessages = [];
+  for (const conv of conversations) {
+    const msgs = await ghl.getConversationMessages(conv.id).catch(() => []);
+    for (const m of msgs) allMessages.push(m);
+  }
+
+  let realCalls = 0;
+  let liveTransfers = 0;
+  let totalAttempts = 0;
+  const calls = [];
+  for (const m of allMessages) {
     const isCall =
       m.type === 1 ||
       m.messageType === "TYPE_CALL" ||
@@ -61,117 +123,68 @@ function summarizeCalls(messages, leadAddedAt) {
     const duration = Number(
       m.meta?.call?.duration ?? m.callDuration ?? m.duration ?? 0
     );
+    totalAttempts++;
+    if (duration >= 70) {
+      const participants = m.meta?.call?.participants || {};
+      const hasTransfer = Object.values(participants).some(
+        (p) => typeof p?.label === "string" && p.label.startsWith("transfer:")
+      );
+      if (hasTransfer) liveTransfers++;
+      else realCalls++;
+    }
     calls.push({
       duration,
       at: m.dateAdded ?? m.createdAt ?? null,
       status: m.meta?.call?.status ?? null,
     });
   }
-  const longCalls = calls.filter((c) => c.duration >= SHORT_CALL_THRESHOLD_SEC);
-  const shortCalls = calls.filter((c) => c.duration < SHORT_CALL_THRESHOLD_SEC);
-  const attempted = longCalls.length >= 1 || shortCalls.length >= 2;
-  return { calls, longCalls, shortCalls, attempted };
-}
 
-// Vonage call note detector. Dispatchers add a GHL note starting with "Called"
-// any time they call via Vonage (which has no API on regular accounts).
-// We treat any such note from any user as a qualifying contact attempt.
-function isVonageCallNote(note) {
-  return /^\s*called\b/i.test(String(note?.body || ""));
-}
+  // Vonage notes — "Called …" notes count as outbound attempts.
+  const notes = await ghl.getContactNotes(contactId).catch(() => []);
+  const vonageCallsAfterLead = (notes || []).filter((n) => {
+    if (!/^\s*called\b/i.test(String(n?.body || ""))) return false;
+    const ts = new Date(n.dateAdded || 0).getTime();
+    return ts >= leadTime;
+  }).length;
+  totalAttempts += vonageCallsAfterLead;
 
-// Walk every outbound non-call message (SMS, email, etc.) made by anyone
-// AFTER the lead arrived. Used as a SECONDARY signal — if a dispatcher
-// reached out via text instead of calling, that's still contact, suppress alert.
-function hasOutboundContactAfterLead(messages, leadAddedAt) {
-  const leadTime = new Date(leadAddedAt).getTime();
-  for (const m of messages || []) {
-    const dir = String(m.direction ?? "").toLowerCase();
-    if (dir !== "outbound") continue;
-    // CRITICAL: skip messages with no userId. GHL workflows automatically send
-    // welcome SMS / email blasts when a lead arrives — those have NO userId
-    // (they're bot-generated). Counting them as "human contact" caused the
-    // 3-min alert to be falsely suppressed for Villa Marte (May 7, 6:44 PM)
-    // and uCU0sNBSaBYKv4pCQB1v (May 7, 7:04 PM). Real dispatchers ALWAYS
-    // have a userId on their outbound messages.
-    const userId = m.userId || m.user || m.createdBy;
-    if (!userId) continue;
-    const ts = new Date(m.dateAdded ?? m.createdAt ?? 0).getTime();
-    if (ts < leadTime) continue;
-    return true;
-  }
-  return false;
-}
+  const suppress = realCalls >= 1 || liveTransfers >= 1 || totalAttempts >= 2;
 
-async function getCallSummary(contactId, leadAddedAt) {
-  try {
-    const leadTime = new Date(leadAddedAt).getTime();
-
-    // FIX (May 7 2026): use getConversationsByContactId — direct lookup by
-    // contactId. Previously used searchConversations({from,to}) which filters
-    // by conversation CREATION date and missed any contact whose conversation
-    // existed before the webhook fired (very common). That bug caused multiple
-    // false-positive alerts (Tinnelly, Juan Lopez, mike +13157976111).
-    const [conversations, notes] = await Promise.all([
-      ghl.getConversationsByContactId(contactId).catch(() => []),
-      ghl.getContactNotes(contactId).catch(() => []),
-    ]);
-
-    // Pull messages from EVERY conversation for this contact and merge them.
-    // Most contacts have one, but some have multiple (e.g., one for SMS, one
-    // for calls). Don't lose calls by only checking the first conversation.
-    const allMessages = [];
-    for (const conv of conversations) {
-      const msgs = await ghl.getConversationMessages(conv.id).catch(() => []);
-      for (const m of msgs) allMessages.push(m);
-    }
-    const summary = summarizeCalls(allMessages, leadAddedAt);
-
-    // Fold Vonage notes in — any "Called" note added AFTER the lead arrived
-    // counts as a qualifying attempt (so we don't false-fire when dispatcher
-    // calls only via Vonage).
-    const vonageCallsAfterLead = (notes || []).filter((n) => {
-      if (!isVonageCallNote(n)) return false;
-      const ts = new Date(n.dateAdded || 0).getTime();
-      return ts >= leadTime;
-    }).length;
-
-    if (vonageCallsAfterLead > 0) {
-      summary.attempted = true;
-      summary.vonageCalls = vonageCallsAfterLead;
-    }
-
-    // ALSO suppress if the dispatcher reached out via text/SMS — that's still
-    // contact even if no phone call was placed. Lots of dispatchers respond to
-    // brand-new leads with a quick text first.
-    const hadOutboundContact = hasOutboundContactAfterLead(allMessages, leadAddedAt);
-    if (hadOutboundContact) {
-      summary.attempted = true;
-      summary.outboundContact = true;
-    }
-
-    // Track totals for debugging output
-    summary._diag = {
+  return {
+    realCalls,
+    liveTransfers,
+    totalAttempts,
+    longCalls: calls.filter((c) => (c.duration || 0) >= 70),
+    shortCalls: calls.filter((c) => (c.duration || 0) < 70),
+    calls,
+    attempted: suppress,
+    vonageCalls: vonageCallsAfterLead,
+    _source: "ghl",
+    _diag: {
+      sourceTable: "ghl-conversations",
       conversationCount: conversations.length,
       messageCount: allMessages.length,
       noteCount: notes?.length || 0,
-    };
-
-    return summary;
-  } catch (e) {
-    console.error("[live-alert] GHL fetch failed", e?.message);
-    return summarizeCalls([], leadAddedAt);
-  }
+    },
+  };
 }
 
-// Exported so the debug endpoint can inspect what alerts.js sees for a contact.
-export const _internal = { getCallSummary };
+// Try local first; only hit GHL if the local table has nothing for this contact.
+async function getCallSummary(contactId, leadAddedAt) {
+  const local = checkSuppressionLocal(contactId, leadAddedAt);
+  if (local.totalAttempts > 0) return local;
+  return await checkSuppressionGHL(contactId, leadAddedAt);
+}
+
+// Exported for the debug endpoint.
+export const _internal = { getCallSummary, checkSuppressionLocal, checkSuppressionGHL };
+
+// ---------- Alert firing ----------
 
 async function fireAlert({ contactId, contactName, phone, leadAddedAt, level }) {
   try {
     const summary = await getCallSummary(contactId, leadAddedAt);
 
-    // Resolved between scheduling and now? Cancel everything and bail.
     if (summary.attempted) {
       const timers = pendingAlerts.get(contactId);
       if (timers) {
@@ -180,7 +193,7 @@ async function fireAlert({ contactId, contactName, phone, leadAddedAt, level }) 
         pendingAlerts.delete(contactId);
       }
       console.log(
-        `[live-alert] suppressed (qualifying attempt) contact=${contactId} level=${level}`
+        `[live-alert] suppressed (${summary._source}) contact=${contactId} level=${level} real=${summary.realCalls} lt=${summary.liveTransfers} att=${summary.totalAttempts}`
       );
       return;
     }
@@ -189,7 +202,6 @@ async function fireAlert({ contactId, contactName, phone, leadAddedAt, level }) 
       (Date.now() - new Date(leadAddedAt).getTime()) / 60000
     );
 
-    // Log to dashboard alerts table
     try {
       Alerts.log({
         contactId,
@@ -203,7 +215,6 @@ async function fireAlert({ contactId, contactName, phone, leadAddedAt, level }) 
       console.error("[live-alert] db log failed", e?.message);
     }
 
-    // Send email
     const html = renderLiveAlert({
       leadName: contactName || "(unnamed lead)",
       phone: phone || "(no phone)",
@@ -212,6 +223,7 @@ async function fireAlert({ contactId, contactName, phone, leadAddedAt, level }) 
       level,
       callSummary: summary,
     });
+
     const dots = level >= 2 ? "🔴🔴🔴" : "🔴";
     const escal = level >= 2 ? "ESCALATION — " : "";
     await sendMail({
@@ -220,10 +232,16 @@ async function fireAlert({ contactId, contactName, phone, leadAddedAt, level }) 
       }`,
       html,
     });
+
+    console.log(
+      `[live-alert] FIRED level=${level} contact=${contactId} elapsed=${elapsed}m source=${summary._source}`
+    );
   } catch (e) {
     console.error("[live-alert] failed", e?.message);
   }
 }
+
+// ---------- Public entry point ----------
 
 export async function onNewLead({ contactId, contactName, phone, leadAddedAt }) {
   if (!contactId) return;
@@ -232,12 +250,11 @@ export async function onNewLead({ contactId, contactName, phone, leadAddedAt }) 
   const leadDate = new Date(leadAddedAt || Date.now());
   if (!isBusinessHours(leadDate)) {
     console.log(
-      `[live-alert] lead outside business hours (8 AM–8 PM ET), skipping ${contactId} @ ${leadDate.toISOString()}`
+      `[live-alert] outside business hours (8 AM–8 PM ET), skipping ${contactId} @ ${leadDate.toISOString()}`
     );
     return;
   }
 
-  // Honour env override if someone wants to lower the warning threshold later.
   const warnMs =
     Number(config.leadResponseThresholdMinutes || 3) * 60 * 1000 ||
     WARNING_DELAY_MS;
@@ -247,15 +264,10 @@ export async function onNewLead({ contactId, contactName, phone, leadAddedAt }) 
     warnMs
   );
   const t10 = setTimeout(async () => {
-    await fireAlert({
-      contactId,
-      contactName,
-      phone,
-      leadAddedAt,
-      level: 2,
-    });
+    await fireAlert({ contactId, contactName, phone, leadAddedAt, level: 2 });
     pendingAlerts.delete(contactId);
   }, ESCALATION_DELAY_MS);
 
   pendingAlerts.set(contactId, { t3, t10 });
+  console.log(`[live-alert] scheduled contact=${contactId} (3min + 10min)`);
 }
