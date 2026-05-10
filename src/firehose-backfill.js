@@ -531,5 +531,43 @@ export function buildFirehoseBackfillRouter() {
     }
   );
 
+
+  // GET /admin/debug/check-alert?contact_id=<id>&leadAddedAt=<ISO>&s=<secret>
+  // Inspects what the live-alert system sees for a given contact + leadAddedAt.
+  // Useful for verifying suppression logic without waiting 3-10 min for a
+  // timer to fire on a real lead.
+  router.get(
+    "/admin/debug/check-alert",
+    secretBypass,
+    async (req, res) => {
+      try {
+        const { _internal } = await import("./alerts.js");
+        const contactId = req.query.contact_id;
+        const leadAddedAt = req.query.leadAddedAt || new Date().toISOString();
+        if (!contactId) {
+          res.status(400).json({ ok: false, error: "missing contact_id" });
+          return;
+        }
+        const local = _internal.checkSuppressionLocal(contactId, leadAddedAt);
+        let ghl = null;
+        if (local.totalAttempts === 0) {
+          ghl = await _internal.checkSuppressionGHL(contactId, leadAddedAt);
+        }
+        const decision = ghl || local;
+        res.json({
+          ok: true,
+          contactId,
+          leadAddedAt,
+          wouldSuppress: decision.attempted,
+          decisionSource: decision._source,
+          local,
+          ghlFallback: ghl,
+        });
+      } catch (e) {
+        res.status(500).json({ ok: false, error: e?.message, stack: e?.stack });
+      }
+    }
+  );
+
   return router;
 }
