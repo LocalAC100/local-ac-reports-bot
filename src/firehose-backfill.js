@@ -237,7 +237,7 @@ export function buildFirehoseBackfillRouter() {
       const t0 = Date.now();
       try {
         const dateOverride = req.query.date || undefined;
-        await runEveningReport({ dateOverride });
+        await runEveningReport({ dateOverride, to: req.query.to });
         res.json({
           ok: true,
           kind: "evening-report",
@@ -262,7 +262,7 @@ export function buildFirehoseBackfillRouter() {
       const t0 = Date.now();
       try {
         const dateOverride = req.query.date || undefined;
-        await runMorningReport({ dateOverride });
+        await runMorningReport({ dateOverride, to: req.query.to });
         res.json({
           ok: true,
           kind: "morning-report",
