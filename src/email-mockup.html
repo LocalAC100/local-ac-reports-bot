@@ -2,173 +2,81 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Local AC — Full Day Summary (May 7) — MOCKUP</title>
+<title>Local AC — Full Day Summary (May 7) — MOCKUP v2</title>
 <style>
-  body {
-    margin: 0;
-    background: #f3f4f6;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
-    color: #333;
-  }
-  .container {
-    max-width: 760px;
-    margin: 0 auto;
-    background: white;
-    padding: 0;
-  }
-  .banner {
-    background: linear-gradient(135deg, #1f4e78 0%, #2563eb 100%);
-    color: white;
-    padding: 28px 32px;
-    border-radius: 0 0 8px 8px;
-    margin-bottom: 8px;
-  }
-  .banner .eyebrow {
-    font-size: 12px;
-    letter-spacing: 2px;
-    color: #93c5fd;
-    text-transform: uppercase;
-  }
-  .banner h1 {
-    margin: 4px 0 8px;
-    font-size: 28px;
-  }
-  .banner .meta {
-    font-size: 13px;
-    opacity: 0.85;
-  }
-  .placeholder-banner {
-    background: #fff3cd;
-    color: #664d03;
-    border-left: 4px solid #ffc107;
-    padding: 10px 16px;
-    margin: 8px 16px;
-    font-size: 13px;
-    font-style: italic;
-  }
-  .section {
-    background: white;
-    margin: 12px 16px;
-    border: 1px solid #e5e7eb;
-    border-radius: 8px;
-    padding: 20px 24px;
-  }
-  .section h2 {
-    margin: 0 0 4px;
-    color: #1f4e78;
-    font-size: 18px;
-  }
-  .section .subhead {
-    color: #6b7280;
-    font-size: 12px;
-    margin-bottom: 16px;
-  }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-    margin: 8px 0;
-  }
-  th {
-    background: #1f4e78;
-    color: white;
-    text-align: left;
-    padding: 8px 10px;
-    font-weight: 600;
-    font-size: 12px;
-    letter-spacing: 0.5px;
-  }
-  td {
-    padding: 8px 10px;
-    border-bottom: 1px solid #e5e7eb;
-  }
+  body { margin: 0; background: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; color: #333; }
+  .container { max-width: 980px; margin: 0 auto; background: white; padding: 0; }
+  .banner { background: linear-gradient(135deg, #1f4e78 0%, #2563eb 100%); color: white; padding: 28px 32px; border-radius: 0 0 8px 8px; margin-bottom: 8px; }
+  .banner .eyebrow { font-size: 12px; letter-spacing: 2px; color: #93c5fd; text-transform: uppercase; }
+  .banner h1 { margin: 4px 0 8px; font-size: 28px; }
+  .banner .meta { font-size: 13px; opacity: 0.85; }
+  .placeholder-banner { background: #fff3cd; color: #664d03; border-left: 4px solid #ffc107; padding: 10px 16px; margin: 8px 16px; font-size: 13px; font-style: italic; }
+  .section { background: white; margin: 12px 16px; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px 24px; }
+  .section h2 { margin: 0 0 4px; color: #1f4e78; font-size: 18px; }
+  .section .subhead { color: #6b7280; font-size: 12px; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 8px 0; }
+  th { background: #1f4e78; color: white; text-align: left; padding: 7px 8px; font-weight: 600; font-size: 11px; letter-spacing: 0.3px; }
+  td { padding: 7px 8px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }
   tr:last-child td { border-bottom: none; }
-  .stat-grid {
-    display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    gap: 8px;
-    margin: 12px 0;
-  }
-  .stat {
-    background: #f3f4f6;
-    border-radius: 6px;
-    padding: 10px;
-    text-align: center;
-  }
-  .stat .label {
-    font-size: 11px;
-    color: #6b7280;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-  .stat .value {
-    font-size: 22px;
-    font-weight: 700;
-    color: #1f4e78;
-    margin-top: 2px;
-  }
-  .stat .sub {
-    font-size: 11px;
-    color: #6b7280;
-    margin-top: 2px;
-  }
-  .badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 12px;
-    font-size: 11px;
-    font-weight: 600;
-  }
+  .stat-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin: 12px 0; }
+  .stat { background: #f3f4f6; border-radius: 6px; padding: 10px; text-align: center; }
+  .stat .label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat .value { font-size: 22px; font-weight: 700; color: #1f4e78; margin-top: 2px; }
+  .stat .sub { font-size: 11px; color: #6b7280; margin-top: 2px; }
+  .badge { display: inline-block; padding: 2px 6px; border-radius: 10px; font-size: 10px; font-weight: 600; }
   .badge-good { background: #d1fae5; color: #065f46; }
   .badge-bad  { background: #fee2e2; color: #991b1b; }
   .badge-warn { background: #fef3c7; color: #92400e; }
   .badge-neut { background: #e5e7eb; color: #374151; }
   .row-booked { background: #ecfdf5 !important; }
-  .row-bad    { background: #fef2f2 !important; }
-  .footer {
-    text-align: center;
-    color: #6b7280;
-    font-size: 12px;
-    padding: 20px;
-  }
+  .row-night  { background: #f3f4f6 !important; color: #6b7280; }
+  .row-night td { color: #6b7280; }
+  .footer { text-align: center; color: #6b7280; font-size: 12px; padding: 20px; }
   .footer a { color: #2563eb; text-decoration: none; }
   .small { font-size: 11px; color: #6b7280; }
-  h3 {
-    margin: 18px 0 6px;
-    color: #1f4e78;
-    font-size: 14px;
-    border-bottom: 1px solid #e5e7eb;
-    padding-bottom: 4px;
-  }
-  .pill-physical { background: #d1fae5; color: #065f46; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
-  .pill-phone    { background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
-  .pill-none     { color: #9ca3af; }
+  h3 { margin: 18px 0 6px; color: #1f4e78; font-size: 14px; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; }
+  .pill-physical { background: #d1fae5; color: #065f46; padding: 2px 6px; border-radius: 10px; font-size: 10px; font-weight: 600; }
+  .pill-phone    { background: #fef3c7; color: #92400e; padding: 2px 6px; border-radius: 10px; font-size: 10px; font-weight: 600; }
+  .pill-none     { color: #9ca3af; font-size: 11px; }
+  .cat-new   { background: #dbeafe; color: #1e3a8a; padding: 2px 6px; border-radius: 10px; font-size: 10px; font-weight: 700; }
+  .cat-resub { background: #fde68a; color: #78350f; padding: 2px 6px; border-radius: 10px; font-size: 10px; font-weight: 700; }
+  .cat-react { background: #e9d5ff; color: #5b21b6; padding: 2px 6px; border-radius: 10px; font-size: 10px; font-weight: 700; }
+  .cat-night { background: #d1d5db; color: #374151; padding: 2px 6px; border-radius: 10px; font-size: 10px; font-weight: 700; }
+  .lead-summary { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-top: 8px; }
+  .lead-col { background: #f9fafb; border-radius: 8px; padding: 14px 16px; }
+  .lead-col .col-title { font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; font-weight: 700; }
+  .lead-col-new   { border-top: 4px solid #2563eb; }
+  .lead-col-new   .col-title { color: #1e3a8a; }
+  .lead-col-resub { border-top: 4px solid #d97706; }
+  .lead-col-resub .col-title { color: #78350f; }
+  .lead-col-react { border-top: 4px solid #7c3aed; }
+  .lead-col-react .col-title { color: #5b21b6; }
+  .lead-col .big { font-size: 32px; font-weight: 800; color: #1f2937; line-height: 1; margin: 6px 0 12px; }
+  .lead-col table { font-size: 11px; }
+  .lead-col table td { padding: 4px 0; border-bottom: 1px dashed #e5e7eb; }
+  .lead-col table td:last-child { text-align: right; font-weight: 600; }
+  .lead-col table tr:last-child td { border-bottom: none; }
+  .booking-breakdown { font-size: 10px; color: #6b7280; padding-left: 8px; }
 </style>
 </head>
 <body>
 
 <div class="container">
-
-  <!-- HEADER -->
   <div class="banner">
     <div class="eyebrow">❄ Local AC · Control Room</div>
     <h1>Full Day Summary</h1>
-    <div class="meta">Thu, May 7, 2026 · generated 7:30 PM EDT — <b style="background:#fbbf24;color:#92400e;padding:2px 6px;border-radius:4px">EXAMPLE / MOCKUP</b></div>
+    <div class="meta">Thu, May 7, 2026 · generated 7:30 PM EDT — <b style="background:#fbbf24;color:#92400e;padding:2px 6px;border-radius:4px">EXAMPLE / MOCKUP v2</b></div>
   </div>
 
   <div class="placeholder-banner">
-    📋 This is a layout mock-up. Hubstaff section uses placeholder data (real Hubstaff numbers will appear once the integration is rewired). All call/lead data is from the real May 7 GHL pull.
+    📋 Layout mockup v2. Hubstaff section + "On Shift" column use placeholder data (real numbers wire up next pass). All call/lead data is real May 7 from GHL.
   </div>
 
-  <!-- SECTION 1 — HUBSTAFF (PLACEHOLDER) -->
   <div class="section">
     <h2>Section 1 — Hubstaff (Hours &amp; Activity)</h2>
     <div class="subhead">⚠ <i>Placeholder — Hubstaff integration to be wired up next</i></div>
-
     <table>
-      <thead>
-        <tr><th>Employee</th><th>Clock In</th><th>Clock Out</th><th>Worked</th><th>Break</th><th>Activity</th><th>Status</th></tr>
-      </thead>
+      <thead><tr><th>Employee</th><th>Clock In</th><th>Clock Out</th><th>Worked</th><th>Break</th><th>Activity</th><th>Status</th></tr></thead>
       <tbody>
         <tr><td><b>Chris</b><br><span class="small">office_manager</span></td><td>7:25 AM</td><td>7:30 PM</td><td><b>12h 4m</b></td><td>&lt;1m</td><td>96%</td><td><span class="badge badge-good">✓ on track</span></td></tr>
         <tr><td><b>Frank</b><br><span class="small">dispatcher_manager</span></td><td>6:47 AM</td><td>7:30 PM</td><td><b>12h 43m</b></td><td>&lt;1m</td><td>15%</td><td><span class="badge badge-good">✓ on track</span></td></tr>
@@ -177,7 +85,6 @@
         <tr><td><b>Mark</b><br><span class="small">dispatcher_training</span></td><td>—</td><td>—</td><td>&lt;1m</td><td>—</td><td>—</td><td><span class="badge badge-bad">no Hubstaff yet</span></td></tr>
       </tbody>
     </table>
-
     <h3>Day Total</h3>
     <table>
       <thead><tr><th>Employee</th><th>Hours</th><th>Pay Rate</th><th>Cost</th></tr></thead>
@@ -191,11 +98,9 @@
     </table>
   </div>
 
-  <!-- SECTION 2 — DAY TOTALS / CALL BUCKETS -->
   <div class="section">
     <h2>Section 2 — Call Activity (Day Totals)</h2>
     <div class="subhead">All buckets use REAL_CALL_THRESHOLD = 70 seconds</div>
-
     <div class="stat-grid">
       <div class="stat"><div class="label">Total Calls</div><div class="value">548</div><div class="sub">545 out · 3 in</div></div>
       <div class="stat"><div class="label">Real Calls</div><div class="value">8</div><div class="sub">≥70s, no transfer</div></div>
@@ -205,184 +110,110 @@
     </div>
   </div>
 
-  <!-- SECTION 3a — NEW LEADS -->
   <div class="section">
-    <h2>Section 3a — New Leads (18 first-time contacts today)</h2>
-    <div class="subhead">Brand-new contacts created today — goal: call back ≤ 1 min, never &gt; 3 min</div>
+    <h2>Section 3 — Lead Activity</h2>
+    <div class="subhead">New leads, resubmissions, and reactivated — side by side</div>
 
-    <div class="stat-grid">
-      <div class="stat"><div class="label">Total</div><div class="value">18</div></div>
-      <div class="stat"><div class="label">≤ 1 min</div><div class="value">8</div><div class="sub">44%</div></div>
-      <div class="stat"><div class="label">≤ 3 min</div><div class="value">14</div><div class="sub">78%</div></div>
-      <div class="stat"><div class="label">Real Calls (≥70s)</div><div class="value">5</div></div>
-      <div class="stat"><div class="label">Real → Book</div><div class="value">40%</div><div class="sub">2 of 5</div></div>
+    <div class="lead-summary">
+      <div class="lead-col lead-col-new">
+        <div class="col-title">New Leads</div>
+        <div class="big">15</div>
+        <table>
+          <tr><td>≤ 1 min</td><td>8 (53%)</td></tr>
+          <tr><td>≤ 3 min</td><td>14 (93%)</td></tr>
+          <tr><td>&gt; 3 min</td><td>1 (7%)</td></tr>
+          <tr><td>Never called</td><td>0</td></tr>
+          <tr><td>Real Calls (≥70s)</td><td>5</td></tr>
+          <tr><td>Live Transfers</td><td>2</td></tr>
+          <tr><td><b>Booked Today</b></td><td><b>2</b></td></tr>
+          <tr><td colspan="2" class="booking-breakdown">└ 1 <span class="pill-physical">Physical</span> &nbsp; 1 <span class="pill-phone">Phone Sale</span></td></tr>
+          <tr><td><b>Real → Book</b></td><td><b>40%</b> <span class="small">(2 of 5)</span></td></tr>
+          <tr><td colspan="2" class="small" style="padding-top:6px;border-top:1px solid #e5e7eb">+ 3 leads arrived after 9 PM — moved to tomorrow's report</td></tr>
+        </table>
+      </div>
+
+      <div class="lead-col lead-col-resub">
+        <div class="col-title">Resubmission</div>
+        <div class="big">2</div>
+        <table>
+          <tr><td>≤ 1 min</td><td>1 (50%)</td></tr>
+          <tr><td>≤ 3 min</td><td>2 (100%)</td></tr>
+          <tr><td>&gt; 3 min</td><td>0</td></tr>
+          <tr><td>Never called</td><td>0</td></tr>
+          <tr><td>Real Calls (≥70s)</td><td>1</td></tr>
+          <tr><td>Live Transfers</td><td>0</td></tr>
+          <tr><td><b>Booked Today</b></td><td><b>1</b></td></tr>
+          <tr><td colspan="2" class="booking-breakdown">└ 1 <span class="pill-physical">Physical</span> &nbsp; 0 <span class="pill-phone">Phone Sale</span></td></tr>
+          <tr><td><b>Real → Book</b></td><td><b>100%</b> <span class="small">(1 of 1)</span></td></tr>
+        </table>
+      </div>
+
+      <div class="lead-col lead-col-react">
+        <div class="col-title">Reactivated</div>
+        <div class="big">3</div>
+        <table>
+          <tr><td>Real Calls (≥70s)</td><td>3</td></tr>
+          <tr><td>Live Transfers</td><td>0</td></tr>
+          <tr><td><b>Booked Today</b></td><td><b>0</b></td></tr>
+          <tr><td colspan="2" class="booking-breakdown">└ 0 <span class="pill-physical">Physical</span> &nbsp; 0 <span class="pill-phone">Phone Sale</span></td></tr>
+          <tr><td><b>Real → Book</b></td><td><b>0%</b> <span class="small">(0 of 3)</span></td></tr>
+          <tr><td colspan="2" class="small" style="padding-top:6px;border-top:1px solid #e5e7eb">Old contacts, not new submissions, who answered the phone today.</td></tr>
+        </table>
+      </div>
     </div>
 
+    <h3 style="margin-top:24px">Detail — all leads with activity today</h3>
     <table>
       <thead>
         <tr>
-          <th>#</th><th>Lead</th><th>Source</th><th>Came In</th><th>First Call</th><th>Resp.</th>
-          <th>Real Call</th><th>Dispatcher</th><th>LT</th><th>Final Stage</th><th>Booked Today</th>
+          <th>Cat</th><th>#</th><th>Lead</th><th>Source</th><th>Came In</th>
+          <th>First Call</th><th>Resp</th><th>Real Call</th>
+          <th>1st Disp</th><th>On Shift</th>
+          <th>LT</th><th>Final Stage</th><th>Booked</th><th>Attempts</th>
         </tr>
       </thead>
       <tbody>
-        <tr><td>1</td><td>Ed</td><td>ig</td><td>06:42:35</td><td>20m 21s</td><td><span class="badge badge-bad">&gt; 5 min</span></td><td>—</td><td>Frank</td><td></td><td>(3) Days Old</td><td><span class="pill-none">—</span></td></tr>
-        <tr class="row-booked"><td>2</td><td>James Southall</td><td>ig</td><td>07:12:33</td><td>47s</td><td><span class="badge badge-good">≤ 1 min</span></td><td>2m 14s</td><td>Frank</td><td>Yes</td><td>Over Phone Booked</td><td><span class="pill-phone">Phone Sale</span></td></tr>
-        <tr class="row-booked"><td>3</td><td>HAGERTY,ROBIN</td><td>fb</td><td>07:29:41</td><td>46s</td><td><span class="badge badge-good">≤ 1 min</span></td><td>3m 02s</td><td>Frank</td><td>Yes</td><td>Appt. Booked</td><td><span class="pill-physical">Physical Booking</span></td></tr>
-        <tr><td>4</td><td>SEAN MCCANN</td><td>ig</td><td>08:21:30</td><td>1m 58s</td><td><span class="badge badge-warn">≤ 3 min</span></td><td>—</td><td>Mark</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td></tr>
-        <tr><td>5</td><td>mike</td><td>fb</td><td>11:26:13</td><td>1m 11s</td><td><span class="badge badge-warn">≤ 3 min</span></td><td>1m 32s</td><td>Angel</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td></tr>
-        <tr><td>6</td><td>MIGNACCA ANTHON</td><td>fb</td><td>12:52:53</td><td>50s</td><td><span class="badge badge-good">≤ 1 min</span></td><td>—</td><td>Frank</td><td></td><td>(3) Days Old</td><td><span class="pill-none">—</span></td></tr>
-        <tr><td>7</td><td>Steven</td><td>fb</td><td>13:54:26</td><td>1m 8s</td><td><span class="badge badge-warn">≤ 3 min</span></td><td>1m 24s</td><td>Mark</td><td></td><td>In Contact</td><td><span class="pill-none">—</span></td></tr>
-        <tr><td>8</td><td>JAMES SCHMITT</td><td>fb</td><td>15:12:21</td><td>1m 12s</td><td><span class="badge badge-warn">≤ 3 min</span></td><td>—</td><td>Ellie</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td></tr>
-        <tr><td>9</td><td>ETHA HOWLE</td><td>fb</td><td>15:26:28</td><td>1m 19s</td><td><span class="badge badge-warn">≤ 3 min</span></td><td>—</td><td>Frank</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td></tr>
-        <tr><td>10</td><td>DONALD HIBBERT</td><td>fb</td><td>15:26:47</td><td>1m 18s</td><td><span class="badge badge-warn">≤ 3 min</span></td><td>—</td><td>Ellie</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td></tr>
-        <tr><td>11</td><td>Jo Ann</td><td>fb</td><td>15:33:42</td><td>48s</td><td><span class="badge badge-good">≤ 1 min</span></td><td>—</td><td>Ellie</td><td></td><td>Not Interested</td><td><span class="pill-none">—</span></td></tr>
-        <tr><td>12</td><td>John harris</td><td>fb</td><td>16:31:04</td><td>2m 17s</td><td><span class="badge badge-warn">≤ 3 min</span></td><td>—</td><td>Ellie</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td></tr>
-        <tr><td>13</td><td>G VILLEMARETTE</td><td>an</td><td>18:41:44</td><td>5m 7s</td><td><span class="badge badge-bad">&gt; 5 min</span></td><td>—</td><td>Ellie</td><td></td><td>(3) Days Old</td><td><span class="pill-none">—</span></td></tr>
-        <tr><td>14</td><td>GARVIN FORD</td><td>fb</td><td>19:01:21</td><td>41s</td><td><span class="badge badge-good">≤ 1 min</span></td><td>—</td><td>Ellie</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td></tr>
-        <tr><td>15</td><td>CRAWFORD CHARLE</td><td>fb</td><td>20:18:25</td><td>39s</td><td><span class="badge badge-good">≤ 1 min</span></td><td>—</td><td>Ellie</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td></tr>
-        <tr><td>16</td><td>LARRY DANIELS</td><td>fb</td><td>21:06:43</td><td>—</td><td><span class="badge badge-neut">never</span></td><td>—</td><td>—</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td></tr>
-        <tr><td>17</td><td>Vic</td><td>fb</td><td>22:46:02</td><td>—</td><td><span class="badge badge-neut">never</span></td><td>—</td><td>—</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td></tr>
-        <tr><td>18</td><td>TORRES,JENNIFER</td><td>fb</td><td>23:56:27</td><td>—</td><td><span class="badge badge-neut">never</span></td><td>—</td><td>—</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td></tr>
+        <tr><td><span class="cat-new">NEW</span></td><td>1</td><td>Ed</td><td>ig</td><td>06:42:35</td><td>20m 21s</td><td><span class="badge badge-bad">&gt; 5 min</span></td><td>—</td><td>Frank</td><td>Frank</td><td></td><td>(3) Days Old</td><td><span class="pill-none">—</span></td><td>17</td></tr>
+        <tr class="row-booked"><td><span class="cat-new">NEW</span></td><td>2</td><td>James Southall</td><td>ig</td><td>07:12:33</td><td>47s</td><td><span class="badge badge-good">≤ 1 min</span></td><td>2m 14s</td><td>Frank</td><td>Frank</td><td>Yes</td><td>Over Phone Booked</td><td><span class="pill-phone">Phone Sale</span></td><td>3</td></tr>
+        <tr class="row-booked"><td><span class="cat-new">NEW</span></td><td>3</td><td>HAGERTY,ROBIN</td><td>fb</td><td>07:29:41</td><td>46s</td><td><span class="badge badge-good">≤ 1 min</span></td><td>3m 02s</td><td>Frank</td><td>Frank</td><td>Yes</td><td>Appt. Booked</td><td><span class="pill-physical">Physical</span></td><td>18</td></tr>
+        <tr><td><span class="cat-new">NEW</span></td><td>4</td><td>SEAN MCCANN</td><td>ig</td><td>08:21:30</td><td>1m 58s</td><td><span class="badge badge-warn">≤ 3 min</span></td><td>—</td><td>Mark</td><td>Frank, Angel, Mark</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td><td>5</td></tr>
+        <tr><td><span class="cat-new">NEW</span></td><td>5</td><td>mike</td><td>fb</td><td>11:26:13</td><td>1m 11s</td><td><span class="badge badge-warn">≤ 3 min</span></td><td>1m 32s</td><td>Angel</td><td>Frank, Angel, Mark</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td><td>9</td></tr>
+        <tr><td><span class="cat-new">NEW</span></td><td>6</td><td>MIGNACCA ANTHON</td><td>fb</td><td>12:52:53</td><td>50s</td><td><span class="badge badge-good">≤ 1 min</span></td><td>—</td><td>Frank</td><td>Frank, Angel, Mark</td><td></td><td>(3) Days Old</td><td><span class="pill-none">—</span></td><td>14</td></tr>
+        <tr><td><span class="cat-new">NEW</span></td><td>7</td><td>Steven</td><td>fb</td><td>13:54:26</td><td>1m 8s</td><td><span class="badge badge-warn">≤ 3 min</span></td><td>1m 24s</td><td>Mark</td><td>Frank, Angel, Mark</td><td></td><td>In Contact</td><td><span class="pill-none">—</span></td><td>11</td></tr>
+        <tr><td><span class="cat-new">NEW</span></td><td>8</td><td>JAMES SCHMITT</td><td>fb</td><td>15:12:21</td><td>1m 12s</td><td><span class="badge badge-warn">≤ 3 min</span></td><td>—</td><td>Ellie</td><td>Frank, Mark, Ellie</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td><td>3</td></tr>
+        <tr><td><span class="cat-new">NEW</span></td><td>9</td><td>ETHA HOWLE</td><td>fb</td><td>15:26:28</td><td>1m 19s</td><td><span class="badge badge-warn">≤ 3 min</span></td><td>—</td><td>Frank</td><td>Frank, Mark, Ellie</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td><td>3</td></tr>
+        <tr><td><span class="cat-new">NEW</span></td><td>10</td><td>DONALD HIBBERT</td><td>fb</td><td>15:26:47</td><td>1m 18s</td><td><span class="badge badge-warn">≤ 3 min</span></td><td>—</td><td>Ellie</td><td>Frank, Mark, Ellie</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td><td>2</td></tr>
+        <tr><td><span class="cat-new">NEW</span></td><td>11</td><td>Jo Ann</td><td>fb</td><td>15:33:42</td><td>48s</td><td><span class="badge badge-good">≤ 1 min</span></td><td>—</td><td>Ellie</td><td>Frank, Mark, Ellie</td><td></td><td>Not Interested</td><td><span class="pill-none">—</span></td><td>2</td></tr>
+        <tr><td><span class="cat-new">NEW</span></td><td>12</td><td>John harris</td><td>fb</td><td>16:31:04</td><td>2m 17s</td><td><span class="badge badge-warn">≤ 3 min</span></td><td>—</td><td>Ellie</td><td>Frank, Mark, Ellie</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td><td>4</td></tr>
+        <tr><td><span class="cat-new">NEW</span></td><td>13</td><td>G VILLEMARETTE</td><td>an</td><td>18:41:44</td><td>5m 7s</td><td><span class="badge badge-bad">&gt; 5 min</span></td><td>—</td><td>Ellie</td><td>Frank, Ellie</td><td></td><td>(3) Days Old</td><td><span class="pill-none">—</span></td><td>1</td></tr>
+        <tr><td><span class="cat-new">NEW</span></td><td>14</td><td>GARVIN FORD</td><td>fb</td><td>19:01:21</td><td>41s</td><td><span class="badge badge-good">≤ 1 min</span></td><td>—</td><td>Ellie</td><td>Frank, Ellie</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td><td>1</td></tr>
+        <tr><td><span class="cat-new">NEW</span></td><td>15</td><td>CRAWFORD CHARLE</td><td>fb</td><td>20:18:25</td><td>39s</td><td><span class="badge badge-good">≤ 1 min</span></td><td>—</td><td>Ellie</td><td>Ellie</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td><td>1</td></tr>
+
+        <tr><td colspan="14" style="background:#e5e7eb;padding:6px 8px;font-size:11px;font-weight:600;color:#374151">▼ Arrived Last Night (came in after 9 PM yesterday — got first call this morning) · example rows</td></tr>
+        <tr class="row-night"><td><span class="cat-night">NIGHT</span></td><td>16</td><td>(example) Lara K.</td><td>fb</td><td>23:47 (yest)</td><td>07:18 today</td><td><span class="small">8 hr</span></td><td>—</td><td>Frank</td><td>Frank</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td><td>2</td></tr>
+        <tr class="row-night"><td><span class="cat-night">NIGHT</span></td><td>17</td><td>(example) Tom B.</td><td>fb</td><td>22:14 (yest)</td><td>07:33 today</td><td><span class="small">9 hr</span></td><td>—</td><td>Frank</td><td>Frank</td><td></td><td>(3) Days Old</td><td><span class="pill-none">—</span></td><td>1</td></tr>
+
+        <tr class="row-booked"><td><span class="cat-resub">RESUB</span></td><td>1</td><td>Stephanie Coggle</td><td>fb</td><td>14:20:47</td><td>2m 4s</td><td><span class="badge badge-warn">≤ 3 min</span></td><td>2m 35s</td><td>Angel</td><td>Frank, Mark, Angel</td><td></td><td>Appt. Booked</td><td><span class="pill-physical">Physical</span></td><td>3</td></tr>
+        <tr><td><span class="cat-resub">RESUB</span></td><td>2</td><td>Heather Dee</td><td>fb</td><td>15:46:23</td><td>52s</td><td><span class="badge badge-good">≤ 1 min</span></td><td>—</td><td>Ellie</td><td>Frank, Mark, Ellie</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td><td>2</td></tr>
+
+        <tr><td><span class="cat-react">REACT</span></td><td>1</td><td>Roberto González</td><td>fb</td><td>4d ago</td><td>—</td><td><span class="small">N/A</span></td><td>1m 47s</td><td>Mark</td><td>Frank, Angel, Mark</td><td></td><td>(3) Days Old</td><td><span class="pill-none">—</span></td><td>2</td></tr>
+        <tr><td><span class="cat-react">REACT</span></td><td>2</td><td>THOMAS MIANO</td><td>ig</td><td>14d ago</td><td>—</td><td><span class="small">N/A</span></td><td>2m 12s</td><td>Frank</td><td>Frank, Angel, Mark</td><td></td><td>(3) Days Old</td><td><span class="pill-none">—</span></td><td>3</td></tr>
+        <tr><td><span class="cat-react">REACT</span></td><td>3</td><td>Jessica</td><td>fb</td><td>2d ago</td><td>—</td><td><span class="small">N/A</span></td><td>1m 31s</td><td>Mark</td><td>Frank, Angel, Mark</td><td></td><td>New Lead In</td><td><span class="pill-none">—</span></td><td>4</td></tr>
       </tbody>
     </table>
-    <p class="small">⚠ Real Call durations and dispatcher attributions on this mockup are illustrative — actual numbers come from the live data pull.</p>
+    <p class="small" style="margin-top:12px">
+      <b>Legend:</b> <span class="cat-new">NEW</span> first-time lead today · <span class="cat-resub">RESUB</span> resubmission of an older contact · <span class="cat-react">REACT</span> old lead we got on the phone (no resubmission) · <span class="cat-night">NIGHT</span> arrived after 9 PM yesterday — first call shown.
+      <b>Resp</b> = time from "Came In" to "First Call". <b>Real Call</b> = longest call ≥70s today. <b>1st Disp</b> = who made the first call. <b>On Shift</b> = dispatchers on shift at the moment the lead came in. <b>Attempts</b> = total calls placed to that contact today.
+    </p>
+    <p class="small">⚠ "On Shift" data and "Total Attempts" enrichment in this mockup are illustrative — they'll fill in for real once the Hubstaff cross-reference and per-contact call counter ship.</p>
   </div>
 
-  <!-- SECTION 3b — REPEAT SUBMISSIONS -->
-  <div class="section">
-    <h2>Section 3b — Repeat Submissions (2 contacts re-submitted today)</h2>
-    <div class="subhead">Older contacts whose opportunity had real activity today — same response-time + booking metrics as new leads</div>
-
-    <div class="stat-grid">
-      <div class="stat"><div class="label">Total</div><div class="value">2</div></div>
-      <div class="stat"><div class="label">≤ 1 min</div><div class="value">1</div><div class="sub">50%</div></div>
-      <div class="stat"><div class="label">Real Calls</div><div class="value">1</div></div>
-      <div class="stat"><div class="label">Booked Today</div><div class="value">1</div></div>
-      <div class="stat"><div class="label">Real → Book</div><div class="value">100%</div><div class="sub">1 of 1</div></div>
-    </div>
-
-    <table>
-      <thead>
-        <tr><th>Contact</th><th>Source</th><th>Came In</th><th>First Call</th><th>Resp.</th><th>Real Call</th><th>Dispatcher</th><th>Final Stage</th><th>Booked Today</th></tr>
-      </thead>
-      <tbody>
-        <tr class="row-booked"><td>Stephanie Coggle</td><td>fb</td><td>14:20:47</td><td>2m 4s</td><td><span class="badge badge-warn">≤ 3 min</span></td><td>2m 35s</td><td>Angel</td><td>Appt. Booked</td><td><span class="pill-physical">Physical Booking</span></td></tr>
-        <tr><td>Heather Dee</td><td>fb</td><td>15:46:23</td><td>52s</td><td><span class="badge badge-good">≤ 1 min</span></td><td>—</td><td>Ellie</td><td>New Lead In</td><td><span class="pill-none">—</span></td></tr>
-      </tbody>
-    </table>
+  <div class="section" style="background:#fef9c3">
+    <h2>Section 4 — Coming next</h2>
+    <div class="subhead">By Hour Breakdown · By Dispatcher · Hour × Dispatcher matrix</div>
+    <p class="small">These were in v1 of the mockup. We agreed to nail Section 3 first, then move to Section 4 in the next pass.</p>
   </div>
 
-  <!-- SECTION 3c — REACTIVATED LEADS -->
-  <div class="section">
-    <h2>Section 3c — Reactivated Leads (3 old leads we got on the phone)</h2>
-    <div class="subhead">Old contacts (not new, not resubmissions) who answered the phone today — measures the value of follow-up calling</div>
-
-    <div class="stat-grid">
-      <div class="stat"><div class="label">Total</div><div class="value">3</div></div>
-      <div class="stat"><div class="label">Real Calls</div><div class="value">3</div></div>
-      <div class="stat"><div class="label">Live Transfers</div><div class="value">0</div></div>
-      <div class="stat"><div class="label">Booked Today</div><div class="value">0</div></div>
-      <div class="stat"><div class="label">Real → Book</div><div class="value">0%</div><div class="sub">0 of 3</div></div>
-    </div>
-
-    <table>
-      <thead>
-        <tr><th>Contact</th><th>Source</th><th>Age</th><th>Activity</th><th>Real Call</th><th>Dispatcher</th><th>Stage</th><th>Booked Today</th></tr>
-      </thead>
-      <tbody>
-        <tr><td>Roberto González</td><td>fb</td><td>4 days</td><td>Real Call</td><td>1m 47s</td><td>Mark</td><td>(3) Days Old</td><td><span class="pill-none">—</span></td></tr>
-        <tr><td>THOMAS MIANO</td><td>ig</td><td>14 days</td><td>Real Call</td><td>2m 12s</td><td>Frank</td><td>(3) Days Old</td><td><span class="pill-none">—</span></td></tr>
-        <tr><td>Jessica</td><td>fb</td><td>2 days</td><td>Real Call</td><td>1m 31s</td><td>Mark</td><td>New Lead In</td><td><span class="pill-none">—</span></td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- SECTION 4 — BY HOUR BREAKDOWN -->
-  <div class="section">
-    <h2>Section 4 — By Hour Breakdown</h2>
-    <div class="subhead">Lead activity, real calls, and bookings, hour-by-hour</div>
-
-    <table>
-      <thead>
-        <tr><th>Hour</th><th>New Leads</th><th>Repeat Subs</th><th>Reactivations</th><th>Real Calls</th><th>Bookings</th><th>Total Calls</th></tr>
-      </thead>
-      <tbody>
-        <tr><td>7 AM</td><td>3</td><td>—</td><td>—</td><td>—</td><td>—</td><td>6</td></tr>
-        <tr><td>8 AM</td><td>1</td><td>—</td><td>—</td><td>1</td><td><b>1</b></td><td>15</td></tr>
-        <tr><td>9 AM</td><td>—</td><td>—</td><td>—</td><td>2</td><td>—</td><td>45</td></tr>
-        <tr><td>10 AM</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>52</td></tr>
-        <tr><td>11 AM</td><td>1</td><td>—</td><td>1</td><td>1</td><td>—</td><td>33</td></tr>
-        <tr><td>12 PM</td><td>1</td><td>—</td><td>—</td><td>1</td><td>—</td><td>66</td></tr>
-        <tr><td>1 PM</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>60</td></tr>
-        <tr><td>2 PM</td><td>—</td><td>1</td><td>1</td><td>2</td><td><b>1</b></td><td>50</td></tr>
-        <tr><td>3 PM</td><td>5</td><td>1</td><td>—</td><td>—</td><td>—</td><td>59</td></tr>
-        <tr><td>4 PM</td><td>1</td><td>—</td><td>1</td><td>—</td><td>—</td><td>66</td></tr>
-        <tr><td>5 PM</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>43</td></tr>
-        <tr><td>6 PM</td><td>1</td><td>—</td><td>—</td><td>—</td><td>—</td><td>33</td></tr>
-        <tr><td>7 PM</td><td>1</td><td>—</td><td>—</td><td>—</td><td>—</td><td>11</td></tr>
-        <tr><td>8 PM</td><td>1</td><td>—</td><td>—</td><td>1</td><td>—</td><td>9</td></tr>
-        <tr><td>9 PM</td><td>1</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-        <tr><td>10 PM</td><td>1</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-        <tr><td>11 PM</td><td>1</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-        <tr style="background:#f3f4f6;font-weight:bold"><td>TOTAL</td><td>18</td><td>2</td><td>3</td><td>8</td><td>2</td><td>548</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- SECTION 5 — BY DISPATCHER -->
-  <div class="section">
-    <h2>Section 5 — By Dispatcher</h2>
-    <div class="subhead">Who handled what — calls, real conversations, and bookings</div>
-
-    <table>
-      <thead>
-        <tr>
-          <th>Dispatcher</th><th>Total Calls</th><th>Real Calls (≥70s)</th><th>Live Transfers</th>
-          <th>New Leads</th><th>Repeats</th><th>Reactivations</th><th>Bookings</th><th>Conv %</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr><td><b>Frank</b><br><span class="small">dispatcher_manager</span></td><td>53</td><td>3</td><td>2</td><td>5</td><td>0</td><td>1</td><td><b>1</b></td><td>20%</td></tr>
-        <tr><td><b>Mark</b><br><span class="small">dispatcher_training</span></td><td>213</td><td>3</td><td>0</td><td>2</td><td>0</td><td>2</td><td><b>0</b></td><td>0%</td></tr>
-        <tr><td><b>Angel</b><br><span class="small">dispatcher</span></td><td>101</td><td>1</td><td>0</td><td>1</td><td>1</td><td>0</td><td><b>1</b></td><td>50%</td></tr>
-        <tr><td><b>Ellie</b><br><span class="small">dispatcher</span></td><td>171</td><td>1</td><td>0</td><td>7</td><td>1</td><td>0</td><td><b>0</b></td><td>0%</td></tr>
-        <tr><td><b>Chris</b><br><span class="small">office_manager</span></td><td>7</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>—</td></tr>
-        <tr style="background:#f3f4f6"><td><b>INBOUND</b></td><td>3</td><td>0</td><td>0</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- SECTION 6 — HOUR x DISPATCHER MATRIX -->
-  <div class="section">
-    <h2>Section 6 — Hour × Dispatcher Matrix</h2>
-    <div class="subhead">Calls placed each hour by each dispatcher</div>
-
-    <table>
-      <thead>
-        <tr><th>Hour</th><th>Frank</th><th>Mark</th><th>Angel</th><th>Ellie</th><th>Chris</th><th>Inbound</th><th>Total</th></tr>
-      </thead>
-      <tbody>
-        <tr><td>7 AM</td><td>6</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>6</td></tr>
-        <tr><td>8 AM</td><td>2</td><td>11</td><td>2</td><td>—</td><td>—</td><td>—</td><td>15</td></tr>
-        <tr><td>9 AM</td><td>—</td><td>36</td><td>9</td><td>—</td><td>—</td><td>—</td><td>45</td></tr>
-        <tr><td>10 AM</td><td>3</td><td>41</td><td>7</td><td>—</td><td>—</td><td>1</td><td>52</td></tr>
-        <tr><td>11 AM</td><td>1</td><td>18</td><td>14</td><td>—</td><td>—</td><td>—</td><td>33</td></tr>
-        <tr><td>12 PM</td><td>6</td><td>14</td><td>46</td><td>—</td><td>—</td><td>—</td><td>66</td></tr>
-        <tr><td>1 PM</td><td>3</td><td>42</td><td>15</td><td>—</td><td>—</td><td>—</td><td>60</td></tr>
-        <tr><td>2 PM</td><td>4</td><td>17</td><td>8</td><td>21</td><td>—</td><td>—</td><td>50</td></tr>
-        <tr><td>3 PM</td><td>12</td><td>34</td><td>—</td><td>12</td><td>1</td><td>—</td><td>59</td></tr>
-        <tr><td>4 PM</td><td>3</td><td>—</td><td>—</td><td>57</td><td>6</td><td>—</td><td>66</td></tr>
-        <tr><td>5 PM</td><td>2</td><td>—</td><td>—</td><td>41</td><td>—</td><td>—</td><td>43</td></tr>
-        <tr><td>6 PM</td><td>9</td><td>—</td><td>—</td><td>23</td><td>—</td><td>1</td><td>33</td></tr>
-        <tr><td>7 PM</td><td>2</td><td>—</td><td>—</td><td>8</td><td>—</td><td>1</td><td>11</td></tr>
-        <tr><td>8 PM</td><td>—</td><td>—</td><td>—</td><td>9</td><td>—</td><td>—</td><td>9</td></tr>
-        <tr style="background:#f3f4f6;font-weight:bold"><td>TOTAL</td><td>53</td><td>213</td><td>101</td><td>171</td><td>7</td><td>3</td><td>548</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- FOOTER -->
   <div class="footer">
     Local AC Reports Bot · Hubstaff + GoHighLevel<br>
     📎 Full Excel report attached: <span class="small">Local_AC_Daily_Report_2026-05-07.xlsx</span><br>
@@ -390,6 +221,5 @@
   </div>
 
 </div>
-
 </body>
 </html>
