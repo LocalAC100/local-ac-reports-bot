@@ -9,6 +9,7 @@ import * as hubstaff from "./hubstaff.js";
 import * as ghl from "./ghl.js";
 import { analyzeScreenshots } from "./screenshots.js";
 import { sendMail } from "./mailer.js";
+import { buildDailyExcel } from "./excel-report.js";
 import { renderEmail, renderHubstaffSection, renderDispatcherSection } from "./template.js";
 import { Reports, Calls, classifyCall, isLiveTransfer } from "./db.js";
 import { DateTime } from "luxon";
@@ -1103,7 +1104,7 @@ function applyCombinedStatusFlags(perEmployee, dispatcherRows) {
 
 // ---------- Top-level orchestrators ----------
 
-export async function runMorningReport({ dateOverride } = {}) {
+export async function runMorningReport({ dateOverride, to } = {}) {
   // dateOverride lets the admin debug endpoint regenerate a report for a
   // past date by anchoring `now()` to that date's noon ET (so morningWindow
   // covers that day's morning).
@@ -1148,13 +1149,23 @@ export async function runMorningReport({ dateOverride } = {}) {
     console.error("[report] db archive failed", e?.message);
   }
 
+  let attachments;
+  try {
+    const dateStr = generatedAt.toFormat("yyyy-LL-dd");
+    const xlsx = await buildDailyExcel(dateStr);
+    attachments = [{ filename: xlsx.filename, content: Buffer.from(xlsx.buffer) }];
+  } catch (e) {
+    console.error("[report] morning Excel build failed:", e?.message);
+  }
   await sendMail({
+    to,
     subject: `Local AC — Morning Snapshot (${generatedAt.toFormat("LLL d")})`,
     html,
+    attachments,
   });
 }
 
-export async function runEveningReport({ dateOverride } = {}) {
+export async function runEveningReport({ dateOverride, to } = {}) {
   // dateOverride lets the admin debug endpoint regenerate a report for a
   // past date by anchoring `now()` to that date's 7:30 PM ET (so
   // eveningWindow covers that full day).
@@ -1195,9 +1206,19 @@ export async function runEveningReport({ dateOverride } = {}) {
     console.error("[report] db archive failed", e?.message);
   }
 
+  let attachments;
+  try {
+    const dateStr = generatedAt.toFormat("yyyy-LL-dd");
+    const xlsx = await buildDailyExcel(dateStr);
+    attachments = [{ filename: xlsx.filename, content: Buffer.from(xlsx.buffer) }];
+  } catch (e) {
+    console.error("[report] evening Excel build failed:", e?.message);
+  }
   await sendMail({
+    to,
     subject: `Local AC — Full Day Summary (${generatedAt.toFormat("LLL d")})`,
     html,
+    attachments,
   });
 }
 
