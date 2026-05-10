@@ -376,7 +376,6 @@ function addSummaryTab(wb, { dateStr, totals, buckets, uniqueContacts, newLeadSt
       ["Total reactivated", reactivatedStats.total],
       ["Real calls (≥70s)", reactivatedStats.realCallCount ?? 0],
       ["Booked today", reactivatedStats.bookedToday ?? 0],
-      ["Already booked (older)", reactivatedStats.booked - (reactivatedStats.bookedToday ?? 0)],
       [`Real Call → Booking conversion (today)`, reactivatedStats.realCallCount > 0
         ? `${reactivatedStats.bookedToday ?? 0} of ${reactivatedStats.realCallCount} (${Math.round((reactivatedStats.realCallToBooking ?? 0) * 100)}%)`
         : "—"],
@@ -634,7 +633,7 @@ function addNewOpportunitiesTab(wb, newOppRows) {
     "First Call (ET)", "Response Time", "Resp. Bucket",
     "First Caller", "Total Calls",
     "Longest Real Call", "Real Call Dispatcher", "Live Transfer?",
-    "Final Stage", "Booked Today?",
+    "Final Stage", "Booked Today",
   ];
   ws.getRow(4).values = headers;
   applyHeaderStyle(ws.getRow(4));
@@ -648,7 +647,12 @@ function addNewOpportunitiesTab(wb, newOppRows) {
       r.longestCallDuration || "—", r.longestCallDispatcher || "",
       r.hadLiveTransfer ? "Yes" : "",
       r.finalStage || "",
-      r.bookedToday ? "Yes" : (r.booked ? "Already booked" : ""),
+      // Booking type fired today: Phone Booking / Physical Booking / blank.
+      r.bookedToday
+        ? (r.finalStage === "Over Phone Booked" ? "Phone Booking"
+           : r.finalStage === "Appt. Booked" ? "Physical Booking"
+           : "Booked")
+        : "",
     ];
     const fill = r.bookedToday ? COLORS.LIVE_TRANSFER : COLORS.TODAY_LEAD;
     row.eachCell((cell) => {
@@ -831,6 +835,82 @@ function addLeadActivityBreakdownTab(wb, { newLeadRows, newOppRows, reactivatedR
   });
 
   setColumnWidths(ws, [22, 18, 18, 22, 18, 22, 16, 18]);
+}
+
+function addBookingFunnelTab(wb, { newLeadRows, newOppRows, reactivatedRows, pipelineMap, dateStr }) {
+  const ws = wb.addWorksheet("Booking Funnel");
+  applyTitleStyle(ws.getCell("A1"));
+  ws.getCell("A1").value = `Booking Funnel — ${dateStr}`;
+  ws.getCell("A2").value = "Where today\'s bookings came from. Origin = stage at start of day. Phone Booking = Over Phone Booked stage = phone callback for sales. Physical = Appt. Booked stage.";
+  ws.getCell("A2").font = { name: "Arial", size: 10, italic: true, color: { argb: "FF606060" } };
+  setColumnWidths(ws, [12, 22, 8, 14, 18, 20, 24, 16, 24]);
+
+  const headers = ["Category", "Lead", "Source", "Origin (start of day)", "Final State", "Booking Type", "Dispatcher", "Real Call", "Notes"];
+  ws.getRow(4).values = headers;
+  applyHeaderStyle(ws.getRow(4));
+
+  // Combine all booked leads from the three categories.
+  const rows = [];
+  for (const r of newLeadRows) {
+    if (!r.bookedToday) continue;
+    rows.push({
+      cat: "NEW",
+      name: r.leadName,
+      source: r.leadSource,
+      origin: "New Lead In",
+      finalStage: r.finalStage,
+      bookingType: r.finalStage === "Over Phone Booked" ? "Phone Booking" : (r.finalStage === "Appt. Booked" ? "Physical Booking" : ""),
+      dispatcher: r.firstCaller || r.longestCallDispatcher || "",
+      realCall: r.longestCallDuration || "",
+      notes: "Brand-new contact created today",
+    });
+  }
+  for (const r of newOppRows) {
+    if (!r.bookedToday) continue;
+    rows.push({
+      cat: "RESUB",
+      name: r.leadName,
+      source: r.leadSource,
+      origin: "New Lead In (reset by resubmission)",
+      finalStage: r.finalStage,
+      bookingType: r.finalStage === "Over Phone Booked" ? "Phone Booking" : (r.finalStage === "Appt. Booked" ? "Physical Booking" : ""),
+      dispatcher: r.firstCaller || r.longestCallDispatcher || "",
+      realCall: r.longestCallDuration || "",
+      notes: "Old contact resubmitted today, opp reset to New Lead In",
+    });
+  }
+  for (const r of reactivatedRows) {
+    if (!r.bookedToday) continue;
+    rows.push({
+      cat: "REACT",
+      name: r.name,
+      source: r.source,
+      origin: r.stage || "(unknown)",
+      finalStage: r.stage,
+      bookingType: r.stage === "Over Phone Booked" ? "Phone Booking" : (r.stage === "Appt. Booked" ? "Physical Booking" : ""),
+      dispatcher: r.dispatcher || "",
+      realCall: r.durationFmt || "",
+      notes: `Old lead (${r.ageDays}d) re-engaged today`,
+    });
+  }
+
+  rows.forEach((r, i) => {
+    const row = ws.getRow(5 + i);
+    row.values = [r.cat, r.name, r.source, r.origin, r.finalStage, r.bookingType, r.dispatcher, r.realCall, r.notes];
+    const fill = r.bookingType === "Physical Booking" ? COLORS.LIVE_TRANSFER : COLORS.RINGING;
+    row.eachCell((cell) => {
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fill } };
+    });
+  });
+
+  // Summary row at bottom
+  const summaryRow = 5 + rows.length + 1;
+  ws.getCell(`A${summaryRow}`).value = "TOTAL";
+  ws.getCell(`A${summaryRow}`).font = { bold: true };
+  const physicalCount = rows.filter((r) => r.bookingType === "Physical Booking").length;
+  const phoneCount = rows.filter((r) => r.bookingType === "Phone Booking").length;
+  ws.getCell(`F${summaryRow}`).value = `${physicalCount} Physical · ${phoneCount} Phone Booking · ${rows.length} total`;
+  ws.getCell(`F${summaryRow}`).font = { bold: true };
 }
 
 function addNotesTab(wb) {
@@ -1150,7 +1230,7 @@ function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr, exclud
       source: contact.source || "",
       dateAdded: added.setZone(TZ).toFormat("yyyy-LL-dd"),
       ageDays,
-      activity: pipeline.stageName === "Appt. Booked" ? "Appt. Booked (no call)" : "Phone Sale (no call)",
+      activity: pipeline.stageName === "Appt. Booked" ? "Appt. Booked (no call)" : "Phone Booking (no call)",
       dispatcher: "",
       activityTime: "",
       durationFmt: "",
@@ -1193,7 +1273,7 @@ function addReactivatedLeadsTab(wb, rows, stats) {
     "Contact", "Phone", "Source", "Created", "Age (days)",
     "Activity Today", "Dispatcher", "Time (ET)", "Duration",
     "Pipeline", "Stage",
-    "Booked Today?", "Already Booked?",
+    "Booked Today",
   ];
   ws.getRow(4).values = headers;
   applyHeaderStyle(ws.getRow(4));
@@ -1205,8 +1285,11 @@ function addReactivatedLeadsTab(wb, rows, stats) {
       r.name, r.phone, r.source, r.dateAdded, r.ageDays,
       r.activity, r.dispatcher, r.activityTime, r.durationFmt,
       r.pipeline, r.stage,
-      r.bookedToday ? "Yes" : "",
-      r.booked && !r.bookedToday ? "Yes" : "",
+      r.bookedToday
+        ? (r.stage === "Over Phone Booked" ? "Phone Booking"
+           : r.stage === "Appt. Booked" ? "Physical Booking"
+           : "Booked")
+        : "",
     ];
     const fill = r.bookedToday
       ? COLORS.LIVE_TRANSFER
@@ -1291,6 +1374,7 @@ export async function buildDailyExcel(dateStr) {
   addByOutboundTab(wb, calls);
   addHourXDispatcherTab(wb, calls);
   addLeadActivityBreakdownTab(wb, { newLeadRows, newOppRows, reactivatedRows, calls });
+  addBookingFunnelTab(wb, { newLeadRows, newOppRows, reactivatedRows, pipelineMap, dateStr });
   addNotesTab(wb);
 
   // Diagnostic tab with counts useful for debugging
