@@ -74,28 +74,40 @@
 
   <div class="section">
     <h2>Section 1 — Hubstaff (Hours &amp; Activity)</h2>
-    <div class="subhead">⚠ <i>Placeholder — Hubstaff integration to be wired up next</i></div>
+    <div class="subhead">⚠ <i>Placeholder data — Hubstaff integration wires up next. Logic shown is the live rule we'll apply.</i></div>
+
     <table>
-      <thead><tr><th>Employee</th><th>Clock In</th><th>Clock Out</th><th>Worked</th><th>Break</th><th>Activity</th><th>Status</th></tr></thead>
+      <thead><tr><th>Employee</th><th>Schedule</th><th>Clock In</th><th>Clock Out</th><th>Worked (within shift)</th><th>Break</th><th>Activity</th><th>Status</th></tr></thead>
       <tbody>
-        <tr><td><b>Chris</b><br><span class="small">office_manager</span></td><td>7:25 AM</td><td>7:30 PM</td><td><b>12h 4m</b></td><td>&lt;1m</td><td>96%</td><td><span class="badge badge-good">✓ on track</span></td></tr>
-        <tr><td><b>Frank</b><br><span class="small">dispatcher_manager</span></td><td>6:47 AM</td><td>7:30 PM</td><td><b>12h 43m</b></td><td>&lt;1m</td><td>15%</td><td><span class="badge badge-good">✓ on track</span></td></tr>
-        <tr><td><b>Ellie</b><br><span class="small">dispatcher</span></td><td>2:04 PM</td><td>7:30 PM</td><td><b>5h 25m</b></td><td>&lt;1m</td><td>32%</td><td><span class="badge badge-good">✓ on track</span></td></tr>
-        <tr><td><b>Angel</b><br><span class="small">dispatcher</span></td><td>8:00 AM</td><td>2:40 PM</td><td><b>6h 31m</b></td><td>9m</td><td>29%</td><td><span class="badge badge-good">✓ on track</span></td></tr>
-        <tr><td><b>Mark</b><br><span class="small">dispatcher_training</span></td><td>—</td><td>—</td><td>&lt;1m</td><td>—</td><td>—</td><td><span class="badge badge-bad">no Hubstaff yet</span></td></tr>
+        <tr><td><b>Chris</b><br><span class="small">office_manager</span></td><td>8:00 AM – 9:00 PM<br><span class="small">12h paid · 60 min break</span></td><td>7:25 AM<br><span class="small">35m early ✓</span></td><td>7:30 PM<br><span class="small badge badge-bad">90m early ❌</span></td><td><b>11h 30m</b><br><span class="small">vs 12h scheduled</span></td><td>&lt;1m</td><td>96%</td><td><span class="badge badge-bad">❌ Early Out</span></td></tr>
+        <tr><td><b>Frank</b><br><span class="small">dispatcher_manager</span></td><td>7:00 AM – 8:00 PM<br><span class="small">12h paid · 60 min break</span></td><td>6:47 AM<br><span class="small">13m early ✓</span></td><td>7:30 PM<br><span class="small badge badge-bad">30m early ❌</span></td><td><b>12h 30m → 12h capped</b><br><span class="small">vs 12h scheduled</span></td><td>&lt;1m</td><td>15%</td><td><span class="badge badge-bad">❌ Early Out</span></td></tr>
+        <tr><td><b>Ellie</b><br><span class="small">dispatcher</span></td><td>2:30 PM – 8:00 PM<br><span class="small">5h paid · 30 min break</span></td><td>2:04 PM<br><span class="small">26m early ✓</span></td><td>7:30 PM<br><span class="small badge badge-bad">30m early ❌</span></td><td><b>5h</b><br><span class="small">vs 5h scheduled</span></td><td>&lt;1m</td><td>32%</td><td><span class="badge badge-bad">❌ Early Out</span></td></tr>
+        <tr><td><b>Angel</b><br><span class="small">dispatcher</span></td><td>8:00 AM – 2:30 PM<br><span class="small">6h paid · 30 min break</span></td><td>8:00 AM<br><span class="small">on time ✓</span></td><td>2:40 PM<br><span class="small">10m late ✓</span></td><td><b>6h 21m → 6h capped</b><br><span class="small">vs 6h scheduled</span></td><td>9m ✓</td><td>29%</td><td><span class="badge badge-good">✓ on track</span></td></tr>
+        <tr><td><b>Mark</b><br><span class="small">dispatcher_training</span></td><td>8:00 AM – 4:00 PM<br><span class="small">7h 30m paid · 30 min break</span></td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td><span class="badge badge-warn">no Hubstaff yet</span></td></tr>
       </tbody>
     </table>
-    <h3>Day Total</h3>
+
+    <p class="small" style="margin-top:8px">
+      <b>Status rule:</b> ✓ on track only when none of these fire — late clock-in, early clock-out, hours-short, or break over budget.
+      Early clock-in and late clock-out are <b>not</b> flagged.
+    </p>
+
+    <h3>Day Total — paid hours only (capped at scheduled)</h3>
     <table>
-      <thead><tr><th>Employee</th><th>Hours</th><th>Pay Rate</th><th>Cost</th></tr></thead>
+      <thead><tr><th>Employee</th><th>Scheduled</th><th>Worked (paid)</th><th>Pay Rate</th><th>Cost</th></tr></thead>
       <tbody>
-        <tr><td>Chris</td><td>12h 4m</td><td>$5/hr</td><td>$60.36</td></tr>
-        <tr><td>Frank</td><td>12h 43m</td><td>$4/hr</td><td>$50.85</td></tr>
-        <tr><td>Ellie</td><td>5h 25m</td><td>$4/hr</td><td>$21.67</td></tr>
-        <tr><td>Angel</td><td>6h 31m</td><td>$4/hr</td><td>$26.04</td></tr>
-        <tr style="background:#f3f4f6;font-weight:bold"><td>TOTAL</td><td>36h 43m</td><td></td><td>$158.92</td></tr>
+        <tr><td>Chris</td><td>12h</td><td>11h 30m</td><td>$5/hr</td><td>$57.50</td></tr>
+        <tr><td>Frank</td><td>12h</td><td>12h <span class="small">(actual 12h 30m capped)</span></td><td>$4/hr</td><td>$48.00</td></tr>
+        <tr><td>Ellie</td><td>5h</td><td>5h</td><td>$4/hr</td><td>$20.00</td></tr>
+        <tr><td>Angel</td><td>6h</td><td>6h <span class="small">(actual 6h 21m capped)</span></td><td>$4/hr</td><td>$24.00</td></tr>
+        <tr style="background:#f3f4f6;font-weight:bold"><td>TOTAL</td><td>35h</td><td>34h 30m</td><td></td><td>$149.50</td></tr>
       </tbody>
     </table>
+    <p class="small">
+      <b>Pay formula:</b> <code>min(hours worked within scheduled window, scheduled paid hours) × rate</code>.
+      Time clocked outside the shift (before start, after end) doesn't count.
+      Scheduled paid hours = shift length minus break budget.
+    </p>
   </div>
 
   <div class="section">
@@ -208,10 +220,62 @@
     <p class="small">⚠ "On Shift" data and "Total Attempts" enrichment in this mockup are illustrative — they'll fill in for real once the Hubstaff cross-reference and per-contact call counter ship.</p>
   </div>
 
-  <div class="section" style="background:#fef9c3">
-    <h2>Section 4 — Coming next</h2>
-    <div class="subhead">By Hour Breakdown · By Dispatcher · Hour × Dispatcher matrix</div>
-    <p class="small">These were in v1 of the mockup. We agreed to nail Section 3 first, then move to Section 4 in the next pass.</p>
+  <div class="section">
+    <h2>Section 4 — Dispatcher Performance</h2>
+    <div class="subhead">Per-dispatcher rollup with bookings broken out</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Dispatcher</th><th>Total</th><th>Real Call</th><th>Live Transfer</th>
+          <th>No Answer</th><th>Failed</th>
+          <th>Unique Contacts</th><th>Avg / Contact</th><th>% Real</th>
+          <th>Physical Booked</th><th>Phone Sale</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><b>Mark Jay Vergara</b><br><span class="small">dispatcher_training</span></td><td>213</td><td>3</td><td>0</td><td>197</td><td>13</td><td>57</td><td><span class="badge badge-good">3.74</span></td><td>1.4%</td><td>0</td><td>0</td></tr>
+        <tr><td><b>Ellie Guerra</b><br><span class="small">dispatcher</span></td><td>171</td><td>1</td><td>0</td><td>147</td><td>22</td><td>69</td><td><span class="badge badge-good">2.48</span></td><td>0.6%</td><td>0</td><td>0</td></tr>
+        <tr><td><b>Angel Sejera</b><br><span class="small">dispatcher</span></td><td>101</td><td>3</td><td>0</td><td>75</td><td>23</td><td>44</td><td><span class="badge badge-good">2.30</span></td><td>3.0%</td><td><b>1</b> <span class="pill-physical">Physical</span></td><td>0</td></tr>
+        <tr><td><b>Frank Maglanoc</b><br><span class="small">dispatcher_manager</span></td><td>53</td><td>0</td><td>2</td><td>49</td><td>2</td><td>32</td><td><span class="badge badge-bad">1.66</span></td><td>3.8%</td><td><b>1</b> <span class="pill-physical">Physical</span></td><td><b>1</b> <span class="pill-phone">Phone Sale</span></td></tr>
+        <tr><td><b>Christian Quafiricua</b><br><span class="small">office_manager</span></td><td>7</td><td>1</td><td>0</td><td>6</td><td>0</td><td>1</td><td><span class="badge badge-warn">7.00</span></td><td>14.3%</td><td>0</td><td>0</td></tr>
+        <tr style="background:#f9fafb"><td><b>INBOUND</b></td><td>3</td><td>0</td><td>0</td><td>3</td><td>0</td><td>3</td><td>1.00</td><td>0%</td><td>—</td><td>—</td></tr>
+        <tr style="background:#f3f4f6;font-weight:bold"><td>TOTAL</td><td>548</td><td>8</td><td>2</td><td>477</td><td>60</td><td>206*</td><td></td><td>1.8%</td><td><b>2</b></td><td><b>1</b></td></tr>
+      </tbody>
+    </table>
+    <p class="small">
+      <b>Avg / Contact</b> color: green = healthy 2–4 calls per lead, red &lt; 2 (under-pushing), yellow &gt; 4 (over-calling).
+      <b>% Real</b> = (Real Call + Live Transfer) / Total.
+      <b>Physical Booked</b> = contacts whose opportunity moved into "Appt. Booked" today AND this dispatcher had the longest real call.
+      <b>Phone Sale</b> = same but for "Over Phone Booked" stage.
+      <span class="small">* Total Unique Contacts is rolled across all dispatchers; the same lead may be called by multiple people, so dispatcher uniques don't sum to the total.</span>
+    </p>
+  </div>
+
+  <div class="section">
+    <h2>Section 5 — Hour × Dispatcher Matrix</h2>
+    <div class="subhead">Calls placed each hour by each dispatcher</div>
+    <table>
+      <thead>
+        <tr><th>Hour</th><th>Frank</th><th>Mark</th><th>Angel</th><th>Ellie</th><th>Chris</th><th>Inbound</th><th>Hour Total</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>7 AM</td><td>6</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>6</td></tr>
+        <tr><td>8 AM</td><td>2</td><td>11</td><td>2</td><td>—</td><td>—</td><td>—</td><td>15</td></tr>
+        <tr><td>9 AM</td><td>—</td><td>36</td><td>9</td><td>—</td><td>—</td><td>—</td><td>45</td></tr>
+        <tr><td>10 AM</td><td>3</td><td>41</td><td>7</td><td>—</td><td>—</td><td>1</td><td>52</td></tr>
+        <tr><td>11 AM</td><td>1</td><td>18</td><td>14</td><td>—</td><td>—</td><td>—</td><td>33</td></tr>
+        <tr><td>12 PM</td><td>6</td><td>14</td><td>46</td><td>—</td><td>—</td><td>—</td><td>66</td></tr>
+        <tr><td>1 PM</td><td>3</td><td>42</td><td>15</td><td>—</td><td>—</td><td>—</td><td>60</td></tr>
+        <tr><td>2 PM</td><td>4</td><td>17</td><td>8</td><td>21</td><td>—</td><td>—</td><td>50</td></tr>
+        <tr><td>3 PM</td><td>12</td><td>34</td><td>—</td><td>12</td><td>1</td><td>—</td><td>59</td></tr>
+        <tr><td>4 PM</td><td>3</td><td>—</td><td>—</td><td>57</td><td>6</td><td>—</td><td>66</td></tr>
+        <tr><td>5 PM</td><td>2</td><td>—</td><td>—</td><td>41</td><td>—</td><td>—</td><td>43</td></tr>
+        <tr><td>6 PM</td><td>9</td><td>—</td><td>—</td><td>23</td><td>—</td><td>1</td><td>33</td></tr>
+        <tr><td>7 PM</td><td>2</td><td>—</td><td>—</td><td>8</td><td>—</td><td>1</td><td>11</td></tr>
+        <tr><td>8 PM</td><td>—</td><td>—</td><td>—</td><td>9</td><td>—</td><td>—</td><td>9</td></tr>
+        <tr style="background:#f3f4f6;font-weight:bold"><td>TOTAL</td><td>53</td><td>213</td><td>101</td><td>171</td><td>7</td><td>3</td><td>548</td></tr>
+      </tbody>
+    </table>
   </div>
 
   <div class="footer">
