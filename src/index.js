@@ -82,3 +82,33 @@ cron.schedule(
 console.log(
   `[cron] scheduled morning=12:00 evening=19:30 idle=*/5 8-20 tz=${config.timezone} (hourly disabled)`
 );
+
+// Firehose backfill cron — keeps local SQLite calls table fresh.
+// Without this, the calls table only gets data when /admin/debug/firehose-backfill is hit manually.
+import { backfillDate } from "./firehose-backfill.js";
+
+// Every 15 minutes from 6 AM to 10 PM ET, refresh today's call data.
+cron.schedule("*/15 6-22 * * *", async () => {
+  const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  console.log("[firehose-backfill-cron] running for", dateStr);
+  try {
+    const r = await backfillDate(dateStr);
+    console.log("[firehose-backfill-cron] OK", r);
+  } catch (e) {
+    console.error("[firehose-backfill-cron] ERR", e && e.message || e);
+  }
+}, { timezone: "America/New_York" });
+
+// Nightly catch-up at 2 AM ET for yesterday's data.
+cron.schedule("0 2 * * *", async () => {
+  const y = new Date();
+  y.setDate(y.getDate() - 1);
+  const dateStr = y.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  console.log("[firehose-backfill-cron] nightly catch-up for", dateStr);
+  try {
+    const r = await backfillDate(dateStr);
+    console.log("[firehose-backfill-cron] nightly OK", r);
+  } catch (e) {
+    console.error("[firehose-backfill-cron] nightly ERR", e && e.message || e);
+  }
+}, { timezone: "America/New_York" });
