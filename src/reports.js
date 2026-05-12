@@ -1111,10 +1111,10 @@ export async function runMorningReport({ dateOverride, to } = {}) {
   const generatedAt = dateOverride
     ? DateTime.fromISO(dateOverride, { zone: TZ }).set({ hour: 12, minute: 0 })
     : now();
-  const { from, to } = morningWindow(generatedAt);
+  const { from, to: toIso } = morningWindow(generatedAt);
 
-  const hub = await buildHubstaffSection({ from, to, includeTotals: false });
-  const dispatch = await buildDispatcherSection({ from, to, includeTimeOfDay: false });
+  const hub = await buildHubstaffSection({ from, to: toIso, includeTotals: false });
+  const dispatch = await buildDispatcherSection({ from, to: toIso, includeTimeOfDay: false });
 
   // Cross-reference low activity AND low calls
   const dispatcherByName = new Map(dispatch.byDispatcher.map((d) => [d.name, d]));
@@ -1172,10 +1172,10 @@ export async function runEveningReport({ dateOverride, to } = {}) {
   const generatedAt = dateOverride
     ? DateTime.fromISO(dateOverride, { zone: TZ }).set({ hour: 19, minute: 30 })
     : now();
-  const { from, to } = eveningWindow(generatedAt);
+  const { from, to: toIso } = eveningWindow(generatedAt);
 
-  const hub = await buildHubstaffSection({ from, to, includeTotals: true });
-  const dispatch = await buildDispatcherSection({ from, to, includeTimeOfDay: true });
+  const hub = await buildHubstaffSection({ from, to: toIso, includeTotals: true });
+  const dispatch = await buildDispatcherSection({ from, to: toIso, includeTimeOfDay: true });
 
   const dispatcherByName = new Map(dispatch.byDispatcher.map((d) => [d.name, d]));
   for (const f of hub.lowActivityFlags) {
