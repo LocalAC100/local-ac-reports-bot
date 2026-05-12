@@ -592,6 +592,46 @@ export function buildFirehoseBackfillRouter() {
     }
   });
 
+  // PUBLIC heartbeat — no auth. Exposes file metadata only, never JWT contents.
+  // Lets diagnostic tooling verify the */5 JWT-refresh cron is firing.
+  router.get("/admin/debug/heartbeat-h7s5n9k3", async (req, res) => {
+    try {
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const dataDir = process.env.DATA_DIR || "/var/data";
+      const file = path.default.join(dataDir, "ghl-internal-jwt.json");
+      let jwtFile = null;
+      try {
+        const stat = fs.default.statSync(file);
+        const parsed = JSON.parse(fs.default.readFileSync(file, "utf8"));
+        jwtFile = {
+          exists: true,
+          sizeBytes: stat.size,
+          mtime: stat.mtime.toISOString(),
+          ageSeconds: Math.floor((Date.now() - stat.mtime.getTime()) / 1000),
+          hasRefreshToken: !!parsed.refreshToken,
+          hasApiKey: !!parsed.apiKey,
+          hasTokenId: !!parsed.tokenId,
+          hasAccessToken: !!parsed.accessToken,
+          savedAt: parsed.savedAt || null,
+          expiresAt: parsed.expiresAt ? new Date(parsed.expiresAt).toISOString() : null
+        };
+      } catch (e) {
+        jwtFile = { exists: false, error: (e && e.message) || String(e) };
+      }
+      res.json({
+        ok: true,
+        serverTime: new Date().toISOString(),
+        serverTZ: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        envTZ: process.env.TZ || null,
+        envTIMEZONE: process.env.TIMEZONE || null,
+        jwtFile
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: (e && e.message) || String(e) });
+    }
+  });
+
 return router;
 }
 // =====================================================================
