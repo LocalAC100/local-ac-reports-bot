@@ -86,3 +86,6 @@ services:
       # Gmail watcher — Workspace user the SA impersonates (domain-wide delegation)
       - key: GMAIL_DELEGATED_USER
         value: office@local-ac.com
+  # Node TZ — makes node-cron fire at local ET times (not UTC).
+  - key: TZ
+    value: America/New_York
