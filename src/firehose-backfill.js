@@ -594,3 +594,34 @@ export function buildFirehoseBackfillRouter() {
 
 return router;
 }
+// =====================================================================
+// JWT auto-refresh: exchange Firebase refresh token for fresh access token
+// =====================================================================
+export async function refreshStoredJwt() {
+  const stored = loadStoredJwt();
+  if (!stored || !stored.refreshToken || !stored.apiKey) {
+    throw new Error("refreshStoredJwt: stored JWT missing refreshToken or apiKey");
+  }
+  const fbResp = await axios.post(
+    "https://securetoken.googleapis.com/v1/token?key=" + stored.apiKey,
+    "grant_type=refresh_token&refresh_token=" + encodeURIComponent(stored.refreshToken),
+    { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+  );
+  const newTok = fbResp.data.id_token || fbResp.data.access_token;
+  const updated = {
+    ...stored,
+    tokenId: newTok,
+    accessToken: newTok,
+    refreshToken: fbResp.data.refresh_token || stored.refreshToken,
+    expiresAt: Date.now() + (parseInt(fbResp.data.expires_in, 10) * 1000),
+    savedAt: new Date().toISOString(),
+  };
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const dataDir = process.env.DATA_DIR || "/var/data";
+  const file = path.default.join(dataDir, "ghl-internal-jwt.json");
+  fs.default.mkdirSync(dataDir, { recursive: true });
+  fs.default.writeFileSync(file, JSON.stringify(updated, null, 2), "utf8");
+  console.log("[jwt-refresh] refreshed at", updated.savedAt, "expiresAt", new Date(updated.expiresAt).toISOString());
+  return { ok: true, expiresIn: parseInt(fbResp.data.expires_in, 10), savedAt: updated.savedAt, expiresAt: updated.expiresAt };
+}
