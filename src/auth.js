@@ -5,6 +5,7 @@
 // Exports: buildSessionMiddleware, requireAuth, requireAdmin.
 
 import session from "express-session";
+import { Users } from "./db.js";
 import fs from "node:fs";
 import path from "node:path";
 
