@@ -569,5 +569,28 @@ export function buildFirehoseBackfillRouter() {
     }
   );
 
-  return router;
+    // Diagnostic alias of /admin/debug/firehose-backfill that uses secret-bypass auth.
+  // Lets diagnostic tooling kick off a manual backfill without the control-room session.
+  router.get("/admin/debug/run-firehose", secretBypass, async (req, res) => {
+    try {
+      const dateStr = req.query.date || new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+      const result = await backfillDate(dateStr);
+      res.json({ ok: true, date: dateStr, result });
+    } catch (e) {
+      res.json({ ok: false, error: (e && e.message) || String(e), stack: ((e && e.stack) || "").slice(0, 1200) });
+    }
+  });
+
+  // Diagnostic: status of the GHL internal JWT file (mtime + size only, never content).
+  router.get("/admin/debug/jwt-status", secretBypass, async (req, res) => {
+    try {
+      const fs = await import("node:fs");
+      const stat = fs.statSync("/var/data/ghl-internal-jwt.json");
+      res.json({ ok: true, exists: true, sizeBytes: stat.size, mtime: stat.mtime.toISOString(), ageSeconds: Math.floor((Date.now() - stat.mtime.getTime()) / 1000) });
+    } catch (e) {
+      res.json({ ok: true, exists: false, error: (e && e.message) || String(e) });
+    }
+  });
+
+return router;
 }
