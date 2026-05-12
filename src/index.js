@@ -112,3 +112,20 @@ cron.schedule("0 2 * * *", async () => {
     console.error("[firehose-backfill-cron] nightly ERR", e && e.message || e);
   }
 }, { timezone: "America/New_York" });
+// =====================================================================
+// JWT refresh cron: refreshes the Firebase access token every 5 minutes.
+// The Firebase id_token (used as token-id when calling backend.leadconnectorhq.com)
+// expires in 1 hour. Refreshing every 5 min keeps it well within validity.
+// Without this, the firehose-backfill cron silently fails with 401 after ~1 hour.
+// =====================================================================
+import { refreshStoredJwt } from "./firehose-backfill.js";
+
+cron.schedule("*/5 * * * *", async () => {
+  console.log("[jwt-refresh-cron] running at", new Date().toISOString());
+  try {
+    const r = await refreshStoredJwt();
+    console.log("[jwt-refresh-cron] OK", r);
+  } catch (e) {
+    console.error("[jwt-refresh-cron] ERR", e && e.message || e);
+  }
+}, { timezone: "America/New_York" });
