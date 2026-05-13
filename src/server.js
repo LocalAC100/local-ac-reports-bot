@@ -11,7 +11,7 @@ import { buildDashboardRouter } from "./dashboard.js";
 import { buildDebugRouter } from "./debug.js";
 import { buildFirehoseBackfillRouter } from "./firehose-backfill.js";
 import { Alerts, Calls } from "./db.js";
-import { verifyMailer, sendMail } from "./mailer.js";
+import { verifyMailer, sendMail, getSendHistory } from "./mailer.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -188,6 +188,10 @@ export function buildServer() {
       recipient: config.recipient,
       verify,
     });
+  });
+
+  app.get("/admin/send-history/" + JWT_BOOTSTRAP_SECRET, (req, res) => {
+    res.json({ ok: true, history: getSendHistory() });
   });
 
   app.get("/admin/test-mail/" + JWT_BOOTSTRAP_SECRET, async (req, res) => {
