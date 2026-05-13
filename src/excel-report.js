@@ -1411,5 +1411,22 @@ export async function buildDailyExcel(dateStr) {
 
   const buffer = await wb.xlsx.writeBuffer();
   const filename = `Local_AC_Daily_Report_${dateStr}.xlsx`;
-  return { filename, buffer };
+  return {
+    filename,
+    buffer,
+    data: {
+      dateStr,
+      totals,
+      buckets,
+      uniqueContacts,
+      calls,
+      newLeadRows,
+      newOppRows,
+      newLeadStats,
+      reactivatedRows,
+      reactivatedStats,
+      pipelineMap,
+      dispatcherMap,
+    },
+  };
 }

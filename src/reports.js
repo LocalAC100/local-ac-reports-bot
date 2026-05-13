@@ -10,7 +10,14 @@ import * as ghl from "./ghl.js";
 import { analyzeScreenshots } from "./screenshots.js";
 import { sendMail } from "./mailer.js";
 import { buildDailyExcel } from "./excel-report.js";
-import { renderEmail, renderHubstaffSection, renderDispatcherSection } from "./template.js";
+import {
+  renderEmail,
+  renderHubstaffSection,
+  renderDispatcherSection,
+  renderLeadActivitySection,
+  renderHourXDispatcherSection,
+  renderPipelineAndFunnelSection,
+} from "./template.js";
 import { Reports, Calls, classifyCall, isLiveTransfer } from "./db.js";
 import { DateTime } from "luxon";
 
@@ -1130,10 +1137,26 @@ export async function runMorningReport({ dateOverride, to } = {}) {
   // v6: combined "low output" red flag (Hubstaff low AND GHL low)
   applyCombinedStatusFlags(hub.perEmployee, dispatch.byDispatcher);
 
+  // v3 layout — single source of truth (see runEveningReport).
+  const xlsxDateStr = generatedAt.toFormat("yyyy-LL-dd");
+  let xlsxBundle = null;
+  try {
+    xlsxBundle = await buildDailyExcel(xlsxDateStr);
+  } catch (e) {
+    console.error("[report] morning Excel build failed:", e?.message);
+  }
+  const excelData = xlsxBundle?.data || null;
+
   const html = renderEmail({
     title: "Morning Snapshot",
     generatedAt,
-    sections: [renderHubstaffSection(hub), renderDispatcherSection(dispatch)],
+    sections: [
+      renderHubstaffSection(hub),
+      renderDispatcherSection(dispatch),
+      renderLeadActivitySection(excelData),
+      renderHourXDispatcherSection(excelData),
+      renderPipelineAndFunnelSection(excelData),
+    ],
   });
 
   // Archive to DB so the website /reports page can show this report later.
@@ -1149,14 +1172,9 @@ export async function runMorningReport({ dateOverride, to } = {}) {
     console.error("[report] db archive failed", e?.message);
   }
 
-  let attachments;
-  try {
-    const dateStr = generatedAt.toFormat("yyyy-LL-dd");
-    const xlsx = await buildDailyExcel(dateStr);
-    attachments = [{ filename: xlsx.filename, content: Buffer.from(xlsx.buffer) }];
-  } catch (e) {
-    console.error("[report] morning Excel build failed:", e?.message);
-  }
+  const attachments = xlsxBundle
+    ? [{ filename: xlsxBundle.filename, content: Buffer.from(xlsxBundle.buffer) }]
+    : undefined;
   await sendMail({
     to,
     subject: `Local AC — Morning Snapshot (${generatedAt.toFormat("LLL d")})`,
@@ -1190,10 +1208,28 @@ export async function runEveningReport({ dateOverride, to } = {}) {
   // v6: combined "low output" red flag (Hubstaff low AND GHL low)
   applyCombinedStatusFlags(hub.perEmployee, dispatch.byDispatcher);
 
+  // v3 layout — single source of truth: build the Excel ONCE, then feed
+  // its computed data structures to both the email body sections and the
+  // attachment so the two cannot disagree.
+  const xlsxDateStr = generatedAt.toFormat("yyyy-LL-dd");
+  let xlsxBundle = null;
+  try {
+    xlsxBundle = await buildDailyExcel(xlsxDateStr);
+  } catch (e) {
+    console.error("[report] evening Excel build failed:", e?.message);
+  }
+  const excelData = xlsxBundle?.data || null;
+
   const html = renderEmail({
     title: "Full Day Summary",
     generatedAt,
-    sections: [renderHubstaffSection(hub), renderDispatcherSection(dispatch)],
+    sections: [
+      renderHubstaffSection(hub),
+      renderDispatcherSection(dispatch),
+      renderLeadActivitySection(excelData),
+      renderHourXDispatcherSection(excelData),
+      renderPipelineAndFunnelSection(excelData),
+    ],
   });
 
   try {
@@ -1206,14 +1242,9 @@ export async function runEveningReport({ dateOverride, to } = {}) {
     console.error("[report] db archive failed", e?.message);
   }
 
-  let attachments;
-  try {
-    const dateStr = generatedAt.toFormat("yyyy-LL-dd");
-    const xlsx = await buildDailyExcel(dateStr);
-    attachments = [{ filename: xlsx.filename, content: Buffer.from(xlsx.buffer) }];
-  } catch (e) {
-    console.error("[report] evening Excel build failed:", e?.message);
-  }
+  const attachments = xlsxBundle
+    ? [{ filename: xlsxBundle.filename, content: Buffer.from(xlsxBundle.buffer) }]
+    : undefined;
   await sendMail({
     to,
     subject: `Local AC — Full Day Summary (${generatedAt.toFormat("LLL d")})`,
