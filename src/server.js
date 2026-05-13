@@ -11,6 +11,7 @@ import { buildDashboardRouter } from "./dashboard.js";
 import { buildDebugRouter } from "./debug.js";
 import { buildFirehoseBackfillRouter } from "./firehose-backfill.js";
 import { Alerts, Calls } from "./db.js";
+import { verifyMailer, sendMail } from "./mailer.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,16 +32,13 @@ export function buildServer() {
   // (webhooks don't have sessions). Mount before session.
   app.post("/webhooks/ghl", express.json({ limit: "1mb" }), (req, res) => {
     if (config.ghl.webhookSecret) {
-      const provided =
-        req.headers["x-webhook-secret"] || req.query.secret;
+      const provided = req.headers["x-webhook-secret"] || req.query.secret;
       if (provided !== config.ghl.webhookSecret) {
         return res.status(401).json({ error: "bad secret" });
       }
     }
-
     const body = req.body || {};
-    const contactId =
-      body.contact_id || body.contactId || body.id || body.contact?.id;
+    const contactId = body.contact_id || body.contactId || body.id || body.contact?.id;
     const contactName =
       body.full_name ||
       body.fullName ||
@@ -76,15 +74,12 @@ export function buildServer() {
     // upsert into the calls table. The nightly firehose reconcile job fills
     // in dispositions/duration that weren't final at webhook time.
     const callSid =
-      body.callSid ||
-      body.call_sid ||
-      body.messageId ||
-      body.message_id ||
-      body.id;
+      body.callSid || body.call_sid || body.messageId || body.message_id || body.id;
     const looksLikeCall =
       eventType.includes("call") ||
       String(body.messageType || body.message_type || "").toLowerCase() === "call" ||
       Number(body.type) === 1; // GHL legacy numeric type for calls
+
     if (callSid && looksLikeCall) {
       try {
         Calls.upsert({
@@ -106,11 +101,12 @@ export function buildServer() {
         console.error("[webhook] Calls.upsert failed", e?.message);
       }
     }
+
     return res.json({ ok: true });
   });
 
   // ─── No-auth GHL JWT bootstrap ─────────────────────────────────────────
-  // Mounted BEFORE the dashboard router so it bypasses requireAuth. The
+  // Mounted BEFORE the dashboard router so it bypasses requireAuth.  The
   // dashboard router has `router.use(requireAuth)` which 302-redirects every
   // unmatched /admin/* path to /login, so this endpoint MUST be registered
   // here at the app level to be reachable from the HighLevel tab.
@@ -125,9 +121,11 @@ export function buildServer() {
   // (/admin/debug/firehose) is still requireAdmin-gated.
   const JWT_BOOTSTRAP_SECRET =
     process.env.JWT_BOOTSTRAP_SECRET || "lac-jwt-2026-bootstrap-axabramov";
+
   console.log(
     "[jwt-bootstrap] /admin/jwt-bootstrap/" + JWT_BOOTSTRAP_SECRET
   );
+
   app.get(
     "/admin/jwt-bootstrap/" + JWT_BOOTSTRAP_SECRET,
     (req, res) => {
@@ -157,14 +155,94 @@ export function buildServer() {
     }
   );
 
+  // ─── No-auth mailer diagnostics ────────────────────────────────────────
+  // Mounted BEFORE the dashboard router so secret-bypass works.
+  // GET /admin/mailer-info/<SECRET>            -> sanitized SMTP config
+  // GET /admin/test-mail/<SECRET>?to=foo@x.com -> attempts a real send and
+  //                                                returns nodemailer's full
+  //                                                response or error.
+  app.get("/admin/mailer-info/" + JWT_BOOTSTRAP_SECRET, async (req, res) => {
+    const mask = (s) =>
+      !s ? null : s.length <= 4 ? "***" : s.slice(0, 2) + "***" + s.slice(-2);
+    let verify = { ok: false };
+    try {
+      await verifyMailer();
+      verify = { ok: true };
+    } catch (e) {
+      verify = {
+        ok: false,
+        message: e?.message || String(e),
+        code: e?.code || null,
+        response: e?.response || null,
+      };
+    }
+    res.json({
+      smtp: {
+        host: config.smtp.host,
+        port: config.smtp.port,
+        user: mask(config.smtp.user),
+        password: mask(config.smtp.password),
+        fromName: config.smtp.fromName,
+        fromAddress: config.smtp.fromAddress,
+      },
+      recipient: config.recipient,
+      verify,
+    });
+  });
+
+  app.get("/admin/test-mail/" + JWT_BOOTSTRAP_SECRET, async (req, res) => {
+    const to = req.query.to || config.recipient;
+    const stamp = new Date().toISOString();
+    try {
+      const info = await sendMail({
+        to,
+        subject: `Local AC — Mailer Test (${stamp})`,
+        html: `<p>This is a mailer connectivity test fired at <b>${stamp}</b>.</p>
+               <p>From: ${config.smtp.fromAddress}<br>
+               To: ${to}<br>
+               SMTP: ${config.smtp.host}:${config.smtp.port}</p>
+               <p>If you got this, SMTP works and the issue is somewhere else
+               (e.g., spam filter, or an earlier silently-swallowed error in
+               the report path).</p>`,
+      });
+      res.json({
+        ok: true,
+        to,
+        from: config.smtp.fromAddress,
+        info: {
+          messageId: info?.messageId || null,
+          response: info?.response || null,
+          accepted: info?.accepted || null,
+          rejected: info?.rejected || null,
+          envelope: info?.envelope || null,
+        },
+      });
+    } catch (e) {
+      res.status(500).json({
+        ok: false,
+        to,
+        from: config.smtp.fromAddress,
+        error: {
+          message: e?.message || String(e),
+          code: e?.code || null,
+          command: e?.command || null,
+          response: e?.response || null,
+          responseCode: e?.responseCode || null,
+        },
+      });
+    }
+  });
+
   // Dashboard: session-based, requires login
   app.use(cookieParser());
   app.use(buildSessionMiddleware());
+
   // Firehose-backfill router mounted BEFORE the dashboard router so its
   // secret-bypass route (/admin/debug/bucket-counts?s=...) can reach the
   // handler without dashboardRouter's requireAuth middleware redirecting
   // to /login. The router still gates the OTHER endpoints with requireAdmin.
   app.use(buildFirehoseBackfillRouter());
+
   app.use(buildDashboardRouter());
   app.use(buildDebugRouter());
 
