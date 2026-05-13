@@ -144,6 +144,9 @@ function statusBadgeFor(code) {
   if (code === "ok" || code === "on_track") {
     return '<span class="badge badge-good">✓ on track</span>';
   }
+  if (code === "on_shift") {
+    return '<span class="badge badge-good">✓ on shift</span>';
+  }
   if (code === "no_data") {
     return '<span class="badge badge-warn">no Hubstaff yet</span>';
   }
@@ -245,22 +248,29 @@ export function renderHubstaffSection(hub, opts = {}) {
     //  - If upstream provided a non-"no_data" string code, use it.
     //  - Else compute from clock vs scheduled (matches mockup rule: ✓ on track
     //    only when none of late_in, early_out, hours_short, break_over fire).
+    // v9: if the shift hasn't ENDED yet (i.e., the report is firing mid-shift
+    // like the 12 PM morning snapshot), don't flag Early Out or Hours Short —
+    // the "clock out" we see is just last-activity timestamp, not a real
+    // clock-out. Show "✓ On shift" instead.
     let code = coerceStatusFlag(emp.statusFlag);
+    const nowMin = generatedAt.hour * 60 + generatedAt.minute;
     if (code === "no_data" && clockIn != null && shift) {
       const ci = _clockMin(clockIn);
       const co = _clockMin(clockOut);
       const startMin = _hhmmToMin(shift.start);
       const endMin = _hhmmToMin(shift.end);
       const brkBudget = empRec?.breakMinutesPerShift ?? 0;
+      const shiftInProgress = endMin != null && nowMin < endMin;
       const lateIn = ci != null && startMin != null && ci > startMin;
-      const earlyOut = co != null && endMin != null && co < endMin;
+      const earlyOut = !shiftInProgress && co != null && endMin != null && co < endMin;
       const breakOver = emp.breakMinutes != null && emp.breakMinutes > brkBudget;
       const scheduledMin = startMin != null && endMin != null ? endMin - startMin - brkBudget : null;
-      const hoursShort = scheduledMin != null && emp.workedMinutes != null && emp.workedMinutes < scheduledMin * 0.95;
+      const hoursShort = !shiftInProgress && scheduledMin != null && emp.workedMinutes != null && emp.workedMinutes < scheduledMin * 0.95;
       if (lateIn) code = "late_in";
       else if (earlyOut) code = "early_out";
       else if (breakOver) code = "break_over";
       else if (hoursShort) code = "hours_short";
+      else if (shiftInProgress) code = "on_shift";
       else code = "ok";
     }
     const statusBadge = statusBadgeFor(code);
@@ -352,26 +362,29 @@ export function renderHubstaffSection(hub, opts = {}) {
     const clockIn = emp.clockIn ?? emp.clock_in ?? emp.firstStart ?? emp.first_start ?? emp.startedAt ?? emp.started_at;
     const clockOut = emp.clockOut ?? emp.clock_out ?? emp.lastStop ?? emp.last_stop ?? emp.stoppedAt ?? emp.stopped_at;
     let code = coerceStatusFlag(emp.statusFlag);
+    const nowMin = generatedAt.hour * 60 + generatedAt.minute;
     if (code === "no_data" && clockIn != null && shift) {
       const ci = _clockMin(clockIn);
       const co = _clockMin(clockOut);
       const startMin = _hhmmToMin(shift.start);
       const endMin = _hhmmToMin(shift.end);
       const brkBudget = empRec?.breakMinutesPerShift ?? 0;
+      const shiftInProgress = endMin != null && nowMin < endMin;
       const lateIn = ci != null && startMin != null && ci > startMin;
-      const earlyOut = co != null && endMin != null && co < endMin;
+      const earlyOut = !shiftInProgress && co != null && endMin != null && co < endMin;
       const breakOver = emp.breakMinutes != null && emp.breakMinutes > brkBudget;
       const scheduledMin = startMin != null && endMin != null ? endMin - startMin - brkBudget : null;
-      const hoursShort = scheduledMin != null && emp.workedMinutes != null && emp.workedMinutes < scheduledMin * 0.95;
+      const hoursShort = !shiftInProgress && scheduledMin != null && emp.workedMinutes != null && emp.workedMinutes < scheduledMin * 0.95;
       if (lateIn) code = "late_in";
       else if (earlyOut) code = "early_out";
       else if (breakOver) code = "break_over";
       else if (hoursShort) code = "hours_short";
+      else if (shiftInProgress) code = "on_shift";
       else code = "ok";
     }
     return code;
   });
-  const onTrack = computedCodes.filter((c) => c === "ok" || c === "on_track").length;
+  const onTrack = computedCodes.filter((c) => c === "ok" || c === "on_track" || c === "on_shift").length;
   const noData = computedCodes.filter((c) => c === "no_data").length;
   const offTrack = computedCodes.length - onTrack - noData;
   const summary = computedCodes.length
@@ -400,15 +413,31 @@ export function renderHubstaffSection(hub, opts = {}) {
 // the stat strip + summary footer, computed from the same source as Section 3.
 // =====================================================================
 export function renderCallActivitySection(dispatch, excelData) {
-  const byD = dispatch?.byDispatcher || [];
-  const sum = byD.reduce((acc, d) => {
-    acc.total += (d.real || 0) + (d.voicemail || 0) + (d.attempt || 0) + (d.liveTransfers || 0);
-    acc.real += d.real || 0;
-    acc.lt += d.liveTransfers || 0;
-    acc.vm += d.voicemail || 0;
-    acc.attempt += d.attempt || 0;
-    return acc;
-  }, { total: 0, real: 0, lt: 0, vm: 0, attempt: 0 });
+  // v9: prefer excelData.buckets / totals (= same source as Excel attachment
+  // and Section 3). Falls back to dispatch.byDispatcher aggregation only if
+  // excelData isn't available.
+  const buckets = excelData?.buckets;
+  const totals = excelData?.totals;
+  let sum;
+  if (buckets && totals) {
+    sum = {
+      total: totals.both || 0,
+      real: buckets.real_call || 0,
+      lt: buckets.live_transfer || 0,
+      vm: 0, // not tracked in buckets — voicemail rolls into no_answer/failed bucketing
+      attempt: (buckets.no_answer || 0) + (buckets.failed || 0) + (buckets.ringing || 0),
+    };
+  } else {
+    const byD = dispatch?.byDispatcher || [];
+    sum = byD.reduce((acc, d) => {
+      acc.total += (d.real || 0) + (d.voicemail || 0) + (d.attempt || 0) + (d.liveTransfers || 0);
+      acc.real += d.real || 0;
+      acc.lt += d.liveTransfers || 0;
+      acc.vm += d.voicemail || 0;
+      acc.attempt += d.attempt || 0;
+      return acc;
+    }, { total: 0, real: 0, lt: 0, vm: 0, attempt: 0 });
+  }
 
   const naPct = sum.total > 0 ? (sum.attempt / sum.total * 100).toFixed(1) : "0.0";
 
@@ -573,27 +602,54 @@ function pct(n, d) {
 // =====================================================================
 // renderLeadActivitySection — Section 3.
 // =====================================================================
-export function renderLeadActivitySection(excelData) {
+export function renderLeadActivitySection(excelData, opts = {}) {
   if (!excelData) return "";
   const { newLeadRows = [], newOppRows = [], reactivatedRows = [], calls = [] } = excelData;
+  const generatedAt = opts.generatedAt
+    ? (typeof opts.generatedAt === "string"
+        ? DateTime.fromISO(opts.generatedAt, { zone: TZ })
+        : opts.generatedAt)
+    : DateTime.now().setZone(TZ);
   const newS = statsForRows(newLeadRows);
   const resubS = statsForRows(newOppRows);
   const reactS = statsForRows(reactivatedRows, { isReact: true });
 
   // Enrich each lead row from the calls array — fields that buildNewLeads
   // doesn't always populate (firstCallTime, totalDuration, attempts, hadRealCall).
-  function _enrichFromCalls(row) {
-    const cid = row._id || row.contactId || row.contact_id;
-    if (!cid) return { firstCallTime: "", hadRealCall: false, totalDurationFmt: "", attempts: 0 };
-    const mine = calls.filter((c) => c.raw?.contact_id === cid || c.contactId === cid);
-    if (mine.length === 0) return { firstCallTime: "", hadRealCall: false, totalDurationFmt: "", attempts: 0 };
+  // v9: try more contact_id field variants; mark "in progress" if the lead
+  // came in within the last 30 min of the report time (no calls yet expected).
+  function _enrichFromCalls(row, generatedAt) {
+    const cid = row._id || row.contactId || row.contact_id || row.id;
+    if (!cid) return { firstCallTime: "", hadRealCall: false, totalDurationFmt: "", attempts: 0, inProgress: false };
+    const mine = calls.filter((c) => {
+      const k = c.raw?.contact_id || c.contactId || c.contact_id || c.raw?.contactId;
+      return k === cid;
+    });
+    // Decide "in progress": came in within 30 min of generatedAt AND no calls yet.
+    let inProgress = false;
+    if (mine.length === 0 && generatedAt && (row.cameIn || row.activityTime)) {
+      try {
+        const cameStr = row.cameIn || row.activityTime;
+        const m = String(cameStr).match(/(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/) ||
+                  String(cameStr).match(/^(\d{2}):(\d{2}):(\d{2})/);
+        if (m) {
+          // best-effort minute parsing
+          const hh = Number(m[m.length - 3]);
+          const mm = Number(m[m.length - 2]);
+          const cameMin = hh * 60 + mm;
+          const nowMin = generatedAt.hour * 60 + generatedAt.minute;
+          if (nowMin - cameMin >= 0 && nowMin - cameMin <= 30) inProgress = true;
+        }
+      } catch {}
+    }
+    if (mine.length === 0) return { firstCallTime: "", hadRealCall: false, totalDurationFmt: "", attempts: 0, inProgress };
     mine.sort((a, b) => {
-      const ka = a.startAt || a.dateAdded || a.startedAt || "";
-      const kb = b.startAt || b.dateAdded || b.startedAt || "";
+      const ka = a.startAt || a.dateAdded || a.startedAt || a.raw?.dateAdded || "";
+      const kb = b.startAt || b.dateAdded || b.startedAt || b.raw?.dateAdded || "";
       return String(ka).localeCompare(String(kb));
     });
     const first = mine[0];
-    const fs = first.startAt || first.dateAdded || first.startedAt || "";
+    const fs = first.startAt || first.dateAdded || first.startedAt || first.raw?.dateAdded || "";
     const m = String(fs).match(/T?(\d{2}):(\d{2}):(\d{2})/);
     const firstCallTime = m ? `${m[1]}:${m[2]}:${m[3]}` : "";
     const totalSec = mine.reduce((s, c) => s + (Number(c.durationSec) || 0), 0);
@@ -609,6 +665,7 @@ export function renderLeadActivitySection(excelData) {
       hadRealCall,
       totalDurationFmt: totalSec > 0 ? fmtSec(totalSec) : "",
       attempts: mine.length,
+      inProgress: false,
     };
   }
 
@@ -651,17 +708,20 @@ export function renderLeadActivitySection(excelData) {
     const catPill = cat === "NEW" ? '<span class="cat-new">NEW</span>'
                   : cat === "RESUB" ? '<span class="cat-resub">RESUB</span>'
                   : '<span class="cat-react">REACT</span>';
-    const enriched = _enrichFromCalls(row);
+    const enriched = _enrichFromCalls(row, generatedAt);
     const name = row.leadName || row.name || "(unknown)";
     const source = row.leadSource || row.source || "";
     const cameIn = row.cameIn || row.activityTime || "";
     // First call: prefer the enriched (computed from calls) timestamp.
-    const firstCall = enriched.firstCallTime || (row.firstCallTime ? String(row.firstCallTime).slice(0, 8) : (row.activityTime || "—"));
-    const resp = row.responseTime || "—";
+    const inProgressLabel = '<span class="small" style="color:#92400e">in progress</span>';
+    const firstCall = enriched.firstCallTime
+      || (row.firstCallTime ? String(row.firstCallTime).slice(0, 8) : (row.activityTime || (enriched.inProgress ? inProgressLabel : "—")));
+    const resp = row.responseTime || (enriched.inProgress ? "in progress" : "—");
     // Real Call: longest single call ≥70s if available, else "—".
-    const realCall = row.longestCallDuration || row.durationFmt || (enriched.hadRealCall ? (enriched.totalDurationFmt || "≥70s") : "—");
+    const realCall = row.longestCallDuration || row.durationFmt
+      || (enriched.hadRealCall ? (enriched.totalDurationFmt || "≥70s") : (enriched.inProgress ? inProgressLabel : "—"));
     // Total duration of ALL calls placed to this contact today (new column).
-    const totalDur = enriched.totalDurationFmt || "—";
+    const totalDur = enriched.totalDurationFmt || (enriched.inProgress ? inProgressLabel : "—");
     const disp = row.firstCaller || row.dispatcher || row.longestCallDispatcher || "—";
     // Origin Stage: where the lead was BEFORE today. NEW/RESUB → "New Lead In".
     // REACT → row.stage (where they were when we re-engaged them).
@@ -677,7 +737,7 @@ export function renderLeadActivitySection(excelData) {
       ? '<span class="pill-phone">Phone Booked</span>'
       : (row.bookedToday ? '<span class="pill-physical">Booked</span>' : "—");
     // Attempts: prefer enriched (count of all calls to this contact today).
-    const attempts = enriched.attempts || row.attempts || row.callCount || "—";
+    const attempts = enriched.attempts || row.attempts || row.callCount || (enriched.inProgress ? "0 (in progress)" : "0");
     const lt = (row.activity === "Live Transfer" || row.hasLiveTransfer || row.liveTransfers) ? "Yes" : "";
     // Row color: green for Physical, yellow for Phone Booked, default for the rest.
     const rowStyle = isPhysical
