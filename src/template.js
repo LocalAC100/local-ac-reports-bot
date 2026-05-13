@@ -698,10 +698,14 @@ export function renderSection6(excelData) {
     else if (c.bucket === "failed") d.failed++;
     if (c.raw?.contact_id) d.contacts.add(c.raw.contact_id);
   }
+  // Compute the dominant pipeline FIRST (before booking attribution needs it).
+  const _sortedPipelines = [...byPipeline.entries()]
+    .filter(([name]) => name && name !== "(no pipeline)" && name !== "?")
+    .sort((a, b) => b[1].total - a[1].total);
+  const dominantPipeline = _sortedPipelines[0]?.[0] || null;
   // Attribute bookings to pipelines using each lead's CALLS — find the
   // pipeline most-used in that contact's calls today. Falls back to the
   // dominant pipeline (Orlando) when no calls are linked.
-  const dominantPipeline = ordered[0]?.[0] && ordered[0][0] !== "—" ? ordered[0][0] : null;
   function pipelineForRow(r) {
     if (r.pipelineName) return r.pipelineName;
     if (r.pipeline) return r.pipeline;
