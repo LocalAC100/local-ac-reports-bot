@@ -139,6 +139,32 @@ export const EMPLOYEES = [
     schedule: null,
     breakMinutesPerShift: 0,
   },
+  {
+    // Owner. Not a regular employee — no schedule, no payroll. Added so the
+    // GHL call dispatcher "Alexander Abramov" resolves to a real first name
+    // in Hour x Dispatcher / Lead Activity instead of "(unknown)".
+    name: "Alex",
+    fullName: "Alexander Abramov",
+    role: "owner",
+    payRate: null,
+    hubstaffEmail: "",
+    ghlEmail: "axabramov2@gmail.com",
+    schedule: null,
+    breakMinutesPerShift: 0,
+  },
+  {
+    // Owner. Not a regular employee — no schedule, no payroll. Added so the
+    // GHL call dispatcher "Alexander Abramov" resolves to a real first name
+    // in Hour x Dispatcher / Lead Activity instead of "(unknown)".
+    name: "Alex",
+    fullName: "Alexander Abramov",
+    role: "owner",
+    payRate: null,
+    hubstaffEmail: "",
+    ghlEmail: "axabramov2@gmail.com",
+    schedule: null,
+    breakMinutesPerShift: 0,
+  },
 ];
 
 export function isDispatcher(emp) {

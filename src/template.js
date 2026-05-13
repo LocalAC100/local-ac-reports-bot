@@ -517,15 +517,22 @@ export function renderLeadActivitySection(excelData) {
     </table>`;
   }
 
-  // Detail table
+  // Detail table — sort ALL rows (including REACT) by time-of-day ascending.
+  // NEW/RESUB have cameIn = "yyyy-LL-dd HH:mm:ss"; REACT has activityTime =
+  // "HH:mm:ss". Extract just HH:mm:ss for a fair comparison.
+  function _timeKey(r) {
+    const s = r.cameIn || r.activityTime || "";
+    const m = String(s).match(/(\d{2}):(\d{2}):(\d{2})/);
+    return m ? `${m[1]}:${m[2]}:${m[3]}` : "99:99:99";
+  }
   const allRows = [
     ...newLeadRows.map((r) => ({ cat: "NEW", row: r })),
     ...newOppRows.map((r) => ({ cat: "RESUB", row: r })),
     ...reactivatedRows.map((r) => ({ cat: "REACT", row: r })),
   ];
   allRows.sort((a, b) => {
-    const ka = a.row.cameIn || a.row.activityTime || "";
-    const kb = b.row.cameIn || b.row.activityTime || "";
+    const ka = _timeKey(a.row);
+    const kb = _timeKey(b.row);
     return ka < kb ? -1 : 1;
   });
   const detailRows = allRows.map(({ cat, row }, idx) => {
@@ -541,16 +548,22 @@ export function renderLeadActivitySection(excelData) {
     const disp = row.firstCaller || row.dispatcher || row.longestCallDispatcher || "—";
     const finalStage = row.finalStage || row.stage || "—";
     const stageForBooking = row.finalStage || row.stage || "";
-    const booked = row.bookedToday
-      ? (stageForBooking === "Appt. Booked"
-          ? '<span class="pill-physical">Physical</span>'
-          : stageForBooking === "Over Phone Booked"
-          ? '<span class="pill-phone">Phone Booked</span>'
-          : '<span class="pill-physical">Booked</span>')
-      : "—";
+    const isPhysical = row.bookedToday && stageForBooking === "Appt. Booked";
+    const isPhone = row.bookedToday && stageForBooking === "Over Phone Booked";
+    const booked = isPhysical
+      ? '<span class="pill-physical">Physical</span>'
+      : isPhone
+      ? '<span class="pill-phone">Phone Booked</span>'
+      : (row.bookedToday ? '<span class="pill-physical">Booked</span>' : "—");
     const attempts = row.attempts ?? row.callCount ?? "—";
     const lt = (row.activity === "Live Transfer" || row.hasLiveTransfer || row.liveTransfers) ? "Yes" : "";
-    const rowClass = row.bookedToday ? ' class="row-booked"' : "";
+    // Row color: green for Physical, yellow for Phone Booked, default for the rest.
+    const rowStyle = isPhysical
+      ? ' style="background:#ecfdf5"'
+      : isPhone
+      ? ' style="background:#fef9c3"'
+      : "";
+    // (rowStyle is used in the <tr> tag below; legacy rowClass var removed.)
     const respSec = Number(row._respSec || 0);
     let respBadge = `<span class="small">${esc(resp)}</span>`;
     if (cat !== "REACT" && respSec > 0) {
@@ -567,7 +580,7 @@ export function renderLeadActivitySection(excelData) {
       // Negative or zero — likely the resub bug. Show dash until fixed upstream.
       respBadge = `<span class="small">—</span>`;
     }
-    return `<tr${rowClass}>
+    return `<tr${rowStyle}>
       <td>${catPill}</td>
       <td>${idx + 1}</td>
       <td>${esc(name)}</td>
@@ -591,23 +604,33 @@ export function renderLeadActivitySection(excelData) {
   return `<div class="section">
     <h2>Section 3 — Lead Activity</h2>
     <div class="subhead">New leads, resubmissions, and reactivated — side by side</div>
-    <div class="lead-summary">
-      <div class="lead-col lead-col-new">
-        <div class="col-title">New Leads</div>
-        <div class="big">${newS.total}</div>
-        ${colTable(newS, false)}
-      </div>
-      <div class="lead-col lead-col-resub">
-        <div class="col-title">Resubmission</div>
-        <div class="big">${resubS.total}</div>
-        ${colTable(resubS, false)}
-      </div>
-      <div class="lead-col lead-col-react">
-        <div class="col-title">Reactivated</div>
-        <div class="big">${reactS.total}</div>
-        ${colTable(reactS, true)}
-      </div>
-    </div>
+    <!-- v6: table-based 3-col layout for email-client compatibility (CSS grid
+         is stripped by Gmail/Outlook on some configs). -->
+    <table style="width:100%;border-collapse:separate;border-spacing:12px 0;margin:8px 0;border:none">
+      <tr>
+        <td style="width:33.33%;vertical-align:top;padding:0;border:none">
+          <div class="lead-col lead-col-new">
+            <div class="col-title">New Leads</div>
+            <div class="big">${newS.total}</div>
+            ${colTable(newS, false)}
+          </div>
+        </td>
+        <td style="width:33.33%;vertical-align:top;padding:0;border:none">
+          <div class="lead-col lead-col-resub">
+            <div class="col-title">Resubmission</div>
+            <div class="big">${resubS.total}</div>
+            ${colTable(resubS, false)}
+          </div>
+        </td>
+        <td style="width:33.33%;vertical-align:top;padding:0;border:none">
+          <div class="lead-col lead-col-react">
+            <div class="col-title">Reactivated</div>
+            <div class="big">${reactS.total}</div>
+            ${colTable(reactS, true)}
+          </div>
+        </td>
+      </tr>
+    </table>
     <h3 style="margin-top:24px">Detail — all leads with activity today</h3>
     <table>
       <thead><tr><th>Cat</th><th>#</th><th>Lead</th><th>Source</th><th>Came In</th><th>First Call</th><th>Resp</th><th>Real Call</th><th>1st Disp</th><th>LT</th><th>Final Stage</th><th>Booked</th><th>Attempts</th></tr></thead>
@@ -758,8 +781,9 @@ export function renderHourXDispatcherSection(excelData) {
     if (c.hour == null) continue;
     const rawDisp = c.dispatcher;
     if (!rawDisp || String(rawDisp).toLowerCase() === "inbound") continue;
+    if (/unknown/i.test(String(rawDisp))) continue; // drop "(unknown)" entries
     const d = _firstNameOf(rawDisp);
-    if (!d || d === "—") continue;
+    if (!d || d === "—" || /unknown/i.test(d)) continue;
     if (!matrix.has(c.hour)) matrix.set(c.hour, new Map());
     const inner = matrix.get(c.hour);
     inner.set(d, (inner.get(d) || 0) + 1);
@@ -774,10 +798,23 @@ export function renderHourXDispatcherSection(excelData) {
   ];
 
   function hourLbl(h) {
-    if (h === 0) return "12 AM";
-    if (h < 12) return h + " AM";
-    if (h === 12) return "12 PM";
-    return (h - 12) + " PM";
+    // Display as a range — "8-9 AM" means calls placed between 8:00 and 8:59 ET.
+    function single(h) {
+      if (h === 0) return "12 AM";
+      if (h < 12) return h + " AM";
+      if (h === 12) return "12 PM";
+      return (h - 12) + " PM";
+    }
+    const next = (h + 1) % 24;
+    // Strip the period suffix from the first if they share period (e.g. "7-8 AM" not "7 AM-8 AM").
+    const a = single(h);
+    const b = single(next);
+    const aPer = a.replace(/^\d+\s*/, "");
+    const bPer = b.replace(/^\d+\s*/, "");
+    const aNum = a.replace(/\s*(AM|PM)$/, "");
+    const bNum = b.replace(/\s*(AM|PM)$/, "");
+    if (aPer === bPer) return `${aNum}-${bNum} ${aPer}`;
+    return `${a}-${b}`;
   }
 
   // Bookings per (hour, dispatcher) cell from excelData rows
@@ -786,8 +823,10 @@ export function renderHourXDispatcherSection(excelData) {
     const m = String(s).match(/(\d{2}):/);
     return m ? Number(m[1]) : null;
   }
-  const bookByHour = new Map();
-  const bookByDisp = new Map();
+  const bookByHourPhys = new Map();
+  const bookByHourPhone = new Map();
+  const bookByDispPhys = new Map();
+  const bookByDispPhone = new Map();
   const cellBook = new Map(); // key `${hour}|${disp}` → {phys, phone}
   let totalPhys = 0, totalPhone = 0, totalBook = 0;
   for (const r of [...newLeadRows, ...newOppRows, ...reactivatedRows]) {
@@ -795,17 +834,22 @@ export function renderHourXDispatcherSection(excelData) {
     const stage = r.finalStage || r.stage || "";
     if (stage !== "Appt. Booked" && stage !== "Over Phone Booked") continue;
     totalBook++;
-    if (stage === "Appt. Booked") totalPhys++;
-    else totalPhone++;
+    const isPhys = stage === "Appt. Booked";
+    if (isPhys) totalPhys++; else totalPhone++;
     const h = _hourFromTimestamp(r.cameIn || r.activityTime);
     const disp = _firstNameOf(r.firstCaller || r.longestCallDispatcher || r.dispatcher || "");
-    if (h != null) bookByHour.set(h, (bookByHour.get(h) || 0) + 1);
-    if (disp && disp !== "—") bookByDisp.set(disp, (bookByDisp.get(disp) || 0) + 1);
+    if (h != null) {
+      const tbl = isPhys ? bookByHourPhys : bookByHourPhone;
+      tbl.set(h, (tbl.get(h) || 0) + 1);
+    }
+    if (disp && disp !== "—") {
+      const tbl = isPhys ? bookByDispPhys : bookByDispPhone;
+      tbl.set(disp, (tbl.get(disp) || 0) + 1);
+    }
     if (h != null && disp && disp !== "—") {
       const k = `${h}|${disp}`;
       const cur = cellBook.get(k) || { phys: 0, phone: 0 };
-      if (stage === "Appt. Booked") cur.phys++;
-      else cur.phone++;
+      if (isPhys) cur.phys++; else cur.phone++;
       cellBook.set(k, cur);
     }
   }
@@ -824,11 +868,22 @@ export function renderHourXDispatcherSection(excelData) {
       const pills = cb ? `${cb.phys ? ` <span class="pill-physical">+${cb.phys}</span>` : ""}${cb.phone ? ` <span class="pill-phone">+${cb.phone}</span>` : ""}` : "";
       return `<td class="${n === 0 && !cb ? 'zero' : ''}">${n || ""}${pills}</td>`;
     }).join("");
-    const rowBook = bookByHour.get(h) || 0;
-    return `<tr><td>${hourLbl(h)}</td>${cells}<td><b>${rowTotal}</b></td><td>${rowBook ? `<b>${rowBook}</b>` : "—"}</td></tr>`;
+    const rowPhys = bookByHourPhys.get(h) || 0;
+    const rowPhone = bookByHourPhone.get(h) || 0;
+    const rowBookCell = (rowPhys + rowPhone) === 0
+      ? "—"
+      : `${rowPhys ? `<span class="pill-physical">${rowPhys}</span>` : ""}${rowPhone ? ` <span class="pill-phone">${rowPhone}</span>` : ""}`;
+    return `<tr><td>${hourLbl(h)}</td>${cells}<td><b>${rowTotal}</b></td><td>${rowBookCell}</td></tr>`;
   }).join("");
 
-  const bookingsRow = `<tr style="background:#fef9c3;font-weight:bold"><td>BOOKINGS</td>${dispatchers.map(d => `<td>${bookByDisp.get(d) || 0}</td>`).join("")}<td></td><td><b>${totalBook}</b></td></tr>`;
+  function _dispBookingCell(d) {
+    const p = bookByDispPhys.get(d) || 0;
+    const q = bookByDispPhone.get(d) || 0;
+    if (p + q === 0) return "0";
+    return `${p ? `<span class="pill-physical">${p}</span>` : ""}${q ? ` <span class="pill-phone">${q}</span>` : ""}`;
+  }
+  // BOOKINGS row gets a green tint so it stands out from regular total row.
+  const bookingsRow = `<tr style="background:#d1fae5;font-weight:bold"><td>BOOKINGS</td>${dispatchers.map(d => `<td>${_dispBookingCell(d)}</td>`).join("")}<td></td><td>${totalPhys ? `<span class="pill-physical"><b>${totalPhys}</b></span>` : ""} ${totalPhone ? `<span class="pill-phone"><b>${totalPhone}</b></span>` : ""}</td></tr>`;
   const totalRow = `<tr><td><b>TOTAL</b></td>${dispatchers.map(d => `<td><b>${dispTotals.get(d) || 0}</b></td>`).join("")}<td><b>${[...dispTotals.values()].reduce((a, b) => a + b, 0)}</b></td><td><b>${totalBook}</b></td></tr>`;
 
   // Peak hour / top dispatcher
@@ -927,23 +982,28 @@ export function renderSection6(excelData) {
     .filter(([name, d]) => d.total > 0 || d.bookedPhys > 0 || d.bookedPhone > 0)
     .sort((a, b) => b[1].total - a[1].total)
     .slice(0, 3);
-  const pipelineCardsHtml = ordered.map(([name, d]) => {
+  // v6: build as <td> cells inside a table for email-client compatibility.
+  const pipelineCardCells = ordered.map(([name, d]) => {
     const color = pipelineColors[name] || { bg: "#f9fafb", border: "#6b7280", titleColor: "#374151" };
     const bookings = d.bookedPhys + d.bookedPhone;
     const bookingsCell = bookings === 0
       ? `<span style="color:#9ca3af">0</span>`
       : `${bookings} <span class="pill-physical">${d.bookedPhys} Physical</span> <span class="pill-phone">${d.bookedPhone} Phone</span>`;
-    return `<div class="pipeline-card" style="background:${color.bg};border-top:4px solid ${color.border}">
-      <div class="pc-title" style="color:${color.titleColor}">${esc(name)}</div>
-      <div class="pc-big">${d.total}</div>
-      <table>
-        <tr><td>Real Calls</td><td>${d.real}</td></tr>
-        <tr><td>Live Transfers</td><td>${d.lt}</td></tr>
-        <tr><td>Unique Contacts</td><td>${d.contacts.size}</td></tr>
-        <tr><td><b>Bookings Today</b></td><td style="color:${bookings > 0 ? "#065f46" : "#9ca3af"}">${bookingsCell}</td></tr>
-      </table>
-    </div>`;
+    const cellWidth = `${Math.floor(100 / Math.max(1, ordered.length))}%`;
+    return `<td style="vertical-align:top;padding:0;border:none;width:${cellWidth}">
+      <div class="pipeline-card" style="background:${color.bg};border-top:4px solid ${color.border}">
+        <div class="pc-title" style="color:${color.titleColor}">${esc(name)}</div>
+        <div class="pc-big">${d.total}</div>
+        <table>
+          <tr><td>Real Calls</td><td>${d.real}</td></tr>
+          <tr><td>Live Transfers</td><td>${d.lt}</td></tr>
+          <tr><td>Unique Contacts</td><td>${d.contacts.size}</td></tr>
+          <tr><td><b>Bookings Today</b></td><td style="color:${bookings > 0 ? "#065f46" : "#9ca3af"}">${bookingsCell}</td></tr>
+        </table>
+      </div>
+    </td>`;
   }).join("");
+  const pipelineCardsHtml = `<table style="width:100%;border-collapse:separate;border-spacing:12px 0;margin:8px 0;border:none"><tr>${pipelineCardCells}</tr></table>`;
 
   // --- Stage breakdown
   const byStage = new Map();
@@ -1137,7 +1197,7 @@ export function renderSection6(excelData) {
     <h2>Section 6 — Pipelines · Stages · Lead Age</h2>
     <div class="subhead">Where the calls land — by pipeline, by stage, and by how old the lead is. With dispatcher attribution.</div>
 
-    <div class="pipeline-cards" style="grid-template-columns: repeat(${Math.max(1, ordered.length)}, 1fr)">${pipelineCardsHtml}</div>
+    ${pipelineCardsHtml}
 
     <h3 style="margin-top:24px">Stage breakdown — calls per pipeline-stage today</h3>
     <table>
