@@ -3,13 +3,13 @@
 //
 // SCHEDULE (per Alex's v2 spec, locked May 12 2026):
 //   12:00 PM ET  Morning Snapshot — today midnight to noon
+//    9:00 PM ET  Evening Snapshot — today (full-day-to-date) — added May 12 2026
 //    7:00 AM ET  Full Day Summary of YESTERDAY (so Tuesday 7 AM = Monday recap)
 //    2:00 AM ET  Firehose backfill for yesterday (feeds the 7 AM evening report)
 //   */15 6-22 ET Firehose backfill for today (every 15 min during business hours)
 //   */5  *  *   JWT refresh (Firebase id_token expires in ~1hr; refresh keeps backfill alive)
 //
-// Removed from this round (per spec): Hubstaff section, idle-dispatcher cron,
-// hourly verification reports.
+// Removed from this round (per spec): idle-dispatcher cron, hourly verification reports.
 import cron from "node-cron";
 import { config } from "./config.js";
 import { buildServer } from "./server.js";
@@ -46,6 +46,25 @@ cron.schedule(
   { timezone: config.timezone }
 );
 
+// 9:00 PM ET — Evening Snapshot of TODAY (full day so far).
+// Same renderer as the 7 AM next-day report, but covers TODAY rather than yesterday.
+// Gives Alex a near-end-of-business read on how the day went before the official
+// next-morning recap fires at 7 AM.
+cron.schedule(
+  "0 21 * * *",
+  async () => {
+    const dateOverride = todayET();
+    console.log(`[cron] evening snapshot (today=${dateOverride}) starting`);
+    try {
+      await runEveningReport({ dateOverride });
+      console.log(`[cron] evening snapshot sent`);
+    } catch (e) {
+      console.error(`[cron] evening snapshot failed`, e);
+    }
+  },
+  { timezone: config.timezone }
+);
+
 // 7:00 AM ET — Full Day Summary of YESTERDAY.
 // When Alex opens his inbox at 7 AM Tuesday, he sees Monday's complete recap.
 cron.schedule(
@@ -64,7 +83,7 @@ cron.schedule(
 );
 
 console.log(
-  `[cron] scheduled morning=12:00 evening=07:00(yesterday) tz=${config.timezone}`
+  `[cron] scheduled morning=12:00 evening_snapshot=21:00(today) yesterday_recap=07:00 tz=${config.timezone}`
 );
 
 // =====================================================================
@@ -129,5 +148,3 @@ cron.schedule(
 //     Will be re-introduced in a later pass with proper non-activity rules.
 //   - Hourly verification reports
 //     Were noisy; disabled May 7 2026, kept off in v2.
-//   - Hubstaff polling/checks
-//     Section removed from email per v2 spec; will return when integration is solid.
