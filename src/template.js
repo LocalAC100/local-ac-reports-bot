@@ -180,7 +180,7 @@ ${flags.map((f) => {
 export function renderDispatcherSection(dispatch) {
   const byD = dispatch?.byDispatcher || [];
 
-  // Section 1 — Call Activity (Day Totals) — pulled from dispatch rollup.
+  // Section 2 — Call Activity (Day Totals) — pulled from dispatch rollup.
   const sum = byD.reduce((acc, d) => {
     acc.total += (d.real || 0) + (d.voicemail || 0) + (d.attempt || 0) + (d.liveTransfers || 0);
     acc.real += d.real || 0;
@@ -207,7 +207,7 @@ export function renderDispatcherSection(dispatch) {
   </div>
 </div>`;
 
-  // Section 3 — Dispatcher Performance — per-dispatcher rollup.
+  // Section 4 — Dispatcher Performance — per-dispatcher rollup.
   const rows = byD.map((d) => {
     const ratio = d.bookingRatio != null
       ? `<span class="badge ${d.bookingRatio >= 2 && d.bookingRatio <= 4 ? "badge-good" : d.bookingRatio < 2 ? "badge-bad" : "badge-warn"}">${(d.bookingRatio).toFixed(2)}</span>`
@@ -254,7 +254,7 @@ export function renderDispatcherSection(dispatch) {
 
   // Placeholder for Sections 3, 5, 6 — data not yet computed in section builders.
   const placeholder = `<div class="section placeholder-section">
-  <h2 style="color:#78350f">Sections 4, 5 — coming next pass</h2>
+  <h2 style="color:#78350f">Sections 3, 5, 6 — coming next pass</h2>
   <div class="subhead" style="color:#78350f">
     Lead Activity (NEW / RESUB / REACT 3-column), Hour × Dispatcher matrix, and Pipelines · Stages · Lead Age + Booking Funnel are in the Excel attachment today; they'll land in this email body in the next iteration.
   </div>

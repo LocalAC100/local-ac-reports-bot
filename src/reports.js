@@ -1,7 +1,3 @@
-// NOTE — v2 spec (May 12 2026): Hubstaff section dropped from email.
-// hubstaff.* data fetches and import are kept (still cheap) but the call to
-// renderHubstaffSection() is replaced with "" so the section disappears from
-// the rendered email. idle.js cron also removed (see src/index.js).
 // Composes the morning (12 PM) and evening (7:30 PM) reports.
 // Pulls data from Hubstaff + GHL, runs analysis, builds an HTML email,
 // and ships it via mailer.
@@ -14,7 +10,7 @@ import * as ghl from "./ghl.js";
 import { analyzeScreenshots } from "./screenshots.js";
 import { sendMail } from "./mailer.js";
 import { buildDailyExcel } from "./excel-report.js";
-import { renderEmail, renderDispatcherSection } from "./template.js";
+import { renderEmail, renderHubstaffSection, renderDispatcherSection } from "./template.js";
 import { Reports, Calls, classifyCall, isLiveTransfer } from "./db.js";
 import { DateTime } from "luxon";
 
@@ -1137,7 +1133,7 @@ export async function runMorningReport({ dateOverride, to } = {}) {
   const html = renderEmail({
     title: "Morning Snapshot",
     generatedAt,
-    sections: ["", renderDispatcherSection(dispatch)],
+    sections: [renderHubstaffSection(hub), renderDispatcherSection(dispatch)],
   });
 
   // Archive to DB so the website /reports page can show this report later.
@@ -1197,7 +1193,7 @@ export async function runEveningReport({ dateOverride, to } = {}) {
   const html = renderEmail({
     title: "Full Day Summary",
     generatedAt,
-    sections: ["", renderDispatcherSection(dispatch)],
+    sections: [renderHubstaffSection(hub), renderDispatcherSection(dispatch)],
   });
 
   try {
@@ -1237,7 +1233,7 @@ export async function runTestReport() {
   const html = renderEmail({
     title: "Sample Full Day Summary (test)",
     generatedAt,
-    sections: ["", renderDispatcherSection(dispatch)],
+    sections: [renderHubstaffSection(hub), renderDispatcherSection(dispatch)],
   });
 
   await sendMail({
