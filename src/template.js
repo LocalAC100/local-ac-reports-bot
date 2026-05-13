@@ -7,7 +7,7 @@
 //      defensive about clock/status field shapes.
 
 import { DateTime } from "luxon";
-import { EMPLOYEES } from "./employees.js";
+import { EMPLOYEES, expectedShiftFor } from "./employees.js";
 import { TZ, fmtTime, fmtDuration } from "./time.js";
 
 // =====================================================================
@@ -161,17 +161,113 @@ function statusBadgeFor(code) {
 // renderHubstaffSection — Section 1.
 // v4: removed red-flags list rendering entirely (per Alex). Made clock/status
 // parsing defensive so the columns aren't blank or "[object Object]".
+// v5: Schedule + Status are now COMPUTED from EMPLOYEES + clock data when the
+// upstream Hubstaff section builder doesn't set them, so Alex sees real
+// "8:00 AM – 9:00 PM" schedules and "✓ on track" badges for employees with
+// data instead of permanent "NO HUBSTAFF YET".
 // =====================================================================
-export function renderHubstaffSection(hub) {
-  const rows = (hub?.perEmployee || []).map((emp) => {
-    const code = coerceStatusFlag(emp.statusFlag);
-    const statusBadge = statusBadgeFor(code);
+
+// Helpers for v5 status computation
+function _hhmmToMin(s) {
+  const m = String(s || "").match(/^(\d{1,2}):(\d{2})$/);
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+function _fmtTimeRange(start, end) {
+  function fmt(hhmm) {
+    if (!hhmm) return "";
+    const [h, m] = String(hhmm).split(":").map(Number);
+    const period = h >= 12 ? "PM" : "AM";
+    const hr = ((h + 11) % 12) + 1;
+    return `${hr}:${String(m || 0).padStart(2, "0")} ${period}`;
+  }
+  return `${fmt(start)} – ${fmt(end)}`;
+}
+function _clockMin(input) {
+  if (input == null || input === "") return null;
+  if (input instanceof Date) return input.getHours() * 60 + input.getMinutes();
+  if (typeof input === "number") {
+    const dt = DateTime.fromMillis(input).setZone(TZ);
+    return dt.isValid ? dt.hour * 60 + dt.minute : null;
+  }
+  const s = String(input).trim();
+  const dt = DateTime.fromISO(s, { zone: TZ });
+  if (dt.isValid) return dt.hour * 60 + dt.minute;
+  const m12 = s.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (m12) {
+    let h = Number(m12[1]) % 12;
+    if (/PM/i.test(m12[3])) h += 12;
+    return h * 60 + Number(m12[2]);
+  }
+  const m24 = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (m24) return Number(m24[1]) * 60 + Number(m24[2]);
+  return null;
+}
+
+export function renderHubstaffSection(hub, opts = {}) {
+  const generatedAt = opts.generatedAt
+    ? (typeof opts.generatedAt === "string"
+        ? DateTime.fromISO(opts.generatedAt, { zone: TZ })
+        : opts.generatedAt)
+    : DateTime.now().setZone(TZ);
+
+  const perEmployee = hub?.perEmployee || [];
+  const rows = perEmployee.map((emp) => {
+    // Look up EMPLOYEES record by name (case-insensitive first name match).
+    const empRec = EMPLOYEES.find((e) =>
+      String(e.name || "").toLowerCase() === String(emp.name || "").toLowerCase() ||
+      String(e.fullName || "").toLowerCase() === String(emp.name || "").toLowerCase()
+    );
+    const shift = empRec ? expectedShiftFor(empRec, generatedAt) : null;
+    const role = emp.role || empRec?.role || "";
+
+    // Compute scheduleText from EMPLOYEES if upstream didn't provide one.
+    let scheduleText = emp.scheduleText;
+    let scheduleSummary = emp.scheduleSummary;
+    if (!scheduleText && shift) {
+      scheduleText = _fmtTimeRange(shift.start, shift.end);
+      const startMin = _hhmmToMin(shift.start);
+      const endMin = _hhmmToMin(shift.end);
+      const brk = empRec?.breakMinutesPerShift || 0;
+      if (startMin != null && endMin != null) {
+        const totalH = (endMin - startMin) / 60;
+        scheduleSummary = `${totalH.toFixed(0)}h paid · ${brk} min break`;
+      }
+    }
+    if (!scheduleText && empRec && !shift) {
+      scheduleText = "off";
+    }
+
     // Try common Hubstaff field names for clock-in/out.
     const clockIn  = emp.clockIn  ?? emp.clock_in  ?? emp.firstStart ?? emp.first_start ?? emp.startedAt ?? emp.started_at;
     const clockOut = emp.clockOut ?? emp.clock_out ?? emp.lastStop   ?? emp.last_stop   ?? emp.stoppedAt ?? emp.stopped_at;
+
+    // Compute status code:
+    //  - If upstream provided a non-"no_data" string code, use it.
+    //  - Else compute from clock vs scheduled (matches mockup rule: ✓ on track
+    //    only when none of late_in, early_out, hours_short, break_over fire).
+    let code = coerceStatusFlag(emp.statusFlag);
+    if (code === "no_data" && clockIn != null && shift) {
+      const ci = _clockMin(clockIn);
+      const co = _clockMin(clockOut);
+      const startMin = _hhmmToMin(shift.start);
+      const endMin = _hhmmToMin(shift.end);
+      const brkBudget = empRec?.breakMinutesPerShift ?? 0;
+      const lateIn = ci != null && startMin != null && ci > startMin;
+      const earlyOut = co != null && endMin != null && co < endMin;
+      const breakOver = emp.breakMinutes != null && emp.breakMinutes > brkBudget;
+      const scheduledMin = startMin != null && endMin != null ? endMin - startMin - brkBudget : null;
+      const hoursShort = scheduledMin != null && emp.workedMinutes != null && emp.workedMinutes < scheduledMin * 0.95;
+      if (lateIn) code = "late_in";
+      else if (earlyOut) code = "early_out";
+      else if (breakOver) code = "break_over";
+      else if (hoursShort) code = "hours_short";
+      else code = "ok";
+    }
+    const statusBadge = statusBadgeFor(code);
+
     return `<tr>
-      <td><b>${esc(emp.name)}</b><br><span class="small">${esc(emp.role || "")}</span></td>
-      <td>${esc(emp.scheduleText || "")}<br><span class="small">${esc(emp.scheduleSummary || "")}</span></td>
+      <td><b>${esc(emp.name)}</b><br><span class="small">${esc(role)}</span></td>
+      <td>${esc(scheduleText || "")}<br><span class="small">${esc(scheduleSummary || "")}</span></td>
       <td>${fmtClock(clockIn)}</td>
       <td>${fmtClock(clockOut)}</td>
       <td><b>${fmtMinutes(emp.workedMinutes)}</b></td>
@@ -181,14 +277,18 @@ export function renderHubstaffSection(hub) {
     </tr>`;
   }).join("");
 
-  // Day-total table
-  const totals = hub?.totalsByEmployee || [];
+  // Day-total table — fill Employee names from upstream OR from perEmployee order.
+  const totals = (hub?.totalsByEmployee || []).map((r, i) => ({
+    ...r,
+    name: r.name || perEmployee[i]?.name || "",
+    payRate: r.payRate || (EMPLOYEES.find((e) => e.name === (r.name || perEmployee[i]?.name))?.payRate ?? ""),
+  }));
   const totalCost = totals.reduce((s, r) => s + (Number(r.cost) || 0), 0);
   const totalMinutes = totals.reduce((s, r) => s + (Number(r.minutes) || 0), 0);
   const dayTotalRows = totals.map((r) => `<tr>
     <td>${esc(r.name)}</td>
     <td>${fmtMinutes(r.minutes)}</td>
-    <td>${esc(r.payRate || "")}</td>
+    <td>${r.payRate ? `$${r.payRate}/hr` : ""}</td>
     <td>$${(Number(r.cost) || 0).toFixed(2)}</td>
   </tr>`).join("");
   const dayTotalHtml = totals.length ? `<h3>Day Total — paid hours only (capped at scheduled)</h3>
@@ -200,15 +300,39 @@ export function renderHubstaffSection(hub) {
       </tbody>
     </table>` : "";
 
-  // Footer summary — count on-track vs. exceptions
-  const onTrack = (hub?.perEmployee || []).filter((e) => {
-    const c = coerceStatusFlag(e.statusFlag);
-    return c === "ok" || c === "on_track";
-  }).length;
-  const total = (hub?.perEmployee || []).length;
-  const noData = (hub?.perEmployee || []).filter((e) => coerceStatusFlag(e.statusFlag) === "no_data").length;
-  const offTrack = total - onTrack - noData;
-  const summary = total
+  // Footer summary — count on-track vs. exceptions (re-derived after compute)
+  const computedCodes = perEmployee.map((emp) => {
+    const empRec = EMPLOYEES.find((e) =>
+      String(e.name || "").toLowerCase() === String(emp.name || "").toLowerCase() ||
+      String(e.fullName || "").toLowerCase() === String(emp.name || "").toLowerCase()
+    );
+    const shift = empRec ? expectedShiftFor(empRec, generatedAt) : null;
+    const clockIn = emp.clockIn ?? emp.clock_in ?? emp.firstStart ?? emp.first_start ?? emp.startedAt ?? emp.started_at;
+    const clockOut = emp.clockOut ?? emp.clock_out ?? emp.lastStop ?? emp.last_stop ?? emp.stoppedAt ?? emp.stopped_at;
+    let code = coerceStatusFlag(emp.statusFlag);
+    if (code === "no_data" && clockIn != null && shift) {
+      const ci = _clockMin(clockIn);
+      const co = _clockMin(clockOut);
+      const startMin = _hhmmToMin(shift.start);
+      const endMin = _hhmmToMin(shift.end);
+      const brkBudget = empRec?.breakMinutesPerShift ?? 0;
+      const lateIn = ci != null && startMin != null && ci > startMin;
+      const earlyOut = co != null && endMin != null && co < endMin;
+      const breakOver = emp.breakMinutes != null && emp.breakMinutes > brkBudget;
+      const scheduledMin = startMin != null && endMin != null ? endMin - startMin - brkBudget : null;
+      const hoursShort = scheduledMin != null && emp.workedMinutes != null && emp.workedMinutes < scheduledMin * 0.95;
+      if (lateIn) code = "late_in";
+      else if (earlyOut) code = "early_out";
+      else if (breakOver) code = "break_over";
+      else if (hoursShort) code = "hours_short";
+      else code = "ok";
+    }
+    return code;
+  });
+  const onTrack = computedCodes.filter((c) => c === "ok" || c === "on_track").length;
+  const noData = computedCodes.filter((c) => c === "no_data").length;
+  const offTrack = computedCodes.length - onTrack - noData;
+  const summary = computedCodes.length
     ? `<b>Summary:</b> ${onTrack} on track · ${offTrack} flagged · ${noData} no Hubstaff data · day cost $${totalCost.toFixed(2)}.`
     : "<b>Summary:</b> no Hubstaff records for today yet.";
 
@@ -363,13 +487,19 @@ export function renderLeadActivitySection(excelData) {
     const rowClass = row.bookedToday ? ' class="row-booked"' : "";
     const respSec = Number(row._respSec || 0);
     let respBadge = `<span class="small">${esc(resp)}</span>`;
-    if (cat !== "REACT" && respSec) {
+    if (cat !== "REACT" && respSec > 0) {
+      // Note: respSec for RESUB rows is unreliable until the upstream excel-report
+      // fix lands — it's measured from the original lead date rather than the
+      // resubmission timestamp. Negative / huge values fall through to "—".
       if (respSec <= 60) respBadge = `<span class="badge badge-good">≤ 1 min</span>`;
       else if (respSec <= 180) respBadge = `<span class="badge badge-warn">≤ 3 min</span>`;
       else if (respSec <= 300) respBadge = `<span class="badge badge-warn">≤ 5 min</span>`;
       else respBadge = `<span class="badge badge-bad">&gt; 5 min</span>`;
     } else if (cat === "REACT") {
       respBadge = `<span class="small">N/A</span>`;
+    } else if (respSec <= 0) {
+      // Negative or zero — likely the resub bug. Show dash until fixed upstream.
+      respBadge = `<span class="small">—</span>`;
     }
     return `<tr${rowClass}>
       <td>${catPill}</td>
@@ -568,21 +698,46 @@ export function renderSection6(excelData) {
     else if (c.bucket === "failed") d.failed++;
     if (c.raw?.contact_id) d.contacts.add(c.raw.contact_id);
   }
-  // Attribute bookings to pipelines using the lead rows
+  // Attribute bookings to pipelines using each lead's CALLS — find the
+  // pipeline most-used in that contact's calls today. Falls back to the
+  // dominant pipeline (Orlando) when no calls are linked.
+  const dominantPipeline = ordered[0]?.[0] && ordered[0][0] !== "—" ? ordered[0][0] : null;
   function pipelineForRow(r) {
-    return r.pipelineName || r.pipeline || null;
+    if (r.pipelineName) return r.pipelineName;
+    if (r.pipeline) return r.pipeline;
+    // Try to find this contact's pipeline from their calls
+    const cid = r._id || r.contactId || r.contact_id;
+    if (cid) {
+      const counts = new Map();
+      for (const c of calls) {
+        if (c.raw?.contact_id !== cid) continue;
+        const p = c.pipelineName || null;
+        if (!p) continue;
+        counts.set(p, (counts.get(p) || 0) + 1);
+      }
+      if (counts.size > 0) {
+        return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+      }
+    }
+    return dominantPipeline;
   }
   for (const r of [...newLeadRows, ...newOppRows, ...reactivatedRows]) {
     if (!r.bookedToday) continue;
-    const k = pipelineForRow(r) || "(no pipeline)";
+    const k = pipelineForRow(r);
+    if (!k) continue; // skip if we genuinely can't attribute
     if (!byPipeline.has(k)) byPipeline.set(k, { total: 0, real: 0, lt: 0, na: 0, failed: 0, contacts: new Set(), bookedPhys: 0, bookedPhone: 0 });
     const stage = r.finalStage || r.stage || "";
     if (stage === "Appt. Booked") byPipeline.get(k).bookedPhys++;
     if (stage === "Over Phone Booked") byPipeline.get(k).bookedPhone++;
   }
-  const ordered = [...byPipeline.entries()].sort((a, b) => b[1].total - a[1].total).slice(0, 3);
-  // Pad to 3 cards
-  while (ordered.length < 3) ordered.push(["(unused)", { total: 0, real: 0, lt: 0, contacts: new Set(), bookedPhys: 0, bookedPhone: 0 }]);
+  // Show only known/significant pipelines: drop "(no pipeline)" / "(unused)"
+  // unless it has serious volume (≥ 20 calls).
+  const ordered = [...byPipeline.entries()]
+    .filter(([name, d]) => !/^\(no pipeline\)$|^\(unused\)$/.test(name) || d.total >= 20)
+    .sort((a, b) => b[1].total - a[1].total)
+    .slice(0, 3);
+  // Pad to 3 cards with empty placeholders (not "(no pipeline)") for layout
+  while (ordered.length < 3) ordered.push(["—", { total: 0, real: 0, lt: 0, contacts: new Set(), bookedPhys: 0, bookedPhone: 0 }]);
   const pipelineCardsHtml = ordered.map(([name, d]) => {
     const color = pipelineColors[name] || { bg: "#f9fafb", border: "#6b7280", titleColor: "#374151" };
     const bookings = d.bookedPhys + d.bookedPhone;
@@ -667,8 +822,11 @@ export function renderSection6(excelData) {
       : cat === "REACT"
       ? ` · ${row.ageDays ? row.ageDays + "d old" : ""}`
       : "";
+    // Hide response time entirely if it's negative (resub bug — measured from
+    // original lead date instead of resubmission timestamp).
+    const respOk = resp && cat !== "REACT" && !/^-/.test(String(resp)) && resp !== "Never";
     return `<div style="font-size:13px;padding:4px 0;border-top:1px dashed #e5e7eb">→ <b>${esc(name)}</b> <span class="small">(${esc(source)} · ${cat}${ageSuffix})</span> &nbsp;${bookingTypePill}<br>
-      <span class="small" style="margin-left:18px">${stage ? esc(stage) : "—"} &nbsp;·&nbsp; ${esc(disp)} ${dur ? "· " + esc(dur) + " real call" : ""} ${resp && cat !== "REACT" ? "· response " + esc(resp) : ""}</span>
+      <span class="small" style="margin-left:18px">${stage ? esc(stage) : "—"} &nbsp;·&nbsp; ${esc(disp)} ${dur ? "· " + esc(dur) + " real call" : ""} ${respOk ? "· response " + esc(resp) : ""}</span>
     </div>`;
   }
   const newLeadFunnel = newBookings.map((r) => bookingLine(r, "NEW")).join("");
