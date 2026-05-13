@@ -155,6 +155,40 @@ export function buildServer() {
     }
   );
 
+  // ─── Debug: peek at call DB row shape ───────────────────────────────
+  // GET /admin/debug-calls/<SECRET>?date=YYYY-MM-DD — returns the first 3
+  // raw rows from Calls.listInWindow + a sample of the enriched call objects
+  // so we can see exactly what fields exist and which are null/missing.
+  app.get("/admin/debug-calls/" + JWT_BOOTSTRAP_SECRET, async (req, res) => {
+    try {
+      const date = req.query.date || new Date().toISOString().slice(0, 10);
+      const { DateTime } = await import("luxon");
+      const TZ = "America/New_York";
+      const dayStart = DateTime.fromISO(date, { zone: TZ }).startOf("day");
+      const dayEnd = dayStart.endOf("day");
+      const rows = Calls.listInWindow(dayStart.toUTC().toISO(), dayEnd.toUTC().toISO(), 5);
+      res.json({
+        ok: true,
+        date,
+        rowCount: rows.length,
+        rowsRaw: rows.slice(0, 3).map((r) => ({
+          keys: Object.keys(r),
+          contact_id: r.contact_id,
+          phone: r.phone,
+          date_added: r.date_added,
+          date_added_type: typeof r.date_added,
+          status: r.status,
+          duration: r.duration,
+          direction: r.direction,
+          user_id: r.user_id,
+          raw_event_present: !!r.raw_event,
+        })),
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e?.message || String(e) });
+    }
+  });
+
   // ─── No-auth mailer diagnostics ────────────────────────────────────────
   // Mounted BEFORE the dashboard router so secret-bypass works.
   // GET /admin/mailer-info/<SECRET>            -> sanitized SMTP config
