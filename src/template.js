@@ -130,6 +130,42 @@ const fmtMinutes = (mins) => {
   return `${h}h ${m}m`;
 };
 
+// v12: defensive time extractor — tries every field/format we've seen on
+// call objects. Returns "HH:mm:ss" in ET, or "" if nothing useful.
+function _extractCallTime(c) {
+  if (!c) return "";
+  // 1. Luxon DateTime (what enrichCalls sets as c.dt)
+  if (c.dt && typeof c.dt.toFormat === "function" && c.dt.isValid) {
+    return c.dt.toFormat("HH:mm:ss");
+  }
+  // 2. Try a bunch of likely string/number fields, in priority order.
+  const candidates = [
+    c.raw && c.raw.date_added, c.raw && c.raw.dateAdded,
+    c.raw && c.raw.dt, c.raw && c.raw.timestamp,
+    c.raw && c.raw.startedAt, c.raw && c.raw.started_at,
+    c.dateAdded, c.date_added, c.startedAt, c.started_at,
+  ].filter((v) => v !== undefined && v !== null && v !== "");
+  for (const v of candidates) {
+    if (typeof v === "number") {
+      const dt = DateTime.fromMillis(v).setZone(TZ);
+      if (dt.isValid) return dt.toFormat("HH:mm:ss");
+    }
+    const s = String(v);
+    // ISO with T or space separator
+    const isoMatch = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+    if (isoMatch) {
+      const dt = DateTime.fromISO(s.replace(" ", "T"), { zone: "utc" }).setZone(TZ);
+      if (dt.isValid) return dt.toFormat("HH:mm:ss");
+    }
+    // Plain HH:MM:SS (probably already local ET)
+    const hmsMatch = s.match(/(\d{2}):(\d{2}):(\d{2})/);
+    if (hmsMatch) return `${hmsMatch[1]}:${hmsMatch[2]}:${hmsMatch[3]}`;
+  }
+  // 3. Last resort: c.hour → "HH:00"
+  if (typeof c.hour === "number") return `${String(c.hour).padStart(2, "0")}:00`;
+  return "";
+}
+
 // Coerce statusFlag from whatever shape Hubstaff returns into a known code.
 function coerceStatusFlag(raw) {
   if (raw == null) return "no_data";
@@ -484,18 +520,14 @@ export function renderCallActivitySection(dispatch, excelData) {
     if (Number(c.durationSec || 0) >= 70) return true;
     return false;
   });
-  // Sort by c.dt (Luxon DateTime) ascending — these are real call objects
-  // from enrichCalls so c.dt is always set.
+  // Sort by extracted call time (defensive against missing c.dt).
   realCalls.sort((a, b) => {
-    const ka = a.dt && a.dt.isValid ? a.dt.toMillis() : 0;
-    const kb = b.dt && b.dt.isValid ? b.dt.toMillis() : 0;
-    return ka - kb;
+    const ta = _extractCallTime(a) || "99:99:99";
+    const tb = _extractCallTime(b) || "99:99:99";
+    return ta.localeCompare(tb);
   });
   function _hhmmssFromCall(c) {
-    if (c.dt && c.dt.isValid && c.dt.toFormat) return c.dt.toFormat("HH:mm:ss");
-    const s = c.raw?.date_added || "";
-    const m = String(s).match(/T(\d{2}):(\d{2}):(\d{2})/);
-    return m ? `${m[1]}:${m[2]}:${m[3]}` : "—";
+    return _extractCallTime(c) || "—";
   }
   const realCallRows = realCalls.map((c) => {
     const cid = c.raw?.contact_id;
@@ -643,21 +675,14 @@ export function renderLeadActivitySection(excelData, opts = {}) {
       } catch {}
     }
     if (mine.length === 0) return { firstCallTime: "", hadRealCall: false, totalDurationFmt: "", attempts: 0, inProgress };
-    // Sort by c.dt (Luxon DateTime) if valid, else by raw.date_added.
+    // Sort by extracted time (HH:mm:ss) ascending so first[0] is earliest.
     mine.sort((a, b) => {
-      const ka = a.dt && a.dt.isValid ? a.dt.toMillis() : new Date(a.raw?.date_added || 0).getTime();
-      const kb = b.dt && b.dt.isValid ? b.dt.toMillis() : new Date(b.raw?.date_added || 0).getTime();
-      return ka - kb;
+      const ta = _extractCallTime(a) || "99:99:99";
+      const tb = _extractCallTime(b) || "99:99:99";
+      return ta.localeCompare(tb);
     });
     const first = mine[0];
-    let firstCallTime = "";
-    if (first.dt && first.dt.isValid && first.dt.toFormat) {
-      firstCallTime = first.dt.toFormat("HH:mm:ss");
-    } else {
-      const fs = first.raw?.date_added || "";
-      const m = String(fs).match(/T(\d{2}):(\d{2}):(\d{2})/);
-      if (m) firstCallTime = `${m[1]}:${m[2]}:${m[3]}`;
-    }
+    const firstCallTime = _extractCallTime(first);
     const totalSec = mine.reduce((s, c) => s + (Number(c.durationSec) || 0), 0);
     const hadRealCall = mine.some((c) => c.bucket === "real_call" || c.bucket === "live_transfer" || (Number(c.durationSec || 0) >= 70));
     function fmtSec(sec) {
