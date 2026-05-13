@@ -774,10 +774,13 @@ export function renderSection6(excelData) {
     if (c.raw?.contact_id) d.contacts.add(c.raw.contact_id);
   }
   // Originated Bookings: bookings whose stage at start of day was this stage.
-  // Approximation: use the lead row's "origin" if available; for new leads use "New Lead In".
+  // For new leads / resubs, origin stage is "New Lead In". Use the same
+  // pipelineForRow fallback so we don't end up with "? → New Lead In" rows.
   for (const r of newLeadRows) {
     if (!r.bookedToday) continue;
-    const k = (r.pipelineName || "?") + " → New Lead In";
+    const pname = pipelineForRow(r);
+    if (!pname) continue;
+    const k = pname + " → New Lead In";
     if (!byStage.has(k)) byStage.set(k, { total: 0, real: 0, lt: 0, na: 0, failed: 0, contacts: new Set(), bookedPhys: 0, bookedPhone: 0 });
     const stage = r.finalStage || "";
     if (stage === "Appt. Booked") byStage.get(k).bookedPhys++;
@@ -785,7 +788,9 @@ export function renderSection6(excelData) {
   }
   for (const r of newOppRows) {
     if (!r.bookedToday) continue;
-    const k = (r.pipelineName || "?") + " → New Lead In";
+    const pname = pipelineForRow(r);
+    if (!pname) continue;
+    const k = pname + " → New Lead In";
     if (!byStage.has(k)) byStage.set(k, { total: 0, real: 0, lt: 0, na: 0, failed: 0, contacts: new Set(), bookedPhys: 0, bookedPhone: 0 });
     const stage = r.finalStage || "";
     if (stage === "Appt. Booked") byStage.get(k).bookedPhys++;
