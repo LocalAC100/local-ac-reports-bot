@@ -429,6 +429,85 @@ export function renderCallActivitySection(dispatch, excelData) {
     }
   }
 
+  // v7: Real Calls detail table — every real call today with customer, category,
+  // source, time, duration, origin stage, booked status.
+  const calls = excelData?.calls || [];
+  // Build lookup: contact_id → { row, category }
+  const rowByContact = new Map();
+  if (excelData) {
+    for (const r of (excelData.newLeadRows || [])) {
+      const cid = r._id || r.contactId || r.contact_id;
+      if (cid) rowByContact.set(cid, { row: r, cat: "NEW", origin: "New Lead In" });
+    }
+    for (const r of (excelData.newOppRows || [])) {
+      const cid = r._id || r.contactId || r.contact_id;
+      if (cid) rowByContact.set(cid, { row: r, cat: "RESUB", origin: "New Lead In (reset)" });
+    }
+    for (const r of (excelData.reactivatedRows || [])) {
+      const cid = r._id || r.contactId || r.contact_id;
+      if (cid) rowByContact.set(cid, { row: r, cat: "REACT", origin: r.stage || "(unknown)" });
+    }
+  }
+  // Real calls = bucket "real_call" OR "live_transfer" OR durationSec >= 70.
+  const realCalls = calls.filter((c) => {
+    if (c.bucket === "real_call" || c.bucket === "live_transfer") return true;
+    if (Number(c.durationSec || 0) >= 70) return true;
+    return false;
+  });
+  // Sort by start time ascending.
+  realCalls.sort((a, b) => {
+    const ka = a.startAt || a.dateAdded || a.startedAt || "";
+    const kb = b.startAt || b.dateAdded || b.startedAt || "";
+    return String(ka).localeCompare(String(kb));
+  });
+  function _hhmmssFromCall(c) {
+    const s = c.startAt || c.dateAdded || c.startedAt || "";
+    if (!s) return "—";
+    const m = String(s).match(/T?(\d{2}):(\d{2}):(\d{2})/);
+    return m ? `${m[1]}:${m[2]}:${m[3]}` : "—";
+  }
+  const realCallRows = realCalls.map((c) => {
+    const cid = c.raw?.contact_id || c.contactId;
+    const match = cid ? rowByContact.get(cid) : null;
+    const customer = match?.row?.leadName || match?.row?.name || c.raw?.contact_name || c.raw?.fullName || "—";
+    const catPill = !match
+      ? "—"
+      : match.cat === "NEW" ? '<span class="cat-new">NEW</span>'
+      : match.cat === "RESUB" ? '<span class="cat-resub">RESUB</span>'
+      : '<span class="cat-react">REACT</span>';
+    const source = match?.row?.leadSource || match?.row?.source || "—";
+    const time = _hhmmssFromCall(c);
+    const duration = c.durationFmt || (c.durationSec ? fmtDuration(c.durationSec) : "—");
+    const origin = match?.origin || "—";
+    const dispatcher = c.dispatcher || "—";
+    let bookedCell = "—";
+    if (c.bucket === "live_transfer") bookedCell = '<span class="badge badge-warn">Live Transfer</span>';
+    if (match?.row?.bookedToday) {
+      const stage = match.row.finalStage || match.row.stage || "";
+      if (stage === "Appt. Booked") bookedCell = '<span class="pill-physical">Physical</span>';
+      else if (stage === "Over Phone Booked") bookedCell = '<span class="pill-phone">Phone Booked</span>';
+    }
+    return `<tr>
+      <td>${esc(customer)}</td>
+      <td>${catPill}</td>
+      <td>${esc(source)}</td>
+      <td>${time}</td>
+      <td>${esc(duration)}</td>
+      <td>${esc(origin)}</td>
+      <td>${esc(dispatcher)}</td>
+      <td>${bookedCell}</td>
+    </tr>`;
+  }).join("");
+
+  const realCallsTable = realCalls.length === 0
+    ? '<p class="small" style="margin-top:12px">No real calls placed today (REAL_CALL_THRESHOLD = 70s).</p>'
+    : `<h3 style="margin-top:18px">Real Calls — every conversation ≥70s today</h3>
+       <table>
+         <thead><tr><th>Customer</th><th>Cat</th><th>Source</th><th>Time</th><th>Duration</th><th>Origin Stage</th><th>Dispatcher</th><th>Booked</th></tr></thead>
+         <tbody>${realCallRows}</tbody>
+       </table>
+       <p class="small" style="margin-top:4px">Each row is one real conversation. <b>Origin Stage</b> = where the lead was BEFORE this conversation (so you can see which pipeline stages are producing bookings).</p>`;
+
   return `<div class="section" style="padding:14px 24px">
     <h2 style="font-size:16px">Section 2 — Call Activity (Day Totals)</h2>
     <div style="display:flex;flex-wrap:wrap;gap:0;align-items:baseline;font-size:13px;margin-top:6px;color:#1f2937;line-height:1.7">
@@ -444,6 +523,7 @@ export function renderCallActivitySection(dispatch, excelData) {
       <span style="color:#d1d5db;margin:0 12px">|</span>
       <span class="small">REAL_CALL_THRESHOLD = 70s</span>
     </div>
+    ${realCallsTable}
     <div class="summary-footer"><b>Summary:</b> ${sum.total} total calls · ${sum.real} real conversations · ${sum.lt} live transfers · ${sum.attempt} no-answer/failed · <b>${bookedTotal} bookings</b> (${bookedPhys} <span class="pill-physical">Physical</span> · ${bookedPhone} <span class="pill-phone">Phone</span>).</div>
   </div>`;
 }
@@ -495,10 +575,42 @@ function pct(n, d) {
 // =====================================================================
 export function renderLeadActivitySection(excelData) {
   if (!excelData) return "";
-  const { newLeadRows = [], newOppRows = [], reactivatedRows = [] } = excelData;
+  const { newLeadRows = [], newOppRows = [], reactivatedRows = [], calls = [] } = excelData;
   const newS = statsForRows(newLeadRows);
   const resubS = statsForRows(newOppRows);
   const reactS = statsForRows(reactivatedRows, { isReact: true });
+
+  // Enrich each lead row from the calls array — fields that buildNewLeads
+  // doesn't always populate (firstCallTime, totalDuration, attempts, hadRealCall).
+  function _enrichFromCalls(row) {
+    const cid = row._id || row.contactId || row.contact_id;
+    if (!cid) return { firstCallTime: "", hadRealCall: false, totalDurationFmt: "", attempts: 0 };
+    const mine = calls.filter((c) => c.raw?.contact_id === cid || c.contactId === cid);
+    if (mine.length === 0) return { firstCallTime: "", hadRealCall: false, totalDurationFmt: "", attempts: 0 };
+    mine.sort((a, b) => {
+      const ka = a.startAt || a.dateAdded || a.startedAt || "";
+      const kb = b.startAt || b.dateAdded || b.startedAt || "";
+      return String(ka).localeCompare(String(kb));
+    });
+    const first = mine[0];
+    const fs = first.startAt || first.dateAdded || first.startedAt || "";
+    const m = String(fs).match(/T?(\d{2}):(\d{2}):(\d{2})/);
+    const firstCallTime = m ? `${m[1]}:${m[2]}:${m[3]}` : "";
+    const totalSec = mine.reduce((s, c) => s + (Number(c.durationSec) || 0), 0);
+    const hadRealCall = mine.some((c) => c.bucket === "real_call" || c.bucket === "live_transfer" || (Number(c.durationSec || 0) >= 70));
+    function fmtSec(sec) {
+      if (sec < 60) return sec + "s";
+      const m = Math.floor(sec / 60);
+      const s = sec % 60;
+      return s ? `${m}m ${s}s` : `${m}m`;
+    }
+    return {
+      firstCallTime,
+      hadRealCall,
+      totalDurationFmt: totalSec > 0 ? fmtSec(totalSec) : "",
+      attempts: mine.length,
+    };
+  }
 
   function colTable(s, isReact) {
     const respRows = isReact ? "" : `
@@ -539,14 +651,23 @@ export function renderLeadActivitySection(excelData) {
     const catPill = cat === "NEW" ? '<span class="cat-new">NEW</span>'
                   : cat === "RESUB" ? '<span class="cat-resub">RESUB</span>'
                   : '<span class="cat-react">REACT</span>';
+    const enriched = _enrichFromCalls(row);
     const name = row.leadName || row.name || "(unknown)";
     const source = row.leadSource || row.source || "";
     const cameIn = row.cameIn || row.activityTime || "";
-    const firstCall = row.firstCallTime || row.activityTime || "—";
+    // First call: prefer the enriched (computed from calls) timestamp.
+    const firstCall = enriched.firstCallTime || (row.firstCallTime ? String(row.firstCallTime).slice(0, 8) : (row.activityTime || "—"));
     const resp = row.responseTime || "—";
-    const realCall = row.longestCallDuration || row.durationFmt || "—";
+    // Real Call: longest single call ≥70s if available, else "—".
+    const realCall = row.longestCallDuration || row.durationFmt || (enriched.hadRealCall ? (enriched.totalDurationFmt || "≥70s") : "—");
+    // Total duration of ALL calls placed to this contact today (new column).
+    const totalDur = enriched.totalDurationFmt || "—";
     const disp = row.firstCaller || row.dispatcher || row.longestCallDispatcher || "—";
-    const finalStage = row.finalStage || row.stage || "—";
+    // Origin Stage: where the lead was BEFORE today. NEW/RESUB → "New Lead In".
+    // REACT → row.stage (where they were when we re-engaged them).
+    const originStage = cat === "NEW" ? "New Lead In"
+                      : cat === "RESUB" ? "New Lead In (reset)"
+                      : (row.stage || "(unknown)");
     const stageForBooking = row.finalStage || row.stage || "";
     const isPhysical = row.bookedToday && stageForBooking === "Appt. Booked";
     const isPhone = row.bookedToday && stageForBooking === "Over Phone Booked";
@@ -555,7 +676,8 @@ export function renderLeadActivitySection(excelData) {
       : isPhone
       ? '<span class="pill-phone">Phone Booked</span>'
       : (row.bookedToday ? '<span class="pill-physical">Booked</span>' : "—");
-    const attempts = row.attempts ?? row.callCount ?? "—";
+    // Attempts: prefer enriched (count of all calls to this contact today).
+    const attempts = enriched.attempts || row.attempts || row.callCount || "—";
     const lt = (row.activity === "Live Transfer" || row.hasLiveTransfer || row.liveTransfers) ? "Yes" : "";
     // Row color: green for Physical, yellow for Phone Booked, default for the rest.
     const rowStyle = isPhysical
@@ -589,9 +711,10 @@ export function renderLeadActivitySection(excelData) {
       <td>${esc(String(firstCall).slice(0, 8))}</td>
       <td>${respBadge}</td>
       <td>${esc(realCall)}</td>
+      <td>${esc(totalDur)}</td>
       <td>${esc(disp)}</td>
       <td>${lt}</td>
-      <td>${esc(finalStage)}</td>
+      <td>${esc(originStage)}</td>
       <td>${booked}</td>
       <td>${esc(String(attempts))}</td>
     </tr>`;
@@ -633,8 +756,8 @@ export function renderLeadActivitySection(excelData) {
     </table>
     <h3 style="margin-top:24px">Detail — all leads with activity today</h3>
     <table>
-      <thead><tr><th>Cat</th><th>#</th><th>Lead</th><th>Source</th><th>Came In</th><th>First Call</th><th>Resp</th><th>Real Call</th><th>1st Disp</th><th>LT</th><th>Final Stage</th><th>Booked</th><th>Attempts</th></tr></thead>
-      <tbody>${detailRows || '<tr><td colspan="13" class="small">No lead activity today.</td></tr>'}</tbody>
+      <thead><tr><th>Cat</th><th>#</th><th>Lead</th><th>Source</th><th>Came In</th><th>First Call</th><th>Resp</th><th>Real Call</th><th>Total Call Time</th><th>1st Disp</th><th>LT</th><th>Origin Stage</th><th>Booked</th><th>Attempts</th></tr></thead>
+      <tbody>${detailRows || '<tr><td colspan="14" class="small">No lead activity today.</td></tr>'}</tbody>
     </table>
     <p class="small" style="margin-top:12px">
       <b>Legend:</b> <span class="cat-new">NEW</span> first-time lead today · <span class="cat-resub">RESUB</span> resubmission of an older contact · <span class="cat-react">REACT</span> old lead we got on the phone (no resubmission).

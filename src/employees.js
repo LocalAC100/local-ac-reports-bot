@@ -21,7 +21,7 @@ export const EMPLOYEES = [
     ghlEmail: "Christianq@local-ac.com",
     hubstaffUserId: 2768557,
     schedule: {
-      0: { start: "08:00", end: "21:00" }, // Sun
+      0: { start: "09:00", end: "18:00" }, // Sun (9 AM - 6 PM)
       1: { start: "08:00", end: "21:00" }, // Mon
       2: { start: "08:00", end: "21:00" },
       3: { start: "08:00", end: "21:00" },
