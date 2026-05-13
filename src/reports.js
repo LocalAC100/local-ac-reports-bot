@@ -13,10 +13,11 @@ import { buildDailyExcel } from "./excel-report.js";
 import {
   renderEmail,
   renderHubstaffSection,
-  renderDispatcherSection,
+  renderCallActivitySection,
+  renderDispatcherPerformanceSection,
   renderLeadActivitySection,
   renderHourXDispatcherSection,
-  renderPipelineAndFunnelSection,
+  renderSection6,
 } from "./template.js";
 import { Reports, Calls, classifyCall, isLiveTransfer } from "./db.js";
 import { DateTime } from "luxon";
@@ -1152,10 +1153,11 @@ export async function runMorningReport({ dateOverride, to } = {}) {
     generatedAt,
     sections: [
       renderHubstaffSection(hub),
-      renderDispatcherSection(dispatch),
+      renderCallActivitySection(dispatch),
       renderLeadActivitySection(excelData),
+      renderDispatcherPerformanceSection(dispatch),
       renderHourXDispatcherSection(excelData),
-      renderPipelineAndFunnelSection(excelData),
+      renderSection6(excelData),
     ],
   });
 
@@ -1225,10 +1227,11 @@ export async function runEveningReport({ dateOverride, to } = {}) {
     generatedAt,
     sections: [
       renderHubstaffSection(hub),
-      renderDispatcherSection(dispatch),
+      renderCallActivitySection(dispatch),
       renderLeadActivitySection(excelData),
+      renderDispatcherPerformanceSection(dispatch),
       renderHourXDispatcherSection(excelData),
-      renderPipelineAndFunnelSection(excelData),
+      renderSection6(excelData),
     ],
   });
 
