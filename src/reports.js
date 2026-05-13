@@ -7,6 +7,89 @@ import { now, morningWindow, eveningWindow, hourBucket, fmtTime, TZ } from "./ti
 import { EMPLOYEES, isDispatcher, expectedShiftFor } from "./employees.js";
 import * as hubstaff from "./hubstaff.js";
 import * as ghl from "./ghl.js";
+
+// =====================================================================
+// enrichBookingSources(excelData) — v10
+// For every booked lead today, decide HOW the booking happened and credit
+// the right person:
+//   Priority: Live Transfer > Real Call (>=70s) > Outbound SMS > Unknown
+// SMS data is pulled lazily from GHL Conversations API; capped to avoid
+// rate-limit blowups (max 25 contacts, max 3 conversations each).
+// Mutates excelData by attaching a .bookingSources Map(contactId -> info).
+// =====================================================================
+async function enrichBookingSources(excelData) {
+  if (!excelData) return;
+  const calls = excelData.calls || [];
+  const dispatcherMap = excelData.dispatcherMap;
+  function dispNameFromUid(uid) {
+    if (!uid) return null;
+    if (dispatcherMap && typeof dispatcherMap.get === "function") return dispatcherMap.get(uid) || null;
+    if (dispatcherMap && typeof dispatcherMap === "object") return dispatcherMap[uid] || null;
+    return null;
+  }
+  function callDispatcher(c) {
+    const uid = c.raw && (c.raw.user_id || c.raw.userId);
+    return dispNameFromUid(uid) || c.dispatcher || "—";
+  }
+  const sources = new Map();
+  const allRows = [
+    ...(excelData.newLeadRows || []),
+    ...(excelData.newOppRows || []),
+    ...(excelData.reactivatedRows || []),
+  ].filter((r) => r.bookedToday);
+  let smsContactsProcessed = 0;
+  const MAX_SMS_CONTACTS = 25;
+  for (const r of allRows) {
+    const cid = r._id || r.contactId || r.contact_id || r.id;
+    if (!cid) continue;
+    const myCalls = calls.filter((c) => {
+      const k = (c.raw && c.raw.contact_id) || c.contactId || c.contact_id;
+      return k === cid;
+    });
+    const lt = myCalls.find((c) => c.bucket === "live_transfer");
+    if (lt) {
+      sources.set(cid, { method: "Live Transfer", dispatcher: callDispatcher(lt), src: "LT" });
+      continue;
+    }
+    const real = myCalls.find((c) => c.bucket === "real_call" || (Number(c.durationSec || 0) >= 70));
+    if (real) {
+      sources.set(cid, { method: "Call", dispatcher: callDispatcher(real), src: "Call" });
+      continue;
+    }
+    if (smsContactsProcessed >= MAX_SMS_CONTACTS) {
+      sources.set(cid, { method: "?", dispatcher: r.firstCaller || "—", src: "SkippedRateLimit" });
+      continue;
+    }
+    smsContactsProcessed++;
+    try {
+      const convos = await ghl.getConversationsByContactId(cid);
+      let last = null;
+      for (const convo of (convos || []).slice(0, 3)) {
+        const msgs = await ghl.getConversationMessages(convo.id);
+        for (const m of (msgs || [])) {
+          const t = String(m.messageType || m.type || "").toUpperCase();
+          if (!t.includes("SMS")) continue;
+          const dir = String(m.direction || "").toLowerCase();
+          if (dir !== "outbound") continue;
+          const at = m.dateAdded || m.dateUpdated;
+          if (!at) continue;
+          if (!last || at > last.at) last = { at, userId: m.userId, body: m.body };
+        }
+      }
+      if (last) {
+        const name = dispNameFromUid(last.userId) || last.userId || "—";
+        sources.set(cid, { method: "SMS", dispatcher: name, src: "SMS", smsBody: last.body });
+      } else {
+        sources.set(cid, { method: "—", dispatcher: r.firstCaller || "—", src: "Unknown" });
+      }
+    } catch (e) {
+      console.error("[booking-sources] failed for", cid, e && e.message);
+      sources.set(cid, { method: "—", dispatcher: r.firstCaller || "—", src: "Unknown" });
+    }
+  }
+  excelData.bookingSources = sources;
+}
+
 import { analyzeScreenshots } from "./screenshots.js";
 import { sendMail } from "./mailer.js";
 import { buildDailyExcel } from "./excel-report.js";
@@ -1148,13 +1231,15 @@ export async function runMorningReport({ dateOverride, to } = {}) {
   }
   const excelData = xlsxBundle?.data || null;
 
+  await enrichBookingSources(excelData);
+
   const html = renderEmail({
     title: "Morning Snapshot",
     generatedAt,
     sections: [
       renderHubstaffSection(hub),
       renderCallActivitySection(dispatch, excelData),
-      renderLeadActivitySection(excelData),
+      renderLeadActivitySection(excelData, { generatedAt }),
       renderDispatcherPerformanceSection(dispatch, excelData),
       renderHourXDispatcherSection(excelData),
       renderSection6(excelData),
@@ -1222,13 +1307,15 @@ export async function runEveningReport({ dateOverride, to } = {}) {
   }
   const excelData = xlsxBundle?.data || null;
 
+  await enrichBookingSources(excelData);
+
   const html = renderEmail({
     title: "Full Day Summary",
     generatedAt,
     sections: [
       renderHubstaffSection(hub),
       renderCallActivitySection(dispatch, excelData),
-      renderLeadActivitySection(excelData),
+      renderLeadActivitySection(excelData, { generatedAt }),
       renderDispatcherPerformanceSection(dispatch, excelData),
       renderHourXDispatcherSection(excelData),
       renderSection6(excelData),
@@ -1263,6 +1350,8 @@ export async function runTestReport() {
 
   const hub = sampleHub();
   const dispatch = sampleDispatch();
+
+  await enrichBookingSources(excelData);
 
   const html = renderEmail({
     title: "Sample Full Day Summary (test)",

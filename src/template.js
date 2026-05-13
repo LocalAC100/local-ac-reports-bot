@@ -738,6 +738,16 @@ export function renderLeadActivitySection(excelData, opts = {}) {
       : (row.bookedToday ? '<span class="pill-physical">Booked</span>' : "—");
     // Attempts: prefer enriched (count of all calls to this contact today).
     const attempts = enriched.attempts || row.attempts || row.callCount || (enriched.inProgress ? "0 (in progress)" : "0");
+    // Booking Method (v10): from excelData.bookingSources (Live Transfer / Call / SMS / —).
+    const cidForMethod = row._id || row.contactId || row.contact_id || row.id;
+    const bSrc = (excelData.bookingSources && excelData.bookingSources.get) ? excelData.bookingSources.get(cidForMethod) : null;
+    let bookingMethod = "—";
+    if (row.bookedToday) {
+      if (bSrc?.method === "Live Transfer") bookingMethod = '<span class="badge badge-warn">Live Transfer</span>';
+      else if (bSrc?.method === "Call") bookingMethod = '<span class="badge badge-good">Call</span>';
+      else if (bSrc?.method === "SMS") bookingMethod = '<span class="badge badge-warn" style="background:#fde68a;color:#78350f">SMS</span>';
+      else bookingMethod = '<span class="small">?</span>';
+    }
     const lt = (row.activity === "Live Transfer" || row.hasLiveTransfer || row.liveTransfers) ? "Yes" : "";
     // Row color: green for Physical, yellow for Phone Booked, default for the rest.
     const rowStyle = isPhysical
@@ -768,14 +778,15 @@ export function renderLeadActivitySection(excelData, opts = {}) {
       <td>${esc(name)}</td>
       <td>${esc(source)}</td>
       <td>${esc(String(cameIn).slice(11, 19) || String(cameIn).slice(0, 8))}</td>
-      <td>${esc(String(firstCall).slice(0, 8))}</td>
+      <td>${firstCall.includes('<') ? firstCall : esc(String(firstCall).slice(0, 8))}</td>
       <td>${respBadge}</td>
-      <td>${esc(realCall)}</td>
-      <td>${esc(totalDur)}</td>
+      <td>${realCall.includes && realCall.includes('<') ? realCall : esc(realCall)}</td>
+      <td>${totalDur.includes && totalDur.includes('<') ? totalDur : esc(totalDur)}</td>
       <td>${esc(disp)}</td>
       <td>${lt}</td>
       <td>${esc(originStage)}</td>
       <td>${booked}</td>
+      <td>${bookingMethod}</td>
       <td>${esc(String(attempts))}</td>
     </tr>`;
   }).join("");
@@ -816,8 +827,8 @@ export function renderLeadActivitySection(excelData, opts = {}) {
     </table>
     <h3 style="margin-top:24px">Detail — all leads with activity today</h3>
     <table>
-      <thead><tr><th>Cat</th><th>#</th><th>Lead</th><th>Source</th><th>Came In</th><th>First Call</th><th>Resp</th><th>Real Call</th><th>Total Call Time</th><th>1st Disp</th><th>LT</th><th>Origin Stage</th><th>Booked</th><th>Attempts</th></tr></thead>
-      <tbody>${detailRows || '<tr><td colspan="14" class="small">No lead activity today.</td></tr>'}</tbody>
+      <thead><tr><th>Cat</th><th>#</th><th>Lead</th><th>Source</th><th>Came In</th><th>First Call</th><th>Resp</th><th>Real Call</th><th>Total Call Time</th><th>1st Disp</th><th>LT</th><th>Origin Stage</th><th>Booked</th><th>Booking Method</th><th>Attempts</th></tr></thead>
+      <tbody>${detailRows || '<tr><td colspan="15" class="small">No lead activity today.</td></tr>'}</tbody>
     </table>
     <p class="small" style="margin-top:12px">
       <b>Legend:</b> <span class="cat-new">NEW</span> first-time lead today · <span class="cat-resub">RESUB</span> resubmission of an older contact · <span class="cat-react">REACT</span> old lead we got on the phone (no resubmission).
