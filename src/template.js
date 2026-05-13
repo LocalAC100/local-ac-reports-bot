@@ -700,6 +700,21 @@ export function renderLeadActivitySection(excelData, opts = {}) {
     };
   }
 
+  // v13: TEMPORARY debug dump — first 3 calls' keys + sample values so we can
+  // see the actual field names without server-log access. Embedded as an
+  // HTML comment so it doesn't render but shows in View-Source.
+  function _safeDump(obj) {
+    try {
+      return JSON.stringify(obj, (k, v) => {
+        if (v && typeof v === "object" && v.constructor && v.constructor.name === "DateTime") {
+          return { __DateTime: true, iso: v.isValid ? v.toISO() : null, valid: v.isValid, hour: v.hour };
+        }
+        return v;
+      });
+    } catch (e) { return "DUMP_ERR:" + e.message; }
+  }
+  const debugDump = calls.slice(0, 3).map((c, i) => `CALL[${i}] keys=${Object.keys(c).join(",")} sample=${_safeDump(c).substring(0, 1500)}`).join("\n\n");
+
   function colTable(s, isReact) {
     const respRows = isReact ? "" : `
         <tr><td>≤ 1 min</td><td>${s.le1} (${pct(s.le1, s.total)})</td></tr>
@@ -776,7 +791,7 @@ export function renderLeadActivitySection(excelData, opts = {}) {
     if (row.bookedToday) {
       if (bSrc?.method === "Live Transfer") bookingMethod = '<span class="badge badge-warn">Live Transfer</span>';
       else if (bSrc?.method === "Call") bookingMethod = '<span class="badge badge-good">Call</span>';
-      else if (bSrc?.method === "SMS") bookingMethod = '<span class="badge badge-warn" style="background:#fde68a;color:#78350f">SMS</span>';
+      else if (bSrc?.method === "SMS") bookingMethod = '<span class="badge badge-bad" style="background:#fee2e2;color:#991b1b">SMS</span>';
       else bookingMethod = '<span class="small">?</span>';
     }
     const lt = (row.activity === "Live Transfer" || row.hasLiveTransfer || row.liveTransfers) ? "Yes" : "";
@@ -866,6 +881,9 @@ export function renderLeadActivitySection(excelData, opts = {}) {
       <b>Resp</b> = time from "Came In" to "First Call". <b>Real Call</b> = longest call ≥70s today.
     </p>
     <div class="summary-footer"><b>Summary:</b> ${newLeadRows.length} new + ${newOppRows.length} resub + ${reactivatedRows.length} reactivated = ${totalBooked} bookings today (${totalPhys} <span class="pill-physical">Physical</span> · ${totalPhone} <span class="pill-phone">Phone Booking</span>).</div>
+    <!-- DEBUG_CALLS_BEGIN
+${debugDump}
+DEBUG_CALLS_END -->
   </div>`;
 }
 
@@ -1307,7 +1325,7 @@ export function renderSection6(excelData) {
     let methodPill = "";
     if (bSrc?.method === "Live Transfer") methodPill = ' <span class="badge badge-warn">via Live Transfer</span>';
     else if (bSrc?.method === "Call") methodPill = ' <span class="badge badge-good">via Call</span>';
-    else if (bSrc?.method === "SMS") methodPill = ' <span class="badge badge-warn" style="background:#fde68a;color:#78350f">via SMS</span>';
+    else if (bSrc?.method === "SMS") methodPill = ' <span class="badge badge-bad" style="background:#fee2e2;color:#991b1b">via SMS</span>';
     const disp = bSrc?.dispatcher || row.firstCaller || row.dispatcher || row.longestCallDispatcher || "";
     // Hide response time entirely if it's negative (resub bug — measured from
     // original lead date instead of resubmission timestamp).
