@@ -277,28 +277,70 @@ export function renderHubstaffSection(hub, opts = {}) {
     </tr>`;
   }).join("");
 
-  // Day-total table — fill Employee names from upstream OR from perEmployee order.
-  const totals = (hub?.totalsByEmployee || []).map((r, i) => ({
-    ...r,
-    name: r.name || perEmployee[i]?.name || "",
-    payRate: r.payRate || (EMPLOYEES.find((e) => e.name === (r.name || perEmployee[i]?.name))?.payRate ?? ""),
-  }));
-  const totalCost = totals.reduce((s, r) => s + (Number(r.cost) || 0), 0);
-  const totalMinutes = totals.reduce((s, r) => s + (Number(r.minutes) || 0), 0);
-  const dayTotalRows = totals.map((r) => `<tr>
-    <td>${esc(r.name)}</td>
-    <td>${fmtMinutes(r.minutes)}</td>
-    <td>${r.payRate ? `$${r.payRate}/hr` : ""}</td>
-    <td>$${(Number(r.cost) || 0).toFixed(2)}</td>
-  </tr>`).join("");
-  const dayTotalHtml = totals.length ? `<h3>Day Total — paid hours only (capped at scheduled)</h3>
+  // Day-total table — pay = min(workedMinutes, scheduledMinutes) × payRate.
+  // We recompute from scratch using EMPLOYEES + the actual schedule for the
+  // report's date so payroll isn't sensitive to whatever the upstream
+  // "totalsByEmployee" object provides.
+  const dayTotalEntries = perEmployee
+    .map((emp) => {
+      const empRec = EMPLOYEES.find((e) =>
+        String(e.name || "").toLowerCase() === String(emp.name || "").toLowerCase() ||
+        String(e.fullName || "").toLowerCase() === String(emp.name || "").toLowerCase()
+      );
+      if (!empRec) return null;
+      // Only include employees that are scheduled to work this day AND have
+      // some clock data. Otherwise they don't appear in payroll.
+      const shift = expectedShiftFor(empRec, generatedAt);
+      if (!shift) return null;
+      const startMin = _hhmmToMin(shift.start);
+      const endMin = _hhmmToMin(shift.end);
+      const brkBudget = empRec.breakMinutesPerShift ?? 0;
+      const scheduledMin = startMin != null && endMin != null
+        ? endMin - startMin - brkBudget
+        : null;
+      const workedMin = emp.workedMinutes;
+      let paidMin = null;
+      if (scheduledMin != null && workedMin != null) {
+        paidMin = Math.min(workedMin, scheduledMin);
+      } else if (scheduledMin != null) {
+        paidMin = 0;
+      }
+      const payRate = empRec.payRate ?? 0;
+      const cost = paidMin != null ? (paidMin / 60) * payRate : 0;
+      return {
+        name: emp.name,
+        scheduledMin,
+        workedMin,
+        paidMin,
+        payRate,
+        cost,
+      };
+    })
+    .filter(Boolean);
+  const totalScheduled = dayTotalEntries.reduce((s, r) => s + (r.scheduledMin || 0), 0);
+  const totalPaid = dayTotalEntries.reduce((s, r) => s + (r.paidMin || 0), 0);
+  const totalCost = dayTotalEntries.reduce((s, r) => s + (r.cost || 0), 0);
+  const dayTotalRows = dayTotalEntries.map((r) => {
+    const paidNote = r.workedMin != null && r.scheduledMin != null && r.workedMin > r.scheduledMin
+      ? ` <span class="small">(actual ${fmtMinutes(r.workedMin)} capped)</span>`
+      : "";
+    return `<tr>
+      <td>${esc(r.name)}</td>
+      <td>${fmtMinutes(r.scheduledMin)}</td>
+      <td>${fmtMinutes(r.paidMin)}${paidNote}</td>
+      <td>${r.payRate ? `$${r.payRate}/hr` : ""}</td>
+      <td>$${(r.cost || 0).toFixed(2)}</td>
+    </tr>`;
+  }).join("");
+  const dayTotalHtml = dayTotalEntries.length ? `<h3>Day Total — paid hours only (capped at scheduled)</h3>
     <table>
-      <thead><tr><th>Employee</th><th>Worked (paid)</th><th>Pay Rate</th><th>Cost</th></tr></thead>
+      <thead><tr><th>Employee</th><th>Scheduled</th><th>Worked (paid)</th><th>Pay Rate</th><th>Cost</th></tr></thead>
       <tbody>
         ${dayTotalRows}
-        <tr style="background:#f3f4f6;font-weight:bold"><td>TOTAL</td><td>${fmtMinutes(totalMinutes)}</td><td></td><td>$${totalCost.toFixed(2)}</td></tr>
+        <tr style="background:#f3f4f6;font-weight:bold"><td>TOTAL</td><td>${fmtMinutes(totalScheduled)}</td><td>${fmtMinutes(totalPaid)}</td><td></td><td>$${totalCost.toFixed(2)}</td></tr>
       </tbody>
-    </table>` : "";
+    </table>
+    <p class="small"><b>Pay formula:</b> <code>min(worked within shift, scheduled paid hours) × rate</code>. Time clocked outside the shift (before start, after end) doesn't count. Scheduled paid hours = shift length minus break budget.</p>` : "";
 
   // Footer summary — count on-track vs. exceptions (re-derived after compute)
   const computedCodes = perEmployee.map((emp) => {
@@ -354,10 +396,10 @@ export function renderHubstaffSection(hub, opts = {}) {
 
 // =====================================================================
 // renderCallActivitySection — Section 2 (Call Activity Day Totals).
-// v4: split out of the old renderDispatcherSection, and dropped the
-// "Slow Response — leads > 3 min" red panel (data was unreliable).
+// v5: accepts excelData so we can show today's bookings (Physical/Phone) in
+// the stat strip + summary footer, computed from the same source as Section 3.
 // =====================================================================
-export function renderCallActivitySection(dispatch) {
+export function renderCallActivitySection(dispatch, excelData) {
   const byD = dispatch?.byDispatcher || [];
   const sum = byD.reduce((acc, d) => {
     acc.total += (d.real || 0) + (d.voicemail || 0) + (d.attempt || 0) + (d.liveTransfers || 0);
@@ -368,7 +410,24 @@ export function renderCallActivitySection(dispatch) {
     return acc;
   }, { total: 0, real: 0, lt: 0, vm: 0, attempt: 0 });
 
-  const naPct = sum.total > 0 ? ((sum.attempt - 0) / sum.total * 100).toFixed(1) : "0.0";
+  const naPct = sum.total > 0 ? (sum.attempt / sum.total * 100).toFixed(1) : "0.0";
+
+  // Booking counts from excelData rows (source of truth)
+  let bookedTotal = 0, bookedPhys = 0, bookedPhone = 0;
+  if (excelData) {
+    const rows = [
+      ...(excelData.newLeadRows || []),
+      ...(excelData.newOppRows || []),
+      ...(excelData.reactivatedRows || []),
+    ];
+    for (const r of rows) {
+      if (!r.bookedToday) continue;
+      bookedTotal++;
+      const s = r.finalStage || r.stage || "";
+      if (s === "Appt. Booked") bookedPhys++;
+      if (s === "Over Phone Booked") bookedPhone++;
+    }
+  }
 
   return `<div class="section" style="padding:14px 24px">
     <h2 style="font-size:16px">Section 2 — Call Activity (Day Totals)</h2>
@@ -379,13 +438,13 @@ export function renderCallActivitySection(dispatch) {
       <span style="color:#d1d5db;margin:0 12px">|</span>
       <span><span style="color:#6b7280">Live Transfers:</span> <b style="color:#1f4e78">${sum.lt}</b></span>
       <span style="color:#d1d5db;margin:0 12px">|</span>
-      <span><span style="color:#6b7280">Voicemails:</span> <b style="color:#1f4e78">${sum.vm}</b></span>
-      <span style="color:#d1d5db;margin:0 12px">|</span>
       <span><span style="color:#6b7280">No Answer / Failed:</span> <b style="color:#1f4e78">${sum.attempt}</b> <span class="small">${naPct}%</span></span>
+      <span style="color:#d1d5db;margin:0 12px">|</span>
+      <span><span style="color:#6b7280">Booked:</span> <b style="color:#1f4e78">${bookedTotal}</b> <span class="small">(${bookedPhys} <span class="pill-physical">Physical</span> · ${bookedPhone} <span class="pill-phone">Phone</span>)</span></span>
       <span style="color:#d1d5db;margin:0 12px">|</span>
       <span class="small">REAL_CALL_THRESHOLD = 70s</span>
     </div>
-    <div class="summary-footer"><b>Summary:</b> ${sum.total} total calls · ${sum.real} real conversations · ${sum.lt} live transfers · ${sum.attempt} no-answer/failed.</div>
+    <div class="summary-footer"><b>Summary:</b> ${sum.total} total calls · ${sum.real} real conversations · ${sum.lt} live transfers · ${sum.attempt} no-answer/failed · <b>${bookedTotal} bookings</b> (${bookedPhys} <span class="pill-physical">Physical</span> · ${bookedPhone} <span class="pill-phone">Phone</span>).</div>
   </div>`;
 }
 
@@ -481,7 +540,14 @@ export function renderLeadActivitySection(excelData) {
     const realCall = row.longestCallDuration || row.durationFmt || "—";
     const disp = row.firstCaller || row.dispatcher || row.longestCallDispatcher || "—";
     const finalStage = row.finalStage || row.stage || "—";
-    const booked = row.bookedToday ? "Yes" : "";
+    const stageForBooking = row.finalStage || row.stage || "";
+    const booked = row.bookedToday
+      ? (stageForBooking === "Appt. Booked"
+          ? '<span class="pill-physical">Physical</span>'
+          : stageForBooking === "Over Phone Booked"
+          ? '<span class="pill-phone">Phone Booked</span>'
+          : '<span class="pill-physical">Booked</span>')
+      : "—";
     const attempts = row.attempts ?? row.callCount ?? "—";
     const lt = (row.activity === "Live Transfer" || row.hasLiveTransfer || row.liveTransfers) ? "Yes" : "";
     const rowClass = row.bookedToday ? ' class="row-booked"' : "";
@@ -558,80 +624,193 @@ export function renderLeadActivitySection(excelData) {
 // =====================================================================
 // renderDispatcherPerformanceSection — Section 4 (split out from the old
 // renderDispatcherSection so order is 1→2→3→4→5→6).
+// v5: accepts excelData so it can attribute bookings to dispatchers from the
+// same source of truth as Sections 2, 3, 5, 6 (no more "0 0 0" booking rows).
+// Voicemail column dropped per Alex.
 // =====================================================================
-export function renderDispatcherPerformanceSection(dispatch) {
+export function renderDispatcherPerformanceSection(dispatch, excelData) {
   const byD = dispatch?.byDispatcher || [];
-  let totals = { total: 0, real: 0, lt: 0, vm: 0, attempt: 0, phys: 0, phone: 0 };
-  const rows = byD.map((d) => {
-    const totalCalls = (d.real || 0) + (d.voicemail || 0) + (d.attempt || 0) + (d.liveTransfers || 0);
-    const pctReal = totalCalls > 0 ? `${(((d.real || 0) + (d.liveTransfers || 0)) / totalCalls * 100).toFixed(1)}%` : "—";
-    const ratio = d.bookingRatio;
-    let ratioCell = "—";
-    if (ratio != null) {
-      const cls = ratio >= 2 && ratio <= 4 ? "badge-good" : ratio < 2 ? "badge-bad" : "badge-warn";
-      ratioCell = `<span class="badge ${cls}">${Number(ratio).toFixed(2)}</span>`;
+
+  // Build per-dispatcher booking counters from excelData rows.
+  // First-name match to be robust against last-name differences in dispatch.byDispatcher.
+  const physByDisp = new Map();
+  const phoneByDisp = new Map();
+  function dispatcherKey(name) {
+    if (!name) return null;
+    return String(name).trim().split(/\s+/)[0].toLowerCase();
+  }
+  function bump(map, name) {
+    const k = dispatcherKey(name);
+    if (!k) return;
+    map.set(k, (map.get(k) || 0) + 1);
+  }
+  if (excelData) {
+    const allRows = [
+      ...(excelData.newLeadRows || []),
+      ...(excelData.newOppRows || []),
+      ...(excelData.reactivatedRows || []),
+    ];
+    for (const r of allRows) {
+      if (!r.bookedToday) continue;
+      const disp = r.firstCaller || r.longestCallDispatcher || r.dispatcher || "";
+      const stage = r.finalStage || r.stage || "";
+      if (stage === "Appt. Booked") bump(physByDisp, disp);
+      if (stage === "Over Phone Booked") bump(phoneByDisp, disp);
     }
-    totals.total += totalCalls;
-    totals.real += d.real || 0;
-    totals.lt += d.liveTransfers || 0;
-    totals.vm += d.voicemail || 0;
-    totals.attempt += d.attempt || 0;
-    totals.phys += d.physBookings || 0;
-    totals.phone += d.phBookings || 0;
-    return `<tr>
-      <td><b>${esc(d.name)}</b><br><span class="small">${esc(d.role || "")}</span></td>
-      <td>${totalCalls}</td>
-      <td>${d.real || 0}</td>
-      <td>${d.liveTransfers || 0}</td>
-      <td>${d.voicemail || 0}</td>
-      <td>${d.attempt || 0}</td>
-      <td>${ratioCell}</td>
-      <td>${pctReal}</td>
-      <td>${d.physBookings ? `<b>${d.physBookings}</b> <span class="pill-physical">Physical</span>` : "0"}</td>
-      <td>${d.phBookings ? `<b>${d.phBookings}</b> <span class="pill-phone">Phone Booking</span>` : "0"}</td>
-    </tr>`;
-  }).join("");
+  }
+  // Per-dispatcher unique-contact counts from excelData.calls
+  const uniqueByDisp = new Map();
+  if (excelData?.calls) {
+    for (const c of excelData.calls) {
+      const k = dispatcherKey(c.dispatcher);
+      if (!k) continue;
+      if (!uniqueByDisp.has(k)) uniqueByDisp.set(k, new Set());
+      const cid = c.raw?.contact_id;
+      if (cid) uniqueByDisp.get(k).add(cid);
+    }
+  }
+
+  let totals = { total: 0, real: 0, lt: 0, attempt: 0, phys: 0, phone: 0 };
+  const rows = byD
+    .filter((d) => String(d.name || "").toLowerCase() !== "inbound")
+    .map((d) => {
+      const totalCalls = (d.real || 0) + (d.voicemail || 0) + (d.attempt || 0) + (d.liveTransfers || 0);
+      const pctReal = totalCalls > 0 ? `${(((d.real || 0) + (d.liveTransfers || 0)) / totalCalls * 100).toFixed(1)}%` : "—";
+      const k = dispatcherKey(d.name);
+      const uniqueContacts = (uniqueByDisp.get(k) || new Set()).size;
+      // Avg / Contact = total calls placed by this dispatcher / unique contacts they touched.
+      const avgPerContact = uniqueContacts > 0 ? (totalCalls / uniqueContacts) : null;
+      let ratioCell = "—";
+      if (avgPerContact != null && uniqueContacts >= 3) {
+        const cls = avgPerContact >= 2 && avgPerContact <= 4 ? "badge-good" : avgPerContact < 2 ? "badge-bad" : "badge-warn";
+        ratioCell = `<span class="badge ${cls}">${avgPerContact.toFixed(2)}</span>`;
+      } else if (avgPerContact != null) {
+        ratioCell = avgPerContact.toFixed(2);
+      }
+      const phys = physByDisp.get(k) ?? d.physBookings ?? 0;
+      const phone = phoneByDisp.get(k) ?? d.phBookings ?? 0;
+      totals.total += totalCalls;
+      totals.real += d.real || 0;
+      totals.lt += d.liveTransfers || 0;
+      totals.attempt += (d.attempt || 0) + (d.voicemail || 0);
+      totals.phys += phys;
+      totals.phone += phone;
+      // Trim role to friendly form (dispatcher / manager / training / office)
+      return `<tr>
+        <td><b>${esc(d.name)}</b><br><span class="small">${esc(d.role || "")}</span></td>
+        <td>${totalCalls}</td>
+        <td>${d.real || 0}</td>
+        <td>${d.liveTransfers || 0}</td>
+        <td>${(d.attempt || 0) + (d.voicemail || 0)}</td>
+        <td>${uniqueContacts}</td>
+        <td>${ratioCell}</td>
+        <td>${pctReal}</td>
+        <td>${phys ? `<b>${phys}</b> <span class="pill-physical">Physical</span>` : "0"}</td>
+        <td>${phone ? `<b>${phone}</b> <span class="pill-phone">Phone Booking</span>` : "0"}</td>
+      </tr>`;
+    }).join("");
 
   return `<div class="section">
     <h2>Section 4 — Dispatcher Performance</h2>
     <div class="subhead">Per-dispatcher rollup with bookings broken out.</div>
     <table>
-      <thead><tr><th>Dispatcher</th><th>Total</th><th>Real Call</th><th>Live Transfer</th><th>Voicemail</th><th>No Answer/Failed</th><th>Avg / Contact</th><th>% Real</th><th>Physical Booked</th><th>Phone Booking</th></tr></thead>
+      <thead><tr><th>Dispatcher</th><th>Total</th><th>Real Call</th><th>Live Transfer</th><th>No Answer/Failed</th><th>Unique Contacts</th><th>Avg / Contact</th><th>% Real</th><th>Physical Booked</th><th>Phone Booking</th></tr></thead>
       <tbody>${rows}
         <tr style="background:#f3f4f6;font-weight:bold">
-          <td>TOTAL</td><td>${totals.total}</td><td>${totals.real}</td><td>${totals.lt}</td><td>${totals.vm}</td><td>${totals.attempt}</td><td></td><td></td><td><b>${totals.phys}</b></td><td><b>${totals.phone}</b></td>
+          <td>TOTAL</td><td>${totals.total}</td><td>${totals.real}</td><td>${totals.lt}</td><td>${totals.attempt}</td><td></td><td></td><td></td><td><b>${totals.phys}</b></td><td><b>${totals.phone}</b></td>
         </tr>
       </tbody>
     </table>
-    <p class="small"><b>Avg / Contact</b> color: green = healthy 2-4 calls per lead, red &lt; 2 (under-pushing), yellow &gt; 4 (over-calling). <b>% Real</b> = (Real Call + Live Transfer) / Total.</p>
-    <div class="summary-footer"><b>Summary:</b> ${byD.length} dispatchers worked ${totals.total} calls (${totals.real} real · ${totals.lt} live transfers) and originated ${totals.phys} <span class="pill-physical">Physical</span> + ${totals.phone} <span class="pill-phone">Phone Booking</span>.</div>
+    <p class="small"><b>Avg / Contact</b> = total calls placed by this dispatcher / unique contacts they touched. Color: green = healthy 2-4 calls per lead, red &lt; 2 (under-pushing), yellow &gt; 4 (over-calling). <b>% Real</b> = (Real Call + Live Transfer) / Total.</p>
+    <div class="summary-footer"><b>Summary:</b> ${rows.split("<tr>").length - 1} dispatchers worked ${totals.total} calls (${totals.real} real · ${totals.lt} live transfers) and originated ${totals.phys} <span class="pill-physical">Physical</span> + ${totals.phone} <span class="pill-phone">Phone Booking</span>.</div>
   </div>`;
 }
 
 // =====================================================================
 // renderHourXDispatcherSection — Section 5.
+// v5: first-name only columns (Frank, Mark, Angel, Ellie, Chris); drop
+// "(unknown)" and "INBOUND" columns (not real dispatchers); add a "Bookings"
+// column on the right and a "BOOKINGS" row at the bottom, computed from
+// excelData lead rows.
 // =====================================================================
+function _firstNameOf(input) {
+  if (!input) return "—";
+  const raw = String(input).trim();
+  // Try EMPLOYEES match (case-insensitive) — accept full name or first
+  for (const e of EMPLOYEES) {
+    const f = String(e.name || "").toLowerCase();
+    const full = String(e.fullName || "").toLowerCase();
+    if (raw.toLowerCase() === f || raw.toLowerCase() === full) return e.name;
+    if (raw.toLowerCase().startsWith(f + " ") || raw.toLowerCase().startsWith(full + " ")) return e.name;
+    if (full && raw.toLowerCase().includes(full)) return e.name;
+  }
+  // Fallback — just first token
+  return raw.split(/\s+/)[0];
+}
+
 export function renderHourXDispatcherSection(excelData) {
   if (!excelData) return "";
-  const { calls = [] } = excelData;
-  const dispSet = new Set(calls.map(c => c.dispatcher || "—"));
-  let dispatchers = [...dispSet].filter(d => d !== "INBOUND").sort();
-  if (dispSet.has("INBOUND")) dispatchers.push("INBOUND");
+  const { calls = [], newLeadRows = [], newOppRows = [], reactivatedRows = [] } = excelData;
+
+  // Group calls by hour × first-name-dispatcher, skipping INBOUND/unknown buckets.
   const matrix = new Map();
   for (const c of calls) {
     if (c.hour == null) continue;
+    const rawDisp = c.dispatcher;
+    if (!rawDisp || String(rawDisp).toLowerCase() === "inbound") continue;
+    const d = _firstNameOf(rawDisp);
+    if (!d || d === "—") continue;
     if (!matrix.has(c.hour)) matrix.set(c.hour, new Map());
     const inner = matrix.get(c.hour);
-    const d = c.dispatcher || "—";
     inner.set(d, (inner.get(d) || 0) + 1);
   }
-  const hours = [...matrix.keys()].sort((a, b) => a - b);
+  const dispSet = new Set();
+  for (const inner of matrix.values()) for (const d of inner.keys()) dispSet.add(d);
+  // Order dispatchers per EMPLOYEES (canonical), then any extras alphabetically.
+  const canonical = EMPLOYEES.map((e) => e.name);
+  const dispatchers = [
+    ...canonical.filter((n) => dispSet.has(n)),
+    ...[...dispSet].filter((n) => !canonical.includes(n)).sort(),
+  ];
+
   function hourLbl(h) {
     if (h === 0) return "12 AM";
     if (h < 12) return h + " AM";
     if (h === 12) return "12 PM";
     return (h - 12) + " PM";
   }
+
+  // Bookings per (hour, dispatcher) cell from excelData rows
+  function _hourFromTimestamp(s) {
+    if (!s) return null;
+    const m = String(s).match(/(\d{2}):/);
+    return m ? Number(m[1]) : null;
+  }
+  const bookByHour = new Map();
+  const bookByDisp = new Map();
+  const cellBook = new Map(); // key `${hour}|${disp}` → {phys, phone}
+  let totalPhys = 0, totalPhone = 0, totalBook = 0;
+  for (const r of [...newLeadRows, ...newOppRows, ...reactivatedRows]) {
+    if (!r.bookedToday) continue;
+    const stage = r.finalStage || r.stage || "";
+    if (stage !== "Appt. Booked" && stage !== "Over Phone Booked") continue;
+    totalBook++;
+    if (stage === "Appt. Booked") totalPhys++;
+    else totalPhone++;
+    const h = _hourFromTimestamp(r.cameIn || r.activityTime);
+    const disp = _firstNameOf(r.firstCaller || r.longestCallDispatcher || r.dispatcher || "");
+    if (h != null) bookByHour.set(h, (bookByHour.get(h) || 0) + 1);
+    if (disp && disp !== "—") bookByDisp.set(disp, (bookByDisp.get(disp) || 0) + 1);
+    if (h != null && disp && disp !== "—") {
+      const k = `${h}|${disp}`;
+      const cur = cellBook.get(k) || { phys: 0, phone: 0 };
+      if (stage === "Appt. Booked") cur.phys++;
+      else cur.phone++;
+      cellBook.set(k, cur);
+    }
+  }
+
+  const hours = [...matrix.keys()].sort((a, b) => a - b);
   const dispTotals = new Map(dispatchers.map(d => [d, 0]));
   const rows = hours.map(h => {
     const inner = matrix.get(h);
@@ -640,13 +819,19 @@ export function renderHourXDispatcherSection(excelData) {
       const n = inner.get(d) || 0;
       rowTotal += n;
       dispTotals.set(d, dispTotals.get(d) + n);
-      return `<td class="${n === 0 ? 'zero' : ''}">${n || ""}</td>`;
+      const cellKey = `${h}|${d}`;
+      const cb = cellBook.get(cellKey);
+      const pills = cb ? `${cb.phys ? ` <span class="pill-physical">+${cb.phys}</span>` : ""}${cb.phone ? ` <span class="pill-phone">+${cb.phone}</span>` : ""}` : "";
+      return `<td class="${n === 0 && !cb ? 'zero' : ''}">${n || ""}${pills}</td>`;
     }).join("");
-    return `<tr><td>${hourLbl(h)}</td>${cells}<td><b>${rowTotal}</b></td></tr>`;
+    const rowBook = bookByHour.get(h) || 0;
+    return `<tr><td>${hourLbl(h)}</td>${cells}<td><b>${rowTotal}</b></td><td>${rowBook ? `<b>${rowBook}</b>` : "—"}</td></tr>`;
   }).join("");
-  const totalRow = `<tr><td><b>TOTAL</b></td>${dispatchers.map(d => `<td><b>${dispTotals.get(d) || 0}</b></td>`).join("")}<td><b>${[...dispTotals.values()].reduce((a, b) => a + b, 0)}</b></td></tr>`;
 
-  // Find peak hour and peak dispatcher
+  const bookingsRow = `<tr style="background:#fef9c3;font-weight:bold"><td>BOOKINGS</td>${dispatchers.map(d => `<td>${bookByDisp.get(d) || 0}</td>`).join("")}<td></td><td><b>${totalBook}</b></td></tr>`;
+  const totalRow = `<tr><td><b>TOTAL</b></td>${dispatchers.map(d => `<td><b>${dispTotals.get(d) || 0}</b></td>`).join("")}<td><b>${[...dispTotals.values()].reduce((a, b) => a + b, 0)}</b></td><td><b>${totalBook}</b></td></tr>`;
+
+  // Peak hour / top dispatcher
   let peakHour = null, peakHourCount = 0;
   for (const h of hours) {
     const inner = matrix.get(h);
@@ -660,13 +845,13 @@ export function renderHourXDispatcherSection(excelData) {
 
   return `<div class="section">
     <h2>Section 5 — Hour × Dispatcher</h2>
-    <div class="subhead">Calls per hour per dispatcher.</div>
+    <div class="subhead">Calls per hour per dispatcher · green pills = Physical Booking · yellow pills = Phone Booking in that cell.</div>
     <table class="hxd-matrix">
-      <thead><tr><th>Hour</th>${dispatchers.map(d => `<th>${esc(d)}</th>`).join("")}<th>Total</th></tr></thead>
+      <thead><tr><th>Hour</th>${dispatchers.map(d => `<th>${esc(d)}</th>`).join("")}<th>Hour Total</th><th>Bookings</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="2" class="small">No calls today.</td></tr>'}</tbody>
-      <tfoot>${totalRow}</tfoot>
+      <tfoot>${bookingsRow}${totalRow}</tfoot>
     </table>
-    <div class="summary-footer"><b>Summary:</b> ${peakHour != null ? `peak hour ${hourLbl(peakHour)} with ${peakHourCount} calls` : "no calls yet"} · top dispatcher ${topDisp ? esc(topDisp) + " (" + topDispCount + " calls)" : "—"}.</div>
+    <div class="summary-footer"><b>Summary:</b> ${peakHour != null ? `peak hour ${hourLbl(peakHour)} with ${peakHourCount} calls` : "no calls yet"} · top dispatcher ${topDisp ? esc(topDisp) + " (" + topDispCount + " calls)" : "—"} · <b>${totalBook} bookings</b> (${totalPhys} <span class="pill-physical">Physical</span> · ${totalPhone} <span class="pill-phone">Phone</span>).</div>
   </div>`;
 }
 
@@ -734,14 +919,14 @@ export function renderSection6(excelData) {
     if (stage === "Appt. Booked") byPipeline.get(k).bookedPhys++;
     if (stage === "Over Phone Booked") byPipeline.get(k).bookedPhone++;
   }
-  // Show only known/significant pipelines: drop "(no pipeline)" / "(unused)"
-  // unless it has serious volume (≥ 20 calls).
+  // Show only known/significant pipelines. Drop "(no pipeline)"/"(unused)"
+  // entirely unless it has serious volume (≥ 20 calls). Do NOT pad to 3 —
+  // if only Orlando + Tampa have data today, render TWO cards.
   const ordered = [...byPipeline.entries()]
-    .filter(([name, d]) => !/^\(no pipeline\)$|^\(unused\)$/.test(name) || d.total >= 20)
+    .filter(([name, d]) => !/^\(no pipeline\)$|^\(unused\)$|^\?$/.test(name) || d.total >= 20)
+    .filter(([name, d]) => d.total > 0 || d.bookedPhys > 0 || d.bookedPhone > 0)
     .sort((a, b) => b[1].total - a[1].total)
     .slice(0, 3);
-  // Pad to 3 cards with empty placeholders (not "(no pipeline)") for layout
-  while (ordered.length < 3) ordered.push(["—", { total: 0, real: 0, lt: 0, contacts: new Set(), bookedPhys: 0, bookedPhone: 0 }]);
   const pipelineCardsHtml = ordered.map(([name, d]) => {
     const color = pipelineColors[name] || { bg: "#f9fafb", border: "#6b7280", titleColor: "#374151" };
     const bookings = d.bookedPhys + d.bookedPhone;
@@ -952,7 +1137,7 @@ export function renderSection6(excelData) {
     <h2>Section 6 — Pipelines · Stages · Lead Age</h2>
     <div class="subhead">Where the calls land — by pipeline, by stage, and by how old the lead is. With dispatcher attribution.</div>
 
-    <div class="pipeline-cards">${pipelineCardsHtml}</div>
+    <div class="pipeline-cards" style="grid-template-columns: repeat(${Math.max(1, ordered.length)}, 1fr)">${pipelineCardsHtml}</div>
 
     <h3 style="margin-top:24px">Stage breakdown — calls per pipeline-stage today</h3>
     <table>
