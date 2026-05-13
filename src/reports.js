@@ -1237,7 +1237,7 @@ export async function runMorningReport({ dateOverride, to } = {}) {
     title: "Morning Snapshot",
     generatedAt,
     sections: [
-      renderHubstaffSection(hub),
+      renderHubstaffSection(hub, { generatedAt, omitDayTotal: true }),
       renderCallActivitySection(dispatch, excelData),
       renderLeadActivitySection(excelData, { generatedAt }),
       renderDispatcherPerformanceSection(dispatch, excelData),
@@ -1313,7 +1313,7 @@ export async function runEveningReport({ dateOverride, to } = {}) {
     title: "Full Day Summary",
     generatedAt,
     sections: [
-      renderHubstaffSection(hub),
+      renderHubstaffSection(hub, { generatedAt }),
       renderCallActivitySection(dispatch, excelData),
       renderLeadActivitySection(excelData, { generatedAt }),
       renderDispatcherPerformanceSection(dispatch, excelData),

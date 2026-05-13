@@ -342,7 +342,8 @@ export function renderHubstaffSection(hub, opts = {}) {
       <td>$${(r.cost || 0).toFixed(2)}</td>
     </tr>`;
   }).join("");
-  const dayTotalHtml = dayTotalEntries.length ? `<h3>Day Total — paid hours only (capped at scheduled)</h3>
+  // v11: skip Day Total on morning reports — irrelevant mid-shift.
+  const dayTotalHtml = (opts.omitDayTotal || !dayTotalEntries.length) ? "" : `<h3>Day Total — paid hours only (capped at scheduled)</h3>
     <table>
       <thead><tr><th>Employee</th><th>Scheduled</th><th>Worked (paid)</th><th>Pay Rate</th><th>Cost</th></tr></thead>
       <tbody>
@@ -388,7 +389,7 @@ export function renderHubstaffSection(hub, opts = {}) {
   const noData = computedCodes.filter((c) => c === "no_data").length;
   const offTrack = computedCodes.length - onTrack - noData;
   const summary = computedCodes.length
-    ? `<b>Summary:</b> ${onTrack} on track · ${offTrack} flagged · ${noData} no Hubstaff data · day cost $${totalCost.toFixed(2)}.`
+    ? `<b>Summary:</b> ${onTrack} on track · ${offTrack} flagged · ${noData} no Hubstaff data${opts.omitDayTotal ? "" : ` · day cost $${totalCost.toFixed(2)}`}.`
     : "<b>Summary:</b> no Hubstaff records for today yet.";
 
   return `<div class="section">
@@ -483,22 +484,24 @@ export function renderCallActivitySection(dispatch, excelData) {
     if (Number(c.durationSec || 0) >= 70) return true;
     return false;
   });
-  // Sort by start time ascending.
+  // Sort by c.dt (Luxon DateTime) ascending — these are real call objects
+  // from enrichCalls so c.dt is always set.
   realCalls.sort((a, b) => {
-    const ka = a.startAt || a.dateAdded || a.startedAt || "";
-    const kb = b.startAt || b.dateAdded || b.startedAt || "";
-    return String(ka).localeCompare(String(kb));
+    const ka = a.dt && a.dt.isValid ? a.dt.toMillis() : 0;
+    const kb = b.dt && b.dt.isValid ? b.dt.toMillis() : 0;
+    return ka - kb;
   });
   function _hhmmssFromCall(c) {
-    const s = c.startAt || c.dateAdded || c.startedAt || "";
-    if (!s) return "—";
-    const m = String(s).match(/T?(\d{2}):(\d{2}):(\d{2})/);
+    if (c.dt && c.dt.isValid && c.dt.toFormat) return c.dt.toFormat("HH:mm:ss");
+    const s = c.raw?.date_added || "";
+    const m = String(s).match(/T(\d{2}):(\d{2}):(\d{2})/);
     return m ? `${m[1]}:${m[2]}:${m[3]}` : "—";
   }
   const realCallRows = realCalls.map((c) => {
-    const cid = c.raw?.contact_id || c.contactId;
+    const cid = c.raw?.contact_id;
     const match = cid ? rowByContact.get(cid) : null;
-    const customer = match?.row?.leadName || match?.row?.name || c.raw?.contact_name || c.raw?.fullName || "—";
+    // v11: enrichCalls() always sets c.contactName when contactMap has the contact.
+    const customer = c.contactName || match?.row?.leadName || match?.row?.name || c.phone || "—";
     const catPill = !match
       ? "—"
       : match.cat === "NEW" ? '<span class="cat-new">NEW</span>'
@@ -616,15 +619,12 @@ export function renderLeadActivitySection(excelData, opts = {}) {
 
   // Enrich each lead row from the calls array — fields that buildNewLeads
   // doesn't always populate (firstCallTime, totalDuration, attempts, hadRealCall).
-  // v9: try more contact_id field variants; mark "in progress" if the lead
-  // came in within the last 30 min of the report time (no calls yet expected).
+  // v11: use the ACTUAL fields enrichCalls() sets — c.raw.contact_id for
+  // matching, c.dt (Luxon DateTime) for the timestamp.
   function _enrichFromCalls(row, generatedAt) {
     const cid = row._id || row.contactId || row.contact_id || row.id;
     if (!cid) return { firstCallTime: "", hadRealCall: false, totalDurationFmt: "", attempts: 0, inProgress: false };
-    const mine = calls.filter((c) => {
-      const k = c.raw?.contact_id || c.contactId || c.contact_id || c.raw?.contactId;
-      return k === cid;
-    });
+    const mine = calls.filter((c) => (c.raw && c.raw.contact_id) === cid);
     // Decide "in progress": came in within 30 min of generatedAt AND no calls yet.
     let inProgress = false;
     if (mine.length === 0 && generatedAt && (row.cameIn || row.activityTime)) {
@@ -643,15 +643,21 @@ export function renderLeadActivitySection(excelData, opts = {}) {
       } catch {}
     }
     if (mine.length === 0) return { firstCallTime: "", hadRealCall: false, totalDurationFmt: "", attempts: 0, inProgress };
+    // Sort by c.dt (Luxon DateTime) if valid, else by raw.date_added.
     mine.sort((a, b) => {
-      const ka = a.startAt || a.dateAdded || a.startedAt || a.raw?.dateAdded || "";
-      const kb = b.startAt || b.dateAdded || b.startedAt || b.raw?.dateAdded || "";
-      return String(ka).localeCompare(String(kb));
+      const ka = a.dt && a.dt.isValid ? a.dt.toMillis() : new Date(a.raw?.date_added || 0).getTime();
+      const kb = b.dt && b.dt.isValid ? b.dt.toMillis() : new Date(b.raw?.date_added || 0).getTime();
+      return ka - kb;
     });
     const first = mine[0];
-    const fs = first.startAt || first.dateAdded || first.startedAt || first.raw?.dateAdded || "";
-    const m = String(fs).match(/T?(\d{2}):(\d{2}):(\d{2})/);
-    const firstCallTime = m ? `${m[1]}:${m[2]}:${m[3]}` : "";
+    let firstCallTime = "";
+    if (first.dt && first.dt.isValid && first.dt.toFormat) {
+      firstCallTime = first.dt.toFormat("HH:mm:ss");
+    } else {
+      const fs = first.raw?.date_added || "";
+      const m = String(fs).match(/T(\d{2}):(\d{2}):(\d{2})/);
+      if (m) firstCallTime = `${m[1]}:${m[2]}:${m[3]}`;
+    }
     const totalSec = mine.reduce((s, c) => s + (Number(c.durationSec) || 0), 0);
     const hadRealCall = mine.some((c) => c.bucket === "real_call" || c.bucket === "live_transfer" || (Number(c.durationSec || 0) >= 70));
     function fmtSec(sec) {
@@ -1262,7 +1268,6 @@ export function renderSection6(excelData) {
       : "—";
     const name = row.leadName || row.name || "(unknown)";
     const source = row.leadSource || row.source || "";
-    const disp = row.firstCaller || row.dispatcher || row.longestCallDispatcher || "";
     const dur = row.longestCallDuration || row.durationFmt || "";
     const resp = row.responseTime || "";
     const ageSuffix = cat === "RESUB"
@@ -1270,11 +1275,21 @@ export function renderSection6(excelData) {
       : cat === "REACT"
       ? ` · ${row.ageDays ? row.ageDays + "d old" : ""}`
       : "";
+    // v11: pull booking method + booker dispatcher from the v10 bookingSources
+    // map so the funnel narrative agrees with Section 3's Booking Method column.
+    const cid = row._id || row.contactId || row.contact_id || row.id;
+    const bSrc = (excelData.bookingSources && excelData.bookingSources.get) ? excelData.bookingSources.get(cid) : null;
+    let methodPill = "";
+    if (bSrc?.method === "Live Transfer") methodPill = ' <span class="badge badge-warn">via Live Transfer</span>';
+    else if (bSrc?.method === "Call") methodPill = ' <span class="badge badge-good">via Call</span>';
+    else if (bSrc?.method === "SMS") methodPill = ' <span class="badge badge-warn" style="background:#fde68a;color:#78350f">via SMS</span>';
+    const disp = bSrc?.dispatcher || row.firstCaller || row.dispatcher || row.longestCallDispatcher || "";
     // Hide response time entirely if it's negative (resub bug — measured from
     // original lead date instead of resubmission timestamp).
     const respOk = resp && cat !== "REACT" && !/^-/.test(String(resp)) && resp !== "Never";
-    return `<div style="font-size:13px;padding:4px 0;border-top:1px dashed #e5e7eb">→ <b>${esc(name)}</b> <span class="small">(${esc(source)} · ${cat}${ageSuffix})</span> &nbsp;${bookingTypePill}<br>
-      <span class="small" style="margin-left:18px">${stage ? esc(stage) : "—"} &nbsp;·&nbsp; ${esc(disp)} ${dur ? "· " + esc(dur) + " real call" : ""} ${respOk ? "· response " + esc(resp) : ""}</span>
+    const showDur = bSrc?.method === "SMS" ? "" : (dur ? "· " + esc(dur) + " real call" : "");
+    return `<div style="font-size:13px;padding:4px 0;border-top:1px dashed #e5e7eb">→ <b>${esc(name)}</b> <span class="small">(${esc(source)} · ${cat}${ageSuffix})</span> &nbsp;${bookingTypePill}${methodPill}<br>
+      <span class="small" style="margin-left:18px">${stage ? esc(stage) : "—"} &nbsp;·&nbsp; ${esc(disp)} ${showDur} ${respOk ? "· response " + esc(resp) : ""}</span>
     </div>`;
   }
   const newLeadFunnel = newBookings.map((r) => bookingLine(r, "NEW")).join("");
