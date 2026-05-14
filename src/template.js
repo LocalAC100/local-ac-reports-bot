@@ -1332,16 +1332,16 @@ export function renderSection6(excelData) {
       : cat === "REACT"
       ? ` · ${row.ageDays ? row.ageDays + "d old" : ""}`
       : "";
-    // v14: compute booking method DIRECTLY from this contact's calls instead
-    // of trusting bookingSources.get(cid) — bookingSources lookup is failing
-    // for some rows (key mismatch between newOppRows._id and what enrich
-    // stores). This guarantees the pill renders for every booked row.
+    // v15: derive method from THE ROW ITSELF — every signal we need is already
+    // there (longestCallDuration, hasLiveTransfer, firstCaller). Avoid contact-id
+    // joins because newLeadRows/newOppRows _id ≠ calls.contact_id in some cases.
     const cid = row._id || row.contactId || row.contact_id || row.id;
-    const myCalls = (excelData.calls || []).filter((c) => (c.raw && c.raw.contact_id) === cid);
+    const hasLT = row.hasLiveTransfer || row.liveTransfers > 0 || row.activity === "Live Transfer";
+    const hasRealCall = !!(row.longestCallDuration || row.durationFmt);
     let methodInline = "Unknown";
-    if (myCalls.some((c) => c.bucket === "live_transfer")) methodInline = "Live Transfer";
-    else if (myCalls.some((c) => c.bucket === "real_call" || (Number(c.durationSec || 0) >= 70))) methodInline = "Call";
-    else if (row.bookedToday) methodInline = "SMS"; // booked but no call → SMS
+    if (hasLT) methodInline = "Live Transfer";
+    else if (hasRealCall) methodInline = "Call";
+    else if (row.bookedToday) methodInline = "SMS"; // booked, no call → SMS
     let methodPill = "";
     if (methodInline === "Live Transfer") methodPill = ' <span class="badge badge-warn">via Live Transfer</span>';
     else if (methodInline === "Call") methodPill = ' <span class="badge badge-good">via Call</span>';
