@@ -610,7 +610,7 @@ async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
           slot[parsed.bucket] += 1;
           dispatcher.byStage.set(sn, slot);
         }
-        if (conv.contactId) dispatcher.uniqueContact.add(conv.contactId);
+        if (conv.contactId) dispatcher.uniqueContact.add(conv.contactId);
         if (leadAge) dispatcher.leadAge[leadAge] += 1;
       }
     }
@@ -1332,7 +1332,7 @@ function sampleDispatch() {
         name: "Frank", role: "dispatcher_manager",
         real: 4, voicemail: 6, attempt: 39,
         vonage: { real: 0, voicemail: 0, attempt: 0 },
-        sms: 3, phyBookings: 2, phBookings: 0, liveTransfers: 0,
+        sms: 3, phyBookings: 2, phBookings: 0, liveTransfers: 0,
         bookingRatio: 50, avgCallSec: 142,
         firstCallAt: "8:14 AM", lastCallAt: "12:55 PM",
         hourly: sampleHourly(1),

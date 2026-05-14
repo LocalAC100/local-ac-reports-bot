@@ -1140,7 +1140,7 @@ export function renderHourXDispatcherSection(excelData) {
     return `${p ? `<span class="pill-physical">${p}</span>` : ""}${q ? ` <span class="pill-phone">${q}</span>` : ""}`;
   }
   // BOOKINGS row gets a green tint so it stands out from regular total row.
-  const bookingsRow = `<tr style="background:#d1fae5;font-weight:bold"><td>BOOKINGS</td>${dispatchers.map(d => `<td>${_dispBookingCell(d)}</td>`).join("")}<td></td><td>${totalPhys ? `<span class="pill-physical"><b>${totalPhys}</b></span>` : ""} ${totalPhone ? `<span class="pill-phone"><b>${totalPhone}</b></span>` : ""}</td></tr>`;
+  const bookingsRow = `<tr style="background:#d1fae5;font-weight:bold"><td>BOOKINGS</td>${dispatchers.map(d => `<td>${_dispBookingCell(d)}</td>`).join("")}<td></td><td>${totalPhys ? `<span class="pill-physical"><b>${totalPhys}</b></span>` : ""} ${totalPhone ? `<span clas="pill-phone"><b>${totalPhone}</b></span>` : ""}</td></tr>`;
   const totalRow = `<tr><td><b>TOTAL</b></td>${dispatchers.map(d => `<td><b>${dispTotals.get(d) || 0}</b></td>`).join("")}<td><b>${[...dispTotals.values()].reduce((a, b) => a + b, 0)}</b></td><td><b>${totalBook}</b></td></tr>`;
 
   // Peak hour / top dispatcher
@@ -1381,7 +1381,7 @@ export function renderSection6(excelData) {
       <div class="funnel-badge ${reactBookings.length > 0 ? "active" : "inactive"}">From <b>Reactivation</b><br><span style="font-size:18px">${reactBookings.length}</span></div>
       <div style="flex:1">
         ${reactBookings.length === 0
-          ? `<div class="small" style="margin-top:4px">No old leads booked today. ${reactivatedRows.length} reactivation${reactivatedRows.length === 1 ? "" : "s"} had real calls but didn't convert.</div>`
+          ? `<div class="small" style="margin-top:4px">No old leads booked today. ${reactivatedRows.length} reactivation${reactivatedRows.lengt === 1 ? "" : "s"} had real calls but didn't convert.</div>`
           : reactFunnel}
       </div>
     </div>
