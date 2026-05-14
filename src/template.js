@@ -1332,20 +1332,24 @@ export function renderSection6(excelData) {
       : cat === "REACT"
       ? ` · ${row.ageDays ? row.ageDays + "d old" : ""}`
       : "";
-    // v15: derive method from THE ROW ITSELF — every signal we need is already
-    // there (longestCallDuration, hasLiveTransfer, firstCaller). Avoid contact-id
-    // joins because newLeadRows/newOppRows _id ≠ calls.contact_id in some cases.
+    // v17: borrow Section 3's exact logic — Section 3 already renders correct
+    // CALL/SMS/LT badges in its Booking Method column for every booked row.
+    // Re-implement the same pattern verbatim for Section 6 funnel.
     const cid = row._id || row.contactId || row.contact_id || row.id;
-    const hasLT = row.hasLiveTransfer || row.liveTransfers > 0 || row.activity === "Live Transfer";
-    const hasRealCall = !!(row.longestCallDuration || row.durationFmt);
     let methodInline = "Unknown";
-    if (hasLT) methodInline = "Live Transfer";
-    else if (hasRealCall) methodInline = "Call";
-    else if (row.bookedToday) methodInline = "SMS"; // booked, no call → SMS
+    if (row.bookedToday) {
+      const _myCalls = (excelData.calls || []).filter((c) => (c.raw && c.raw.contact_id) === cid);
+      if (_myCalls.some((c) => c.bucket === "live_transfer")) methodInline = "Live Transfer";
+      else if (_myCalls.some((c) => c.bucket === "real_call" || (Number(c.durationSec || 0) >= 70))) methodInline = "Call";
+      else methodInline = "SMS"; // booked but no qualifying call → SMS
+    }
     let methodPill = "";
     if (methodInline === "Live Transfer") methodPill = ' <span class="badge badge-warn">via Live Transfer</span>';
     else if (methodInline === "Call") methodPill = ' <span class="badge badge-good">via Call</span>';
     else if (methodInline === "SMS") methodPill = ' <span class="badge badge-bad" style="background:#fee2e2;color:#991b1b">via SMS</span>';
+    // v17 debug — embed an HTML comment showing what the matcher saw
+    const _dbgN = (excelData.calls || []).filter((c) => (c.raw && c.raw.contact_id) === cid).length;
+    methodPill += `<!-- dbg cid=${cid||"?"} bt=${!!row.bookedToday} myN=${_dbgN} m=${methodInline} -->`;
     // Dispatcher: prefer bookingSources (has SMS sender from Conversations API), else row's caller fields.
     const bSrc = (excelData.bookingSources && excelData.bookingSources.get) ? excelData.bookingSources.get(cid) : null;
     const disp = bSrc?.dispatcher || row.firstCaller || row.dispatcher || row.longestCallDispatcher || "";
