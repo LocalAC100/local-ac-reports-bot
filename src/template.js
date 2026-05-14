@@ -403,7 +403,7 @@ export function renderHubstaffSection(hub, opts = {}) {
         <tr style="background:#f3f4f6;font-weight:bold"><td>TOTAL</td><td>${fmtMinutes(totalScheduled)}</td><td>${fmtMinutes(totalPaid)}</td><td></td><td>$${totalCost.toFixed(2)}</td></tr>
       </tbody>
     </table>
-    <p class="small"><b>Pay formula:</b> <code>min(worked within shift, scheduled paid hours) × rate</code>. Time clocked outside the shift (before start, after end) doesn't count. Scheduled paid hours = shift length minus break budget.</p>` : "";
+    <p class="small"><b>Pay formula:</b> <code>min(worked within shift, scheduled paid hours) × rate</code>. Time clocked outside the shift (before start, after end) doesn't count. Scheduled paid hours = shift length minus break budget.</p>`;
 
   // Footer summary — count on-track vs. exceptions (re-derived after compute)
   const computedCodes = perEmployee.map((emp) => {
