@@ -100,6 +100,22 @@ function loadPersisted() {
 
 // ---------- Helpers ----------
 
+// "Manually added" contact heuristic. In Local AC's GHL setup, leads that
+// arrive from forms/ads/integrations get a non-empty `source` field
+// ("fb", "ig", "an", "google", website-form names, etc). Contacts created
+// by hand in the GHL UI have source = null / "" — those are not real
+// inbound leads and shouldn't trigger response-time alerts.
+//
+// We also accept explicit "manual" / "manually added" strings just in case
+// the GHL setup ever changes to populate source for manual entries too.
+function isManualContact(contact) {
+  if (!contact) return false; // unknown → err toward alerting
+  const src = String(contact.source ?? "").trim();
+  if (!src) return true; // null or empty
+  if (/^manual(ly)?(\s|_|$)/i.test(src)) return true;
+  return false;
+}
+
 function isBusinessHours(jsDate) {
   const dt = DateTime.fromJSDate(jsDate).setZone(TZ);
   return dt.hour >= BUSINESS_START_HOUR && dt.hour < BUSINESS_END_HOUR;
@@ -373,6 +389,24 @@ export async function onNewLead({ contactId, contactName, phone, leadAddedAt }) 
     return;
   }
 
+  // Skip manually-created contacts — those are added by office staff in the
+  // GHL UI (no source field), not real inbound leads. The webhook fires for
+  // them anyway, so we have to filter here. One extra GHL fetch per lead is
+  // cheap; if the fetch fails we proceed with alerting (safer).
+  try {
+    const contact = await ghl.getContact(contactId);
+    if (isManualContact(contact)) {
+      console.log(
+        `[live-alert] manual contact (no source), skipping ${contactId} name="${contact?.firstName || ""} ${contact?.lastName || ""}".trim() source=${JSON.stringify(contact?.source ?? null)}`
+      );
+      return;
+    }
+  } catch (e) {
+    console.warn(
+      `[live-alert] getContact failed for ${contactId}, proceeding with alert: ${e?.message}`
+    );
+  }
+
   const warnMs =
     Number(config.leadResponseThresholdMinutes || 3) * 60 * 1000 ||
     WARNING_DELAY_MS;
@@ -511,11 +545,29 @@ export async function runMorningCatchUp(opts = {}) {
   }
 
   const inWindow = [];
+  const skippedManual = [];
   for (const c of contacts || []) {
     if (!c?.id || !c.dateAdded) continue;
     const t = new Date(c.dateAdded).getTime();
     if (t < fromMs || t > toMs) continue;
+    if (isManualContact(c)) {
+      skippedManual.push({
+        contactId: c.id,
+        name:
+          `${c.firstName || ""} ${c.lastName || ""}`.trim() ||
+          c.contactName ||
+          "(unnamed)",
+        source: c.source ?? null,
+        addedAt: c.dateAdded,
+      });
+      continue;
+    }
     inWindow.push(c);
+  }
+  if (skippedManual.length) {
+    console.log(
+      `[morning-catchup] skipping ${skippedManual.length} manually-created contact(s): ${skippedManual.map((s) => s.name).join(", ")}`
+    );
   }
 
   const uncontacted = [];
@@ -558,6 +610,8 @@ export async function runMorningCatchUp(opts = {}) {
     windowFrom: overnightStart.toISO(),
     windowTo: todayShiftStart.toISO(),
     overnightContactCount: inWindow.length,
+    skippedManualCount: skippedManual.length,
+    skippedManual,
     uncontactedCount: uncontacted.length,
     uncontacted,
   };
