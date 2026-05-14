@@ -1,24 +1,33 @@
 // Entry point. Boots the HTTP server (for the GHL webhook + healthz) and
 // schedules the daily reports via node-cron in the configured timezone.
 //
-// SCHEDULE (per Alex's v2 spec, locked May 12 2026):
-//   12:00 PM ET  Morning Snapshot — today midnight to noon
-//    9:00 PM ET  Evening Snapshot — today (full-day-to-date) — added May 12 2026
-//    7:00 AM ET  Full Day Summary of YESTERDAY (so Tuesday 7 AM = Monday recap)
-//    2:00 AM ET  Firehose backfill for yesterday (feeds the 7 AM evening report)
-//   */15 6-22 ET Firehose backfill for today (every 15 min during business hours)
-//   */5  *  *   JWT refresh (Firebase id_token expires in ~1hr; refresh keeps backfill alive)
+// SCHEDULE (v20, locked May 14 2026):
+//   12:00 PM ET     Morning Snapshot — today midnight to noon
+//    9:00 PM ET     Evening Snapshot — today (full-day-to-date)
+//    7:00 AM ET     Full Day Summary of YESTERDAY (so Tuesday 7 AM = Monday recap)
+//    2:00 AM ET     Firehose backfill for yesterday (feeds the 7 AM evening report)
+//   */15 6-22 ET    Firehose backfill for today (every 15 min during business hours)
+//   */5  8-20 ET    Dispatcher-idle check — 15-min threshold, Hubstaff-break-aware (v20)
+//   */5  *   *      JWT refresh (Firebase id_token expires in ~1hr; refresh keeps backfill alive)
 //
-// Removed from this round (per spec): idle-dispatcher cron, hourly verification reports.
+// On boot: re-arm any pending lead alerts from /var/data/pending-alerts.json so
+// Render restarts don't lose mid-flight 10-min escalation timers.
 import cron from "node-cron";
 import { config } from "./config.js";
 import { buildServer } from "./server.js";
 import { runMorningReport, runEveningReport } from "./reports.js";
 import { backfillDate, refreshStoredJwt } from "./firehose-backfill.js";
+import { checkIdleDispatchers } from "./idle.js";
+import { initAlerts } from "./alerts.js";
 
 const app = buildServer();
 app.listen(config.port, () => {
   console.log(`[server] listening on :${config.port} tz=${config.timezone}`);
+  try {
+    initAlerts();
+  } catch (e) {
+    console.error("[server] initAlerts failed:", e?.message);
+  }
 });
 
 // Helper: yesterday's date in ET (YYYY-MM-DD).
@@ -143,8 +152,28 @@ cron.schedule(
   { timezone: "America/New_York" }
 );
 
-// NOTE — explicitly NOT scheduled in this round (per Alex's v2 spec):
-//   - Idle-dispatcher checks (`checkIdleDispatchers` from src/idle.js)
-//     Will be re-introduced in a later pass with proper non-activity rules.
+// =====================================================================
+// Dispatcher-idle cron (v20). Every 5 min between 8 AM and 8 PM ET (so the
+// last evaluation happens at 8:55 PM, comfortably inside the 9 PM shift end).
+// checkIdleDispatchers() already gates on each dispatcher's individual shift
+// window, on idleAlertsExcluded, and on Hubstaff break status.
+// =====================================================================
+cron.schedule(
+  "*/5 8-20 * * *",
+  async () => {
+    console.log("[idle-cron] running at", new Date().toISOString());
+    try {
+      const r = await checkIdleDispatchers();
+      console.log(
+        `[idle-cron] OK fired=${r.fired} skipped=${r.skipped.length} evaluated=${r.evaluated.length} suppressed_break=${r.suppressedByBreak} cooldown=${r.suppressedByCooldown}`
+      );
+    } catch (e) {
+      console.error("[idle-cron] ERR", (e && e.message) || e);
+    }
+  },
+  { timezone: "America/New_York" }
+);
+
+// NOTE — explicitly NOT scheduled in this round:
 //   - Hourly verification reports
-//     Were noisy; disabled May 7 2026, kept off in v2.
+//     Were noisy; disabled May 7 2026, kept off in v20.

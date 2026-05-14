@@ -1,21 +1,31 @@
-// Live lead alert (v2 — local-first suppression).
+// Live lead alert (v3 — per-level suppression + restart persistence).
 //
 // When a new lead arrives via the GHL webhook we schedule two timers:
-//   - 3 min  : 🔴       warning if the dispatchers haven't made a qualifying attempt
-//   - 10 min : 🔴🔴🔴   escalation if STILL no qualifying attempt
+//   - 3 min  : 🔴       warning if dispatchers haven't placed ANY outbound call yet
+//   - 10 min : 🔴🔴🔴   escalation if STILL no real conversation or live transfer
 //
-// Suppression rules (any of these silences the alert):
-//   - 1+ outbound real call (≥ 70s)        — they had a real conversation
-//   - 1+ live transfer                     — they got transferred to sales
-//   - 2+ outbound call attempts (any dur)  — they tried hard
+// Per-level suppression (different rules for each timer):
+//   3-min timer fires only if:
+//     - 0 outbound call attempts for this contact (ANY duration)
+//     - even 1 attempted dial silences it (the dispatcher tried)
+//   10-min timer fires only if:
+//     - 0 outbound real calls (≥ 70s) AND 0 live transfers
+//     - so if they dialed 5 times but never actually talked → the 10-min STILL fires
+//       (that's the escalation pattern worth catching)
 //
-// Texts / SMS do NOT suppress. A text means the call wasn't answered.
+// Both timers can fire for the same lead — they represent different failure modes.
 //
 // Suppression check uses the LOCAL SQLite `calls` table (populated in real time
 // by the GHL call webhook). Falls back to the GHL conversation API only if the
 // local table has zero rows for the contact (covers webhook misses).
 //
-// Business-hours gate: alerts only fire for leads that arrived 8 AM – 8 PM ET.
+// Business-hours gate: alerts only fire for leads that arrived 8 AM – 9 PM ET
+// (matches dispatcher shifts).
+//
+// Persistence (v3): pending timers are mirrored to /var/data/pending-alerts.json
+// so a Render restart can re-arm them via initAlerts() at boot. The in-memory
+// Map remains the source of truth during a process lifetime; the JSON file is
+// only consulted on cold start.
 
 import { config } from "./config.js";
 import * as ghl from "./ghl.js";
@@ -23,15 +33,72 @@ import { sendMail } from "./mailer.js";
 import { renderLiveAlert } from "./template.js";
 import { Alerts, Calls, classifyCall } from "./db.js";
 import { DateTime } from "luxon";
+import fs from "fs";
+import path from "path";
 
 const TZ = "America/New_York";
 const BUSINESS_START_HOUR = 8;
-const BUSINESS_END_HOUR = 20;
+const BUSINESS_END_HOUR = 21; // 9 PM ET — matches dispatcher shift end
 const WARNING_DELAY_MS = 3 * 60 * 1000;
 const ESCALATION_DELAY_MS = 10 * 60 * 1000;
+const ALERT_RECIPIENT = "service@local-ac.com";
 
-// contactId -> { t3, t10 } so we can clear timers if the lead resolves before the timer fires.
+// contactId -> { t3, t10, contactName, phone, leadAddedAt, level1FireAt, level2FireAt }
 const pendingAlerts = new Map();
+
+// ---------- Disk persistence (best-effort) ----------
+
+function pickPersistPath() {
+  const candidates = [
+    process.env.DATA_DIR
+      ? path.join(process.env.DATA_DIR, "pending-alerts.json")
+      : null,
+    process.env.RENDER ? "/var/data/pending-alerts.json" : null,
+    path.resolve("./data/pending-alerts.json"),
+  ].filter(Boolean);
+  for (const p of candidates) {
+    try {
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.accessSync(path.dirname(p), fs.constants.W_OK);
+      return p;
+    } catch {}
+  }
+  return null;
+}
+const PERSIST_PATH = pickPersistPath();
+
+function persistPending() {
+  if (!PERSIST_PATH) return;
+  try {
+    const snapshot = [];
+    for (const [contactId, v] of pendingAlerts.entries()) {
+      snapshot.push({
+        contactId,
+        contactName: v.contactName ?? null,
+        phone: v.phone ?? null,
+        leadAddedAt: v.leadAddedAt ?? null,
+        level1FireAt: v.level1FireAt ?? null,
+        level2FireAt: v.level2FireAt ?? null,
+      });
+    }
+    fs.writeFileSync(PERSIST_PATH, JSON.stringify(snapshot, null, 2), "utf8");
+  } catch (e) {
+    console.warn("[live-alert] persist failed:", e?.message);
+  }
+}
+
+function loadPersisted() {
+  if (!PERSIST_PATH) return [];
+  try {
+    if (!fs.existsSync(PERSIST_PATH)) return [];
+    return JSON.parse(fs.readFileSync(PERSIST_PATH, "utf8"));
+  } catch (e) {
+    console.warn("[live-alert] load failed:", e?.message);
+    return [];
+  }
+}
+
+// ---------- Helpers ----------
 
 function isBusinessHours(jsDate) {
   const dt = DateTime.fromJSDate(jsDate).setZone(TZ);
@@ -77,7 +144,6 @@ function checkSuppressionLocal(contactId, leadAddedAt) {
   }
 
   const totalAttempts = rows.length;
-  const suppress = realCalls >= 1 || liveTransfers >= 1 || totalAttempts >= 2;
 
   return {
     realCalls,
@@ -86,7 +152,8 @@ function checkSuppressionLocal(contactId, leadAddedAt) {
     longCalls: calls.filter((c) => (c.duration || 0) >= 70),
     shortCalls: calls.filter((c) => (c.duration || 0) < 70),
     calls,
-    attempted: suppress,
+    // Back-compat: any qualifying activity at all (callers used this before v3).
+    attempted: totalAttempts >= 1,
     _source: "local",
     _diag: { sourceTable: "calls", rowCount: rows.length },
   };
@@ -148,8 +215,6 @@ async function checkSuppressionGHL(contactId, leadAddedAt) {
   }).length;
   totalAttempts += vonageCallsAfterLead;
 
-  const suppress = realCalls >= 1 || liveTransfers >= 1 || totalAttempts >= 2;
-
   return {
     realCalls,
     liveTransfers,
@@ -157,7 +222,7 @@ async function checkSuppressionGHL(contactId, leadAddedAt) {
     longCalls: calls.filter((c) => (c.duration || 0) >= 70),
     shortCalls: calls.filter((c) => (c.duration || 0) < 70),
     calls,
-    attempted: suppress,
+    attempted: totalAttempts >= 1,
     vonageCalls: vonageCallsAfterLead,
     _source: "ghl",
     _diag: {
@@ -179,21 +244,44 @@ async function getCallSummary(contactId, leadAddedAt) {
 // Exported for the debug endpoint.
 export const _internal = { getCallSummary, checkSuppressionLocal, checkSuppressionGHL };
 
+// ---------- Per-level suppression deciders ----------
+
+// 3-min: any outbound attempt silences the alert.
+function isSuppressedForLevel1(summary) {
+  return (summary.totalAttempts || 0) >= 1;
+}
+
+// 10-min: only a real conversation (≥70s) or a live transfer silences the alert.
+// Just attempts ≥1 are NOT enough — that's the escalation we want to catch.
+function isSuppressedForLevel2(summary) {
+  return (summary.realCalls || 0) >= 1 || (summary.liveTransfers || 0) >= 1;
+}
+
 // ---------- Alert firing ----------
 
 async function fireAlert({ contactId, contactName, phone, leadAddedAt, level }) {
   try {
     const summary = await getCallSummary(contactId, leadAddedAt);
 
-    if (summary.attempted) {
-      const timers = pendingAlerts.get(contactId);
-      if (timers) {
-        clearTimeout(timers.t3);
-        clearTimeout(timers.t10);
-        pendingAlerts.delete(contactId);
+    const suppressed =
+      level >= 2 ? isSuppressedForLevel2(summary) : isSuppressedForLevel1(summary);
+
+    if (suppressed) {
+      // Only clear timers when the LEVEL-2 escalation is suppressed — the
+      // 3-min and 10-min checks are independent escalations, so suppressing
+      // the 3-min should NOT short-circuit the 10-min still firing if no real
+      // conversation happens.
+      if (level >= 2) {
+        const timers = pendingAlerts.get(contactId);
+        if (timers) {
+          clearTimeout(timers.t3);
+          clearTimeout(timers.t10);
+          pendingAlerts.delete(contactId);
+          persistPending();
+        }
       }
       console.log(
-        `[live-alert] suppressed (${summary._source}) contact=${contactId} level=${level} real=${summary.realCalls} lt=${summary.liveTransfers} att=${summary.totalAttempts}`
+        `[live-alert] suppressed level=${level} (${summary._source}) contact=${contactId} real=${summary.realCalls} lt=${summary.liveTransfers} att=${summary.totalAttempts}`
       );
       return;
     }
@@ -227,6 +315,7 @@ async function fireAlert({ contactId, contactName, phone, leadAddedAt, level }) 
     const dots = level >= 2 ? "🔴🔴🔴" : "🔴";
     const escal = level >= 2 ? "ESCALATION — " : "";
     await sendMail({
+      to: ALERT_RECIPIENT,
       subject: `${dots} ${escal}New lead not contacted in ${elapsed} min — ${
         contactName ?? "lead"
       }`,
@@ -250,7 +339,7 @@ export async function onNewLead({ contactId, contactName, phone, leadAddedAt }) 
   const leadDate = new Date(leadAddedAt || Date.now());
   if (!isBusinessHours(leadDate)) {
     console.log(
-      `[live-alert] outside business hours (8 AM–8 PM ET), skipping ${contactId} @ ${leadDate.toISOString()}`
+      `[live-alert] outside business hours (8 AM–9 PM ET), skipping ${contactId} @ ${leadDate.toISOString()}`
     );
     return;
   }
@@ -258,16 +347,88 @@ export async function onNewLead({ contactId, contactName, phone, leadAddedAt }) 
   const warnMs =
     Number(config.leadResponseThresholdMinutes || 3) * 60 * 1000 ||
     WARNING_DELAY_MS;
+  const escalMs = ESCALATION_DELAY_MS;
 
-  const t3 = setTimeout(
-    () => fireAlert({ contactId, contactName, phone, leadAddedAt, level: 1 }),
-    warnMs
+  const now = Date.now();
+  schedulePair({
+    contactId,
+    contactName,
+    phone,
+    leadAddedAt,
+    level1FireAt: now + warnMs,
+    level2FireAt: now + escalMs,
+  });
+}
+
+function schedulePair({ contactId, contactName, phone, leadAddedAt, level1FireAt, level2FireAt }) {
+  const now = Date.now();
+  const t3Delay = Math.max(0, level1FireAt - now);
+  const t10Delay = Math.max(0, level2FireAt - now);
+
+  const t3 =
+    level1FireAt > now
+      ? setTimeout(
+          () => fireAlert({ contactId, contactName, phone, leadAddedAt, level: 1 }),
+          t3Delay
+        )
+      : null;
+  const t10 =
+    level2FireAt > now
+      ? setTimeout(async () => {
+          await fireAlert({ contactId, contactName, phone, leadAddedAt, level: 2 });
+          pendingAlerts.delete(contactId);
+          persistPending();
+        }, t10Delay)
+      : null;
+
+  pendingAlerts.set(contactId, {
+    t3,
+    t10,
+    contactName,
+    phone,
+    leadAddedAt,
+    level1FireAt,
+    level2FireAt,
+  });
+  persistPending();
+  console.log(
+    `[live-alert] scheduled contact=${contactId} (level1 in ${Math.round(
+      t3Delay / 1000
+    )}s, level2 in ${Math.round(t10Delay / 1000)}s)`
   );
-  const t10 = setTimeout(async () => {
-    await fireAlert({ contactId, contactName, phone, leadAddedAt, level: 2 });
-    pendingAlerts.delete(contactId);
-  }, ESCALATION_DELAY_MS);
+}
 
-  pendingAlerts.set(contactId, { t3, t10 });
-  console.log(`[live-alert] scheduled contact=${contactId} (3min + 10min)`);
+// Re-arm any persisted pending alerts whose timers haven't elapsed yet.
+// Called once at boot from index.js. Safe to call multiple times — it skips
+// contacts already in the in-memory Map.
+export function initAlerts() {
+  const persisted = loadPersisted();
+  const now = Date.now();
+  let rearmed = 0;
+  let dropped = 0;
+  for (const a of persisted) {
+    if (!a?.contactId) continue;
+    if (pendingAlerts.has(a.contactId)) continue;
+    const l1 = Number(a.level1FireAt) || 0;
+    const l2 = Number(a.level2FireAt) || 0;
+    if (l1 <= now && l2 <= now) {
+      dropped++;
+      continue;
+    }
+    schedulePair({
+      contactId: a.contactId,
+      contactName: a.contactName,
+      phone: a.phone,
+      leadAddedAt: a.leadAddedAt,
+      level1FireAt: l1,
+      level2FireAt: l2,
+    });
+    rearmed++;
+  }
+  console.log(
+    `[live-alert] initAlerts: rearmed=${rearmed} dropped_expired=${dropped} persistPath=${
+      PERSIST_PATH || "(none)"
+    }`
+  );
+  return { rearmed, dropped };
 }

@@ -30,6 +30,11 @@ export const EMPLOYEES = [
       6: { start: "08:00", end: "21:00" }, // Sat
     },
     breakMinutesPerShift: 60, // 2 × 30 min
+    // Office manager — supervises dispatchers, handles billing, fields walk-ins.
+    // His non-call stretches are normal for the role, so the idle-call alert
+    // skips him entirely. (Already excluded by isDispatcher() returning false
+    // for "office_manager", but this flag makes the intent explicit.)
+    idleAlertsExcluded: true,
   },
   {
     name: "Frank",
@@ -52,9 +57,11 @@ export const EMPLOYEES = [
     // Frank is a dispatcher MANAGER, not a primary caller. He supervises the
     // team, orders equipment, talks with techs, assigns jobs, chases customer
     // financing/completion docs. Frequent 20+ min stretches without GHL
-    // activity are normal for his role. Bump idle threshold to 60 min so he
-    // only gets alerted when he's been off GHL for a full hour.
+    // activity are normal for his role. Per Alex's v20 spec: exclude him
+    // from idle-call alerts entirely (more responsibility than the dialing
+    // dispatchers). idleThresholdMin kept for historical / non-alert tools.
     idleThresholdMin: 60,
+    idleAlertsExcluded: true,
   },
   {
     name: "Ellie",

@@ -1013,6 +1013,32 @@ export function buildDebugRouter() {
     }
   });
 
+  // GET /admin/debug/check-idle?s=<SEC>&nomail=1
+  // Secret-bypass admin endpoint — no session needed, secret query param only.
+  // Runs checkIdleDispatchers() synchronously and returns the diagnostic JSON.
+  // Use nomail=1 (default ON for safety) to skip the actual sendMail / Alerts.log
+  // calls; pass nomail=0 to fire emails for real (matches the cron behavior).
+  //
+  // Useful for verifying:
+  //   - Ellie / Angel / Mark are evaluated (or skipped with the right reason)
+  //   - Frank / Chris are skipped via idleAlertsExcluded
+  //   - The Hubstaff break check returns the expected onBreak status
+  //   - Idle minutes / threshold / cooldown all line up
+  router.get("/admin/debug/check-idle", async (req, res) => {
+    try {
+      const SEC = process.env.ADMIN_SECRET;
+      if (!SEC || req.query.s !== SEC) {
+        return res.status(403).json({ ok: false, error: "bad secret" });
+      }
+      const idle = await import("./idle.js");
+      const dryRun = req.query.nomail !== "0"; // default true unless nomail=0
+      const diag = await idle.checkIdleDispatchers({ dryRun });
+      res.json({ ok: true, dryRun, ...diag });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e?.message, stack: e?.stack });
+    }
+  });
+
   // ONE-SHOT bootstrap endpoint — no admin auth, only requires secret query param.
   // Used to transfer the GHL JWT from a logged-in browser tab where reading
   // the value back to chat is blocked. After bootstrap the admin endpoints
