@@ -1039,13 +1039,23 @@ function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
         : l.dateAdded;
       const added = DateTime.fromISO(cameInForResponse);
       const fcEt = first.dt;
-      responseTimeSec = Math.round((fcEt.toMillis() - added.toMillis()) / 1000);
-      responseSecs.push(responseTimeSec);
+      const _rawSec = Math.round((fcEt.toMillis() - added.toMillis()) / 1000);
       firstCallEt = fcEt.toFormat("yyyy-LL-dd HH:mm:ss");
-      if (responseTimeSec <= 60) { bucket = "≤ 1 min"; within1++; within3++; }
-      else if (responseTimeSec <= 180) { bucket = "≤ 3 min"; within3++; }
-      else if (responseTimeSec <= 300) { bucket = "> 3 min"; over3++; }
-      else { bucket = "> 5 min (BAD)"; over3++; }
+      if (_rawSec < 0) {
+        // First call was BEFORE the resubmission event — the contact
+        // received calls earlier today (or yesterday) before resubmitting.
+        // Not a real "response to today's resub" — mark unmeasurable
+        // and do not poison the avg/median response-time stats.
+        responseTimeSec = null;
+        bucket = "—";
+      } else {
+        responseTimeSec = _rawSec;
+        responseSecs.push(responseTimeSec);
+        if (responseTimeSec <= 60) { bucket = "≤ 1 min"; within1++; within3++; }
+        else if (responseTimeSec <= 180) { bucket = "≤ 3 min"; within3++; }
+        else if (responseTimeSec <= 300) { bucket = "> 3 min"; over3++; }
+        else { bucket = "> 5 min (BAD)"; over3++; }
+      }
     } else {
       neverCalled++;
     }
@@ -1062,7 +1072,9 @@ function buildNewLeads({ contactMap, pipelineMap, calls, dateStr }) {
       leadSource: l.source || "",
       cameIn: DateTime.fromISO(cameInIso).setZone(TZ).toFormat("yyyy-LL-dd HH:mm:ss"),
       firstCall: firstCallEt,
-      responseTime: responseTimeSec != null ? fmtDuration(responseTimeSec) : "Never",
+      responseTime: responseTimeSec != null
+        ? fmtDuration(responseTimeSec)
+        : (bucket === "—" ? "—" : "Never"),
       bucket,
       firstCaller: first?.dispatcher || "",
       othersOnShift: "",
@@ -1186,6 +1198,7 @@ function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr, exclud
 
     seen.add(id);
     out.push({
+      _id: id,  // v19: needed by enrichBookingSources / template funnel lookups
       name: `${contact.firstName || ""} ${contact.lastName || ""}`.trim() || contact.contactName || "(no name)",
       phone: contact.phone,
       source: contact.source || "",
@@ -1225,6 +1238,7 @@ function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr, exclud
 
     const ageDays = Math.floor((reportStart.toMillis() - added.toMillis()) / 86400000);
     out.push({
+      _id: id,  // v19: needed by enrichBookingSources / template funnel lookups
       name: `${contact.firstName || ""} ${contact.lastName || ""}`.trim() || contact.contactName || "(no name)",
       phone: contact.phone,
       source: contact.source || "",
@@ -1237,6 +1251,7 @@ function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr, exclud
       pipeline: pipeline.pipelineName || "",
       stage: pipeline.stageName || "",
       booked: true,
+      bookedToday: true,  // v19: pass-2 only fires when stageChanged is TODAY
       _sortTs: 0,
     });
   }
@@ -1300,6 +1315,260 @@ function addReactivatedLeadsTab(wb, rows, stats) {
   });
 }
 
+// =====================================================================
+// enrichBookingSources(excelData) — v19
+// Moved from reports.js so buildDailyExcel can call it BEFORE the Excel
+// buffer is built. That lets the SMS Today + Booking Sources tabs use
+// the bookingSources Map.
+//
+// For every booked lead today, decide HOW the booking happened and
+// credit the right person:
+//   Priority: Live Transfer > Real Call (>=70s) > Outbound SMS > Unknown
+// SMS data is pulled lazily from GHL Conversations API; capped to avoid
+// rate-limit blowups (max 25 contacts, max 3 conversations each).
+// Mutates excelData by attaching a .bookingSources Map(contactId -> info).
+// Idempotent: returns immediately if .bookingSources is already set.
+// =====================================================================
+export async function enrichBookingSources(excelData) {
+  if (!excelData) return;
+  if (excelData.bookingSources) return; // idempotent
+  const calls = excelData.calls || [];
+  const dispatcherMap = excelData.dispatcherMap;
+  function dispNameFromUid(uid) {
+    if (!uid) return null;
+    if (dispatcherMap && typeof dispatcherMap.get === "function") return dispatcherMap.get(uid) || null;
+    if (dispatcherMap && typeof dispatcherMap === "object") return dispatcherMap[uid] || null;
+    return null;
+  }
+  function callDispatcher(c) {
+    const uid = c.raw && (c.raw.user_id || c.raw.userId);
+    return dispNameFromUid(uid) || c.dispatcher || "—";
+  }
+  const sources = new Map();
+  const allRows = [
+    ...(excelData.newLeadRows || []),
+    ...(excelData.newOppRows || []),
+    ...(excelData.reactivatedRows || []),
+  ].filter((r) => r.bookedToday);
+  let smsContactsProcessed = 0;
+  const MAX_SMS_CONTACTS = 25;
+  for (const r of allRows) {
+    const cid = r._id || r.contactId || r.contact_id || r.id;
+    if (!cid) continue;
+    const myCalls = calls.filter((c) => {
+      const k = (c.raw && c.raw.contact_id) || c.contactId || c.contact_id;
+      return k === cid;
+    });
+    const lt = myCalls.find((c) => c.bucket === "live_transfer");
+    if (lt) {
+      sources.set(cid, { method: "Live Transfer", dispatcher: callDispatcher(lt), src: "LT" });
+      continue;
+    }
+    const real = myCalls.find((c) => c.bucket === "real_call" || (Number(c.durationSec || 0) >= 70));
+    if (real) {
+      sources.set(cid, { method: "Call", dispatcher: callDispatcher(real), src: "Call" });
+      continue;
+    }
+    if (smsContactsProcessed >= MAX_SMS_CONTACTS) {
+      sources.set(cid, { method: "?", dispatcher: r.firstCaller || "—", src: "SkippedRateLimit" });
+      continue;
+    }
+    smsContactsProcessed++;
+    try {
+      const convos = await ghl.getConversationsByContactId(cid);
+      let last = null;
+      for (const convo of (convos || []).slice(0, 3)) {
+        const msgs = await ghl.getConversationMessages(convo.id);
+        for (const m of (msgs || [])) {
+          const t = String(m.messageType || m.type || "").toUpperCase();
+          if (!t.includes("SMS")) continue;
+          const dir = String(m.direction || "").toLowerCase();
+          if (dir !== "outbound") continue;
+          const at = m.dateAdded || m.dateUpdated;
+          if (!at) continue;
+          if (!last || at > last.at) last = { at, userId: m.userId, body: m.body };
+        }
+      }
+      if (last) {
+        const name = dispNameFromUid(last.userId) || last.userId || "—";
+        sources.set(cid, { method: "SMS", dispatcher: name, src: "SMS", smsBody: last.body, smsTime: last.at });
+      } else {
+        sources.set(cid, { method: "—", dispatcher: r.firstCaller || "—", src: "Unknown" });
+      }
+    } catch (e) {
+      console.error("[booking-sources] failed for", cid, e && e.message);
+      sources.set(cid, { method: "—", dispatcher: r.firstCaller || "—", src: "Unknown" });
+    }
+  }
+  excelData.bookingSources = sources;
+}
+
+// =====================================================================
+// addBookingSourcesTab(wb, data) — v19 (task #51)
+// Every booking today with full attribution. Joins newLeadRows / newOppRows /
+// reactivatedRows filtered by bookedToday with bookingSources for the
+// CALL / LIVE TRANSFER / SMS method tag, dispatcher, and SMS body.
+// =====================================================================
+function addBookingSourcesTab(wb, { newLeadRows, newOppRows, reactivatedRows, pipelineMap, bookingSources }) {
+  const ws = wb.addWorksheet("Booking Sources");
+  ws.views = [{ state: "frozen", ySplit: 4 }];
+  applyTitleStyle(ws.getCell("A1"));
+  ws.getCell("A1").value = "Booking Sources — every booking today with how & who";
+  ws.getCell("A2").value = "Source priority: Live Transfer > Real Call (≥70s) > Outbound SMS > Unknown. Dispatcher is the person who closed the booking via that channel.";
+  ws.getCell("A2").font = { name: "Arial", size: 10, italic: true, color: { argb: "FF606060" } };
+
+  const headers = [
+    "Category", "Contact", "Phone", "Source", "Pipeline",
+    "Origin Stage", "Final Stage", "Booking Type",
+    "Dispatcher", "Real Call Duration", "Response Time",
+    "Came In (ET)", "Booking Time (ET)", "SMS Body",
+  ];
+  ws.getRow(4).values = headers;
+  applyHeaderStyle(ws.getRow(4));
+
+  function pushRow(r, cat) {
+    const cid = r._id || r.contactId || r.contact_id || r.id;
+    const src = bookingSources?.get?.(cid) || {};
+    const pipe = pipelineMap?.get?.(cid) || {};
+    const finalStage = r.finalStage || r.stage || pipe.stageName || "";
+    const bookingType = finalStage === "Appt. Booked" ? "Physical Booking"
+                      : finalStage === "Over Phone Booked" ? "Phone Booking"
+                      : (r.bookedToday ? "Booked" : "");
+    const originStage = cat === "NEW" ? "New Lead In"
+                      : cat === "RESUB" ? "New Lead In (reset)"
+                      : (r.stage || "(unknown)");
+    const bookingTime = pipe.oppStageChangedAt
+      ? DateTime.fromISO(pipe.oppStageChangedAt).setZone(TZ).toFormat("yyyy-LL-dd HH:mm:ss")
+      : "";
+    return [
+      cat,
+      r.leadName || r.name || "(unknown)",
+      r.phone || "",
+      src.method || "—",
+      pipe.pipelineName || r.pipeline || "",
+      originStage,
+      finalStage,
+      bookingType,
+      src.dispatcher || r.firstCaller || r.dispatcher || r.longestCallDispatcher || "",
+      r.longestCallDuration || r.durationFmt || "",
+      cat === "REACT" ? "N/A" : (r.responseTime || ""),
+      r.cameIn || r.dateAdded || "",
+      bookingTime,
+      src.smsBody || "",
+    ];
+  }
+
+  const out = [];
+  for (const r of (newLeadRows || []))    if (r.bookedToday) out.push(pushRow(r, "NEW"));
+  for (const r of (newOppRows || []))     if (r.bookedToday) out.push(pushRow(r, "RESUB"));
+  for (const r of (reactivatedRows || [])) if (r.bookedToday) out.push(pushRow(r, "REACT"));
+
+  out.forEach((vals, i) => {
+    const row = ws.getRow(5 + i);
+    row.values = vals;
+    const fill = vals[7] === "Physical Booking" ? COLORS.LIVE_TRANSFER
+               : vals[7] === "Phone Booking" ? COLORS.RINGING
+               : null;
+    if (fill) row.eachCell((cell) => {
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fill } };
+    });
+  });
+
+  // Summary footer
+  const footerRow = 5 + out.length + 1;
+  ws.getCell(`A${footerRow}`).value = `TOTAL: ${out.length} booking${out.length === 1 ? "" : "s"} today`;
+  ws.getCell(`A${footerRow}`).font = { bold: true };
+  setColumnWidths(ws, [10, 24, 16, 14, 22, 24, 22, 16, 18, 16, 14, 20, 20, 50]);
+}
+
+// =====================================================================
+// addSmsTodayTab(wb, data) — v19 (task #51)
+// Subset of bookings where the attributed source is SMS — i.e. contacts
+// who got booked today without a real call or live transfer, presumed
+// closed via outbound SMS. Shows last outbound SMS body + dispatcher.
+//
+// Note: this is NOT every SMS conversation today — it's the SMS-method
+// bookings extracted from bookingSources. Expanding to all SMS activity
+// would require a separate enrichment pass over every contact with
+// activity today (not scoped here).
+// =====================================================================
+function addSmsTodayTab(wb, { newLeadRows, newOppRows, reactivatedRows, pipelineMap, bookingSources }) {
+  const ws = wb.addWorksheet("SMS Today");
+  ws.views = [{ state: "frozen", ySplit: 4 }];
+  applyTitleStyle(ws.getCell("A1"));
+  ws.getCell("A1").value = "SMS Today — bookings closed via outbound SMS";
+  ws.getCell("A2").value = "Booked contacts with NO qualifying call (real_call ≥70s or live_transfer). Last outbound SMS body shown for context. Dispatcher = sender of that last SMS.";
+  ws.getCell("A2").font = { name: "Arial", size: 10, italic: true, color: { argb: "FF606060" } };
+
+  const headers = [
+    "Category", "Contact", "Phone", "Pipeline", "Stage at Start",
+    "Final Stage", "Booking Type", "Dispatcher (last SMS sender)",
+    "Last SMS Time (ET)", "Last SMS Body",
+  ];
+  ws.getRow(4).values = headers;
+  applyHeaderStyle(ws.getRow(4));
+
+  function gather(rows, cat) {
+    const out = [];
+    for (const r of (rows || [])) {
+      if (!r.bookedToday) continue;
+      const cid = r._id || r.contactId || r.contact_id || r.id;
+      const src = bookingSources?.get?.(cid);
+      if (!src || src.method !== "SMS") continue;
+      const pipe = pipelineMap?.get?.(cid) || {};
+      const finalStage = r.finalStage || r.stage || pipe.stageName || "";
+      const originStage = cat === "NEW" ? "New Lead In"
+                        : cat === "RESUB" ? "New Lead In (reset)"
+                        : (r.stage || "(unknown)");
+      const bookingType = finalStage === "Appt. Booked" ? "Physical Booking"
+                        : finalStage === "Over Phone Booked" ? "Phone Booking"
+                        : (r.bookedToday ? "Booked" : "");
+      const smsTimeEt = src.smsTime
+        ? DateTime.fromISO(src.smsTime).setZone(TZ).toFormat("yyyy-LL-dd HH:mm:ss")
+        : "";
+      out.push([
+        cat,
+        r.leadName || r.name || "(unknown)",
+        r.phone || "",
+        pipe.pipelineName || r.pipeline || "",
+        originStage,
+        finalStage,
+        bookingType,
+        src.dispatcher || "—",
+        smsTimeEt,
+        src.smsBody || "",
+      ]);
+    }
+    return out;
+  }
+
+  const out = [
+    ...gather(newLeadRows, "NEW"),
+    ...gather(newOppRows, "RESUB"),
+    ...gather(reactivatedRows, "REACT"),
+  ];
+
+  out.forEach((vals, i) => {
+    const row = ws.getRow(5 + i);
+    row.values = vals;
+    row.eachCell((cell) => {
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFEE2E2" } };
+    });
+  });
+
+  // Empty-state row
+  if (out.length === 0) {
+    ws.getCell("A5").value = "No SMS-closed bookings today.";
+    ws.getCell("A5").font = { italic: true, color: { argb: "FF6B7280" } };
+  }
+
+  // Summary footer
+  const footerRow = 5 + Math.max(out.length, 1) + 1;
+  ws.getCell(`A${footerRow}`).value = `TOTAL: ${out.length} SMS-closed booking${out.length === 1 ? "" : "s"} today`;
+  ws.getCell(`A${footerRow}`).font = { bold: true };
+  setColumnWidths(ws, [10, 24, 16, 22, 24, 22, 16, 24, 20, 60]);
+}
+
 export async function buildDailyExcel(dateStr) {
   const dayStart = DateTime.fromISO(dateStr, { zone: TZ }).startOf("day");
   const dayEnd = dayStart.endOf("day");
@@ -1356,6 +1625,23 @@ export async function buildDailyExcel(dateStr) {
   const buckets = { live_transfer: 0, real_call: 0, no_answer: 0, failed: 0, ringing: 0 };
   for (const c of calls) buckets[c.bucket]++;
   const uniqueContacts = new Set(rows.map((r) => r.contact_id || r.phone || "").filter(Boolean)).size;
+
+  // v19 (task #51): enrich bookingSources BEFORE building the wb so the new
+  // SMS Today + Booking Sources tabs can join against it. reports.js used to
+  // do this AFTER buildDailyExcel returned, which meant the Excel attachment
+  // never carried this data. Now it does — reports.js is also kept simple
+  // because the call here is idempotent.
+  const _excelDataForEnrich = {
+    calls, dispatcherMap,
+    newLeadRows, newOppRows, reactivatedRows,
+  };
+  try {
+    await enrichBookingSources(_excelDataForEnrich);
+  } catch (e) {
+    console.error("[excel] enrichBookingSources failed:", e?.message);
+  }
+  const bookingSources = _excelDataForEnrich.bookingSources || new Map();
+
   const wb = new ExcelJS.Workbook();
   wb.creator = "Local AC Reports Bot";
   wb.lastModifiedBy = "Local AC Reports Bot";
@@ -1375,6 +1661,9 @@ export async function buildDailyExcel(dateStr) {
   addHourXDispatcherTab(wb, calls);
   addLeadActivityBreakdownTab(wb, { newLeadRows, newOppRows, reactivatedRows, calls });
   addBookingFunnelTab(wb, { newLeadRows, newOppRows, reactivatedRows, pipelineMap, dateStr });
+  // v19 (task #51): new attribution tabs powered by bookingSources.
+  addBookingSourcesTab(wb, { newLeadRows, newOppRows, reactivatedRows, pipelineMap, bookingSources });
+  addSmsTodayTab(wb, { newLeadRows, newOppRows, reactivatedRows, pipelineMap, bookingSources });
   addNotesTab(wb);
 
   // Diagnostic tab with counts useful for debugging
@@ -1427,6 +1716,9 @@ export async function buildDailyExcel(dateStr) {
       reactivatedStats,
       pipelineMap,
       dispatcherMap,
+      // v19 (task #51): expose bookingSources so template.js doesn't need
+      // to re-enrich. The Map was populated by enrichBookingSources above.
+      bookingSources,
     },
   };
 }
