@@ -61,7 +61,7 @@ function renderNav({ user, activeNav }) {
     { href: "/dispatchers", label: "Dispatchers", key: "dispatchers" },
     { href: "/leads", label: "Leads", key: "leads" },
     { href: "/alerts", label: "Alerts", key: "alerts" },
-    { href: "/reports", label: "Reports", key: "reports" },
+    { href: "/dispatch", label: "Dispatch", key: "dispatch" },
     { href: "/gross-profit", label: "Gross Profit", key: "gross-profit" },
     { href: "/ask", label: "Ask Claude", key: "ask" },
   ];

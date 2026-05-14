@@ -16,6 +16,9 @@ import { runMorningReport, runEveningReport } from "./reports.js";
 import { _internal as alertsInternal } from "./alerts.js";
 import { GpJobs, GpAttachments, GpUnmatched } from "./gross-profit.js";
 import * as gmail from "./gmail.js";
+import { buildAggregatedReport, resolveRange } from "./aggregate.js";
+import { sendMail } from "./mailer.js";
+import { config } from "./config.js";
 
 // SQLite stores CURRENT_TIMESTAMP as UTC strings ("YYYY-MM-DD HH:MM:SS").
 // Display them in America/New_York (Florida) so the website matches emails + clocks.
@@ -255,47 +258,330 @@ export function buildDashboardRouter() {
     );
   });
 
-  // ----- Reports -----
-  router.get("/reports", (req, res) => {
-    const reports = Reports.recent(30);
-    const body =
-      reports.length === 0
-        ? `<p class="muted">No reports archived yet. The first morning report will land in this archive at 12:00 PM ET tomorrow.</p>`
-        : `<table class="data-table">
-            <thead><tr><th>Date</th><th>Type</th><th></th></tr></thead>
-            <tbody>${reports
-              .map(
-                (r) => `<tr>
-              <td>${fmtET(r.generated_at)}</td>
-              <td><span class="badge badge-${r.kind === "morning" ? "manager" : "admin"}">${r.kind}</span></td>
-              <td><a href="/reports/${r.id}">View report</a></td>
-            </tr>`
-              )
-              .join("")}</tbody>
-          </table>`;
+  // ----- Dispatch (formerly Reports) -----
+  // Default landing: Daily mode, yesterday's date (closing is 9 PM ET so
+  // the report is ready every morning for the prior day).
+  router.get("/dispatch", async (req, res) => {
+    const today = now();
+    const yesterday = today.minus({ days: 1 }).toFormat("yyyy-LL-dd");
+    const mode = (req.query.mode || "daily").toLowerCase();
+    const validModes = ["daily", "weekly", "monthly", "custom"];
+    const safeMode = validModes.includes(mode) ? mode : "daily";
+
+    let bodyContent = "";
+    let titleSuffix = "";
+
+    if (safeMode === "daily") {
+      const date = req.query.date || yesterday;
+      bodyContent = await renderDailyView(date);
+      titleSuffix = ` — ${date}`;
+    } else {
+      // weekly / monthly / custom — try to load cached aggregated report
+      let range;
+      try {
+        range = resolveRange({
+          mode: safeMode,
+          date: req.query.date,
+          from: req.query.from,
+          to: req.query.to,
+          month: req.query.month,
+        });
+      } catch (e) {
+        bodyContent = `<p class="muted">Invalid date range: ${escapeHtml(e.message)}</p>`;
+        range = null;
+      }
+      if (range) {
+        const cacheKey = aggCacheKey(safeMode, range.from, range.to);
+        const cached = ReportsByKind(cacheKey);
+        if (cached) {
+          bodyContent = `<div class="muted" style="margin-bottom:14px">Cached at ${fmtET(cached.generated_at)} — click <b>Real-time report</b> to refresh.</div><div>${cached.html_body || ""}</div>`;
+        } else {
+          bodyContent = `<p class="muted">No cached report for this range yet. Click <b>Real-time report</b> below to generate one and email it to ${escapeHtml(config.recipient || "the reports inbox")}.</p>`;
+        }
+        titleSuffix = ` — ${range.from.toFormat("LLL d")}${
+          safeMode === "daily" ? "" : ` → ${range.to.toFormat("LLL d")}`
+        }`;
+      }
+    }
+
+    const body = renderDispatchPage({
+      mode: safeMode,
+      query: req.query,
+      yesterday,
+      bodyContent,
+    });
+
     res.send(
-      views.placeholderPage({
+      views.layout({
+        title: `Dispatch${titleSuffix}`,
         user: req.user,
-        title: "Report archive",
-        navKey: "reports",
+        activeNav: "dispatch",
         body,
       })
     );
   });
 
-  router.get("/reports/:id", (req, res) => {
+  // View an individual archived report (by DB id). Linked from the archive list.
+  router.get("/dispatch/report/:id", (req, res) => {
     const report = Reports.byId(req.params.id);
     if (!report) return res.status(404).send("Report not found.");
-    // Reports are stored as raw HTML — wrap in our layout
     res.send(
-      views.placeholderPage({
-        user: req.user,
+      views.layout({
         title: `${report.kind} report`,
-        navKey: "reports",
-        body: `<div class="muted" style="margin-bottom:14px">${fmtET(report.generated_at)}</div><div>${report.html_body || ""}</div>`,
+        user: req.user,
+        activeNav: "dispatch",
+        body: `<div class="page-head"><h1>${escapeHtml(report.kind)} report</h1><a href="/dispatch" style="font-size:13px">&larr; back to Dispatch</a></div>
+          <section class="panel">
+            <div class="muted" style="margin-bottom:14px">${fmtET(report.generated_at)}</div>
+            <div>${report.html_body || ""}</div>
+          </section>`,
       })
     );
   });
+
+  // Real-time generation endpoint. POST so it's not triggered by accidental
+  // GETs / link-prefetching. Body: { mode, date?, from?, to?, month? }.
+  router.post("/dispatch/generate", express.json(), async (req, res) => {
+    const t0 = Date.now();
+    const { mode, date, from, to, month } = req.body || {};
+    const safeMode = ["daily", "weekly", "monthly", "custom"].includes(mode)
+      ? mode
+      : "daily";
+    try {
+      if (safeMode === "daily") {
+        const targetDate =
+          date || now().minus({ days: 1 }).toFormat("yyyy-LL-dd");
+        // runEveningReport already archives in reports_history + emails.
+        await runEveningReport({ dateOverride: targetDate });
+        return res.json({
+          ok: true,
+          mode: "daily",
+          date: targetDate,
+          durationMs: Date.now() - t0,
+        });
+      }
+      const range = resolveRange({ mode: safeMode, date, from, to, month });
+      const generatedAt = now();
+      const { html, summary } = await buildAggregatedReport({
+        mode: safeMode,
+        from: range.from,
+        to: range.to,
+        generatedAt,
+      });
+      const cacheKey = aggCacheKey(safeMode, range.from, range.to);
+      try {
+        Reports.log({ kind: cacheKey, html, summary });
+      } catch (e) {
+        console.error("[dispatch] archive failed:", e?.message);
+      }
+      const subject = `Local AC — ${safeMode[0].toUpperCase()}${safeMode.slice(1)} Dispatch (${range.from.toFormat("LLL d")} → ${range.to.toFormat("LLL d")})`;
+      await sendMail({ subject, html });
+      return res.json({
+        ok: true,
+        mode: safeMode,
+        from: range.from.toISO(),
+        to: range.to.toISO(),
+        cacheKey,
+        durationMs: Date.now() - t0,
+      });
+    } catch (e) {
+      console.error("[dispatch] generate failed:", e);
+      return res.status(500).json({
+        ok: false,
+        mode: safeMode,
+        error: e?.message,
+      });
+    }
+  });
+
+  // Backward-compat: redirect old /reports URLs (which may live in archived
+  // emails) to /dispatch.
+  router.get("/reports", (req, res) => res.redirect(301, "/dispatch"));
+  router.get("/reports/:id", (req, res) =>
+    res.redirect(301, `/dispatch/report/${req.params.id}`)
+  );
+
+  // --- helpers (scoped to this router so they share Reports, fmtET, now, etc.) ---
+  function escapeHtml(s) {
+    return String(s ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function aggCacheKey(mode, from, to) {
+    const f = from.setZone(TZ).toFormat("yyyy-LL-dd");
+    const t = to.setZone(TZ).toFormat("yyyy-LL-dd");
+    return `${mode}:${f}:${t}`;
+  }
+
+  function ReportsByKind(kind) {
+    // Latest report with the given kind string. Returns the full row or null.
+    const rows = db_select_reports_by_kind(kind);
+    return rows.length ? rows[0] : null;
+  }
+
+  // Pull the latest daily archived report whose generated_at falls on the given
+  // ET calendar date. Prefer "evening" (full-day) over "morning" (snapshot).
+  function latestDailyReportFor(dateStr) {
+    // ET calendar day window converted to UTC for the SQL comparison.
+    const dayStart = DateTime.fromISO(dateStr, { zone: TZ }).startOf("day");
+    const dayEnd = dayStart.endOf("day");
+    const utcStart = dayStart.toUTC().toFormat("yyyy-LL-dd HH:mm:ss");
+    const utcEnd = dayEnd.toUTC().toFormat("yyyy-LL-dd HH:mm:ss");
+    const rows = db_select_reports_in_window(utcStart, utcEnd);
+    if (!rows.length) return null;
+    // Prefer evening, then morning, then anything else.
+    const evening = rows.find((r) => r.kind === "evening");
+    if (evening) return evening;
+    const morning = rows.find((r) => r.kind === "morning");
+    if (morning) return morning;
+    return rows[0];
+  }
+
+  async function renderDailyView(dateStr) {
+    const report = latestDailyReportFor(dateStr);
+    if (!report) {
+      return `<p class="muted">No archived report for <b>${escapeHtml(dateStr)}</b>. Click <b>Real-time report</b> to generate one and email it.</p>`;
+    }
+    return `<div class="muted" style="margin-bottom:14px">${escapeHtml(report.kind)} report — generated ${fmtET(report.generated_at)}</div>
+      <div>${report.html_body || ""}</div>`;
+  }
+
+  function renderDispatchPage({ mode, query, yesterday, bodyContent }) {
+    const monthValue =
+      query.month ||
+      (mode === "monthly"
+        ? now().minus({ months: 0 }).toFormat("yyyy-LL")
+        : "");
+    const dateValue =
+      query.date ||
+      (mode === "monthly" ? "" : yesterday);
+    const fromValue = query.from || yesterday;
+    const toValue = query.to || yesterday;
+
+    const tab = (key, label) =>
+      `<a href="/dispatch?mode=${key}" class="dispatch-tab ${mode === key ? "active" : ""}">${label}</a>`;
+
+    // Dynamic pickers depending on mode
+    let pickerHtml = "";
+    if (mode === "daily") {
+      pickerHtml = `<label style="font-size:13px">Date
+        <input type="date" name="date" value="${escapeHtml(dateValue)}" max="${escapeHtml(now().toFormat("yyyy-LL-dd"))}" />
+      </label>`;
+    } else if (mode === "weekly") {
+      pickerHtml = `<label style="font-size:13px">Week ending
+        <input type="date" name="date" value="${escapeHtml(dateValue)}" max="${escapeHtml(now().toFormat("yyyy-LL-dd"))}" />
+      </label>
+      <div style="font-size:12px;color:#7a8294;align-self:end;padding-bottom:9px">7-day window ending on selected date.</div>`;
+    } else if (mode === "monthly") {
+      pickerHtml = `<label style="font-size:13px">Month
+        <input type="month" name="month" value="${escapeHtml(monthValue)}" max="${escapeHtml(now().toFormat("yyyy-LL"))}" />
+      </label>`;
+    } else if (mode === "custom") {
+      pickerHtml = `<label style="font-size:13px">From
+        <input type="date" name="from" value="${escapeHtml(fromValue)}" max="${escapeHtml(now().toFormat("yyyy-LL-dd"))}" />
+      </label>
+      <label style="font-size:13px">To
+        <input type="date" name="to" value="${escapeHtml(toValue)}" max="${escapeHtml(now().toFormat("yyyy-LL-dd"))}" />
+      </label>`;
+    }
+
+    const styles = `<style>
+      .dispatch-tabs { display:flex; gap:4px; margin-bottom:18px; border-bottom:1px solid #e0e6ee; }
+      .dispatch-tab { padding:10px 16px; text-decoration:none; color:#5a6376; font-weight:600; font-size:14px;
+        border-bottom:2px solid transparent; margin-bottom:-1px; transition:all 0.15s; }
+      .dispatch-tab:hover { color:#1B57A8; }
+      .dispatch-tab.active { color:#1B57A8; border-bottom-color:#1B57A8; }
+      .dispatch-controls { display:flex; flex-wrap:wrap; gap:14px; align-items:end; margin-bottom:14px; padding:14px;
+        background:#f5f7fb; border-radius:8px; }
+      .dispatch-controls input[type=date], .dispatch-controls input[type=month] {
+        padding:8px 10px; border:1px solid #d6dbe5; border-radius:6px; font-size:14px; }
+      .dispatch-report { padding:8px 0; }
+      #rt-status { margin-left:12px; font-size:13px; color:#5a6376; }
+    </style>`;
+
+    const script = `<script>
+      (function(){
+        var btn = document.getElementById('rt-btn');
+        if (!btn) return;
+        btn.addEventListener('click', async function(){
+          var status = document.getElementById('rt-status');
+          btn.disabled = true;
+          status.textContent = 'Generating…';
+          var mode = ${JSON.stringify(mode)};
+          var body = { mode: mode };
+          var form = document.getElementById('dispatch-form');
+          var fd = new FormData(form);
+          for (var pair of fd.entries()) { body[pair[0]] = pair[1]; }
+          try {
+            var r = await fetch('/dispatch/generate', {
+              method:'POST',
+              headers:{'Content-Type':'application/json'},
+              body: JSON.stringify(body)
+            });
+            var j = await r.json();
+            if (!j.ok) throw new Error(j.error || 'Generation failed');
+            status.textContent = 'Done in ' + Math.round((j.durationMs||0)/1000) + 's. Reloading…';
+            setTimeout(function(){ location.reload(); }, 600);
+          } catch (e) {
+            status.textContent = 'Error: ' + e.message;
+            btn.disabled = false;
+          }
+        });
+      })();
+    </script>`;
+
+    return `${styles}
+    <div class="page-head">
+      <h1>Dispatch</h1>
+      <span class="page-sub" style="font-size:13px;color:#7a8294">Daily, weekly, monthly, and custom-range views of dispatcher and lead activity.</span>
+    </div>
+    <section class="panel">
+      <nav class="dispatch-tabs">
+        ${tab("daily", "Daily")}
+        ${tab("weekly", "Weekly")}
+        ${tab("monthly", "Monthly")}
+        ${tab("custom", "Custom")}
+      </nav>
+      <form id="dispatch-form" class="dispatch-controls" method="get" action="/dispatch">
+        <input type="hidden" name="mode" value="${escapeHtml(mode)}" />
+        ${pickerHtml}
+        <button type="submit" class="btn btn-primary" style="height:38px">View</button>
+        <button type="button" id="rt-btn" class="btn btn-primary" style="height:38px;background:#138a36">Real-time report</button>
+        <span id="rt-status"></span>
+      </form>
+      <div class="dispatch-report">${bodyContent}</div>
+    </section>
+    ${script}`;
+  }
+
+  // SQLite query helpers. We dip into the same `db` better-sqlite3 handle that
+  // db.js opened — but it's not exported. Instead use Reports.* and a small
+  // raw query via a fresh prepare on the existing connection through Reports.
+  // The cleanest path is to add tiny readers to db.js, but to keep this PR
+  // contained we go through Reports.recent() and filter client-side.
+  function db_select_reports_by_kind(kind) {
+    // recent(N) is plenty for cache lookup; cache keys are unique per range.
+    const all = Reports.recent(500);
+    return all
+      .filter((r) => r.kind === kind)
+      .map((r) => Reports.byId(r.id))
+      .filter(Boolean);
+  }
+
+  function db_select_reports_in_window(utcStart, utcEnd) {
+    const all = Reports.recent(500);
+    return all
+      .filter((r) => {
+        const ts = String(r.generated_at || "");
+        return ts >= utcStart && ts <= utcEnd;
+      })
+      .map((r) => Reports.byId(r.id))
+      .filter(Boolean);
+  }
 
   // ----- Ask Claude -----
   router.get("/ask", (req, res) => {

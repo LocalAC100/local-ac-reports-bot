@@ -84,7 +84,7 @@ function parseVonageNote(noteBody) {
 
 // ---------- Hubstaff analysis ----------
 
-async function buildHubstaffSection({ from, to, includeTotals }) {
+export async function buildHubstaffSection({ from, to, includeTotals }) {
   const fromIso = from.toUTC().toISO();
   const toIso = to.toUTC().toISO();
 
@@ -381,7 +381,7 @@ const BUCKETS = [
   { key: "afternoon", label: "Afternoon", hours: "4 PM – 9 PM", startHour: 16, endHour: 21 },
 ];
 
-async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
+export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
   const fromIso = from.toUTC().toISO();
   const toIso = to.toUTC().toISO();
 
