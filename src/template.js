@@ -1347,9 +1347,6 @@ export function renderSection6(excelData) {
     if (methodInline === "Live Transfer") methodPill = ' <span class="badge badge-warn">via Live Transfer</span>';
     else if (methodInline === "Call") methodPill = ' <span class="badge badge-good">via Call</span>';
     else if (methodInline === "SMS") methodPill = ' <span class="badge badge-bad" style="background:#fee2e2;color:#991b1b">via SMS</span>';
-    // v17 debug — embed an HTML comment showing what the matcher saw
-    const _dbgN = (excelData.calls || []).filter((c) => (c.raw && c.raw.contact_id) === cid).length;
-    methodPill += `<!-- dbg cid=${cid||"?"} bt=${!!row.bookedToday} myN=${_dbgN} m=${methodInline} -->`;
     // Dispatcher: prefer bookingSources (has SMS sender from Conversations API), else row's caller fields.
     const bSrc = (excelData.bookingSources && excelData.bookingSources.get) ? excelData.bookingSources.get(cid) : null;
     const disp = bSrc?.dispatcher || row.firstCaller || row.dispatcher || row.longestCallDispatcher || "";
