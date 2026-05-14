@@ -1042,6 +1042,27 @@ export function buildDebugRouter() {
     }
   });
 
+  // GET /admin/debug/morning-catchup?s=<SEC>&nomail=1
+  // Same secret-bypass pattern. Scans every lead that arrived in the
+  // overnight window (9 PM previous day → 8 AM today) and reports which
+  // ones haven't been contacted yet. nomail=1 (default) skips the email
+  // send so you can inspect the list before triggering a real alert.
+  router.get("/admin/debug/morning-catchup", async (req, res) => {
+    try {
+      const SEC =
+        process.env.JWT_BOOTSTRAP_SECRET || "lac-jwt-2026-bootstrap-axabramov";
+      if (req.query.s !== SEC) {
+        return res.status(403).json({ ok: false, error: "bad secret" });
+      }
+      const alerts = await import("./alerts.js");
+      const dryRun = req.query.nomail !== "0";
+      const result = await alerts.runMorningCatchUp({ dryRun });
+      res.json(result);
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e?.message, stack: e?.stack });
+    }
+  });
+
   // ONE-SHOT bootstrap endpoint — no admin auth, only requires secret query param.
   // Used to transfer the GHL JWT from a logged-in browser tab where reading
   // the value back to chat is blocked. After bootstrap the admin endpoints

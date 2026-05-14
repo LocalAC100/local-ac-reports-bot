@@ -1,13 +1,14 @@
 // Entry point. Boots the HTTP server (for the GHL webhook + healthz) and
 // schedules the daily reports via node-cron in the configured timezone.
 //
-// SCHEDULE (v20, locked May 14 2026):
+// SCHEDULE (v20.2, locked May 14 2026):
 //   12:00 PM ET     Morning Snapshot — today midnight to noon
 //    9:00 PM ET     Evening Snapshot — today (full-day-to-date)
 //    7:00 AM ET     Full Day Summary of YESTERDAY (so Tuesday 7 AM = Monday recap)
 //    2:00 AM ET     Firehose backfill for yesterday (feeds the 7 AM evening report)
+//    8:15 AM ET     Morning catch-up — overnight leads still uncontacted (v20.2)
 //   */15 6-22 ET    Firehose backfill for today (every 15 min during business hours)
-//   */5  8-20 ET    Dispatcher-idle check — 15-min threshold, Hubstaff-break-aware (v20)
+//   */5  8-20 ET    Dispatcher-idle check — 15-min threshold, Hubstaff-break-aware
 //   */5  *   *      JWT refresh (Firebase id_token expires in ~1hr; refresh keeps backfill alive)
 //
 // On boot: re-arm any pending lead alerts from /var/data/pending-alerts.json so
@@ -18,7 +19,7 @@ import { buildServer } from "./server.js";
 import { runMorningReport, runEveningReport } from "./reports.js";
 import { backfillDate, refreshStoredJwt } from "./firehose-backfill.js";
 import { checkIdleDispatchers } from "./idle.js";
-import { initAlerts } from "./alerts.js";
+import { initAlerts, runMorningCatchUp } from "./alerts.js";
 
 const app = buildServer();
 app.listen(config.port, () => {
@@ -147,6 +148,29 @@ cron.schedule(
       console.log("[jwt-refresh-cron] OK", r);
     } catch (e) {
       console.error("[jwt-refresh-cron] ERR", (e && e.message) || e);
+    }
+  },
+  { timezone: "America/New_York" }
+);
+
+// =====================================================================
+// Morning catch-up (v20.2). 8:15 AM ET — scan every lead that arrived
+// overnight (9 PM previous day through 8 AM today) and emit a single
+// summary email listing any that still haven't been contacted by the
+// dispatchers. Overnight leads do NOT get the live 3-min / 10-min timers,
+// so this is their only alert path.
+// =====================================================================
+cron.schedule(
+  "15 8 * * *",
+  async () => {
+    console.log("[morning-catchup-cron] running at", new Date().toISOString());
+    try {
+      const r = await runMorningCatchUp();
+      console.log(
+        `[morning-catchup-cron] OK overnight=${r.overnightContactCount} uncontacted=${r.uncontactedCount}`
+      );
+    } catch (e) {
+      console.error("[morning-catchup-cron] ERR", (e && e.message) || e);
     }
   },
   { timezone: "America/New_York" }

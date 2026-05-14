@@ -116,17 +116,19 @@ function checkSuppressionLocal(contactId, leadAddedAt) {
   const toIso = new Date().toISOString();
   const allRows = Calls.listInWindow(fromIso, toIso, 5000);
 
-  // Outbound only, this contact only.
-  const rows = allRows.filter(
-    (r) =>
-      r.contact_id === contactId &&
-      (r.direction || "").toLowerCase() === "outbound"
-  );
+  // All calls for this contact in window — INBOUND and OUTBOUND both count for
+  // the "real call" / "live transfer" determination (Joel case: customer
+  // called us, the conversation lasted >70s — that's real contact regardless
+  // of who dialed). Only OUTBOUND counts toward outboundAttempts (used by the
+  // 10-min escalation rule).
+  const rows = allRows.filter((r) => r.contact_id === contactId);
 
+  let outboundAttempts = 0;
   let realCalls = 0;
   let liveTransfers = 0;
   const calls = [];
   for (const r of rows) {
+    const dir = (r.direction || "").toLowerCase();
     let raw = {};
     try { if (r.raw_event) raw = JSON.parse(r.raw_event); } catch {}
     const bucket = classifyCall({
@@ -134,26 +136,28 @@ function checkSuppressionLocal(contactId, leadAddedAt) {
       duration: r.duration,
       participants: raw.participants,
     });
+    if (dir === "outbound") outboundAttempts++;
     if (bucket === "real_call") realCalls++;
     if (bucket === "live_transfer") liveTransfers++;
     calls.push({
       duration: r.duration || 0,
+      direction: dir,
       at: r.date_added,
       status: r.status,
+      bucket,
     });
   }
 
-  const totalAttempts = rows.length;
-
   return {
+    outboundAttempts,
     realCalls,
     liveTransfers,
-    totalAttempts,
+    // Back-compat alias used by older debug paths (counts outbound only).
+    totalAttempts: outboundAttempts,
     longCalls: calls.filter((c) => (c.duration || 0) >= 70),
     shortCalls: calls.filter((c) => (c.duration || 0) < 70),
     calls,
-    // Back-compat: any qualifying activity at all (callers used this before v3).
-    attempted: totalAttempts >= 1,
+    attempted: outboundAttempts >= 1 || realCalls >= 1 || liveTransfers >= 1,
     _source: "local",
     _diag: { sourceTable: "calls", rowCount: rows.length },
   };
@@ -173,9 +177,9 @@ async function checkSuppressionGHL(contactId, leadAddedAt) {
     for (const m of msgs) allMessages.push(m);
   }
 
+  let outboundAttempts = 0;
   let realCalls = 0;
   let liveTransfers = 0;
-  let totalAttempts = 0;
   const calls = [];
   for (const m of allMessages) {
     const isCall =
@@ -184,13 +188,12 @@ async function checkSuppressionGHL(contactId, leadAddedAt) {
       /CALL/i.test(String(m.type ?? ""));
     if (!isCall) continue;
     const dir = String(m.direction ?? "").toLowerCase();
-    if (dir !== "outbound") continue;
     const ts = new Date(m.dateAdded ?? m.createdAt ?? 0).getTime();
     if (ts < leadTime) continue;
     const duration = Number(
       m.meta?.call?.duration ?? m.callDuration ?? m.duration ?? 0
     );
-    totalAttempts++;
+    if (dir === "outbound") outboundAttempts++;
     if (duration >= 70) {
       const participants = m.meta?.call?.participants || {};
       const hasTransfer = Object.values(participants).some(
@@ -201,6 +204,7 @@ async function checkSuppressionGHL(contactId, leadAddedAt) {
     }
     calls.push({
       duration,
+      direction: dir,
       at: m.dateAdded ?? m.createdAt ?? null,
       status: m.meta?.call?.status ?? null,
     });
@@ -213,16 +217,17 @@ async function checkSuppressionGHL(contactId, leadAddedAt) {
     const ts = new Date(n.dateAdded || 0).getTime();
     return ts >= leadTime;
   }).length;
-  totalAttempts += vonageCallsAfterLead;
+  outboundAttempts += vonageCallsAfterLead;
 
   return {
+    outboundAttempts,
     realCalls,
     liveTransfers,
-    totalAttempts,
+    totalAttempts: outboundAttempts,
     longCalls: calls.filter((c) => (c.duration || 0) >= 70),
     shortCalls: calls.filter((c) => (c.duration || 0) < 70),
     calls,
-    attempted: totalAttempts >= 1,
+    attempted: outboundAttempts >= 1 || realCalls >= 1 || liveTransfers >= 1,
     vonageCalls: vonageCallsAfterLead,
     _source: "ghl",
     _diag: {
@@ -245,16 +250,35 @@ async function getCallSummary(contactId, leadAddedAt) {
 export const _internal = { getCallSummary, checkSuppressionLocal, checkSuppressionGHL };
 
 // ---------- Per-level suppression deciders ----------
+//
+// "outboundAttempts" = any outbound dial (any duration) for this contact.
+// "realCalls"        = any call (INBOUND or outbound) with duration ≥70s and
+//                       not a live transfer. Inbound counts because if the
+//                       customer calls us back and we talk for 70+ seconds,
+//                       that's real contact regardless of who dialed first
+//                       (Joel case).
+// "liveTransfers"    = any call (either direction) that ended in a transfer
+//                       label like "transfer:sales".
 
-// 3-min: any outbound attempt silences the alert.
+// 3-min: silenced by ANY contact at all.
 function isSuppressedForLevel1(summary) {
-  return (summary.totalAttempts || 0) >= 1;
+  return (
+    (summary.outboundAttempts || summary.totalAttempts || 0) >= 1 ||
+    (summary.realCalls || 0) >= 1 ||
+    (summary.liveTransfers || 0) >= 1
+  );
 }
 
-// 10-min: only a real conversation (≥70s) or a live transfer silences the alert.
-// Just attempts ≥1 are NOT enough — that's the escalation we want to catch.
+// 10-min: silenced by EITHER a genuine conversation/transfer, OR 2+ outbound
+// dials. So Robert (dispatchers called him twice within 10 min without
+// reaching him) doesn't get escalated. Escalation fires only when dispatchers
+// essentially gave up — 0 or 1 attempt, no real conversation, no transfer.
 function isSuppressedForLevel2(summary) {
-  return (summary.realCalls || 0) >= 1 || (summary.liveTransfers || 0) >= 1;
+  return (
+    (summary.outboundAttempts || summary.totalAttempts || 0) >= 2 ||
+    (summary.realCalls || 0) >= 1 ||
+    (summary.liveTransfers || 0) >= 1
+  );
 }
 
 // ---------- Alert firing ----------
@@ -281,7 +305,7 @@ async function fireAlert({ contactId, contactName, phone, leadAddedAt, level }) 
         }
       }
       console.log(
-        `[live-alert] suppressed level=${level} (${summary._source}) contact=${contactId} real=${summary.realCalls} lt=${summary.liveTransfers} att=${summary.totalAttempts}`
+        `[live-alert] suppressed level=${level} (${summary._source}) contact=${contactId} real=${summary.realCalls} lt=${summary.liveTransfers} outAtt=${summary.outboundAttempts ?? summary.totalAttempts}`
       );
       return;
     }
@@ -338,8 +362,13 @@ export async function onNewLead({ contactId, contactName, phone, leadAddedAt }) 
 
   const leadDate = new Date(leadAddedAt || Date.now());
   if (!isBusinessHours(leadDate)) {
+    // Overnight leads do NOT schedule the 3-min / 10-min timers — the
+    // dispatchers aren't on shift to receive the call. Instead, the
+    // morning catch-up cron at 8:15 AM ET scans all overnight leads and
+    // fires a single summary alert for any that still haven't been
+    // contacted by then.
     console.log(
-      `[live-alert] outside business hours (8 AM–9 PM ET), skipping ${contactId} @ ${leadDate.toISOString()}`
+      `[live-alert] overnight lead (outside 8 AM–9 PM ET), skipping live timers, will be checked at 8:15 AM by morning catch-up: ${contactId} @ ${leadDate.toISOString()}`
     );
     return;
   }
@@ -431,4 +460,217 @@ export function initAlerts() {
     }`
   );
   return { rearmed, dropped };
+}
+
+// =====================================================================
+// Morning catch-up — fires once a day at 8:15 AM ET. Scans every lead that
+// arrived overnight (9 PM previous day through 8 AM today) and emits a
+// single summary alert listing any that still haven't been contacted by
+// dispatchers. Overnight leads do NOT get the live 3-min / 10-min timers,
+// so this is their only alert path.
+//
+// "Contacted" = same suppression rule used for live alerts:
+//   - 1+ outbound dial attempt (any duration), OR
+//   - 1+ real call ≥70s (inbound or outbound), OR
+//   - 1+ live transfer
+//
+// One email per morning. No escalation — the dispatchers see this at the
+// start of the shift and the response time rolls into the regular daily
+// metrics from that point on.
+// =====================================================================
+export async function runMorningCatchUp(opts = {}) {
+  const dryRun = !!opts.dryRun;
+  const now = DateTime.now().setZone(TZ);
+  // Window: yesterday 9 PM ET → today 8 AM ET.
+  const todayShiftStart = now.set({
+    hour: BUSINESS_START_HOUR,
+    minute: 0,
+    second: 0,
+    millisecond: 0,
+  });
+  const overnightStart = todayShiftStart.minus({ hours: 11 }); // 11h before 8 AM = 9 PM previous day
+  const fromIso = overnightStart.toUTC().toISO();
+  const toIso = todayShiftStart.toUTC().toISO();
+  const fromMs = overnightStart.toMillis();
+  const toMs = todayShiftStart.toMillis();
+
+  console.log(
+    `[morning-catchup] window=${overnightStart.toISO()} → ${todayShiftStart.toISO()} (9 PM ET prev → 8 AM ET today)`
+  );
+
+  let contacts = [];
+  try {
+    contacts = await ghl.searchContacts({
+      from: fromIso,
+      to: toIso,
+      limit: 500,
+    });
+  } catch (e) {
+    console.error("[morning-catchup] searchContacts failed:", e?.message);
+    return { ok: false, error: e?.message };
+  }
+
+  const inWindow = [];
+  for (const c of contacts || []) {
+    if (!c?.id || !c.dateAdded) continue;
+    const t = new Date(c.dateAdded).getTime();
+    if (t < fromMs || t > toMs) continue;
+    inWindow.push(c);
+  }
+
+  const uncontacted = [];
+  for (const c of inWindow) {
+    let summary;
+    try {
+      summary = await getCallSummary(c.id, c.dateAdded);
+    } catch (e) {
+      console.error(
+        `[morning-catchup] getCallSummary failed for ${c.id}:`,
+        e?.message
+      );
+      // Treat fetch failure as "unknown" — better to alert than miss.
+      summary = { outboundAttempts: 0, realCalls: 0, liveTransfers: 0 };
+    }
+    const contacted =
+      (summary.outboundAttempts || summary.totalAttempts || 0) >= 1 ||
+      (summary.realCalls || 0) >= 1 ||
+      (summary.liveTransfers || 0) >= 1;
+    if (contacted) continue;
+
+    const t = new Date(c.dateAdded).getTime();
+    uncontacted.push({
+      contactId: c.id,
+      name:
+        `${c.firstName || ""} ${c.lastName || ""}`.trim() ||
+        c.contactName ||
+        "(unnamed)",
+      phone: c.phone || "(no phone)",
+      source: c.source || "(no source)",
+      addedAt: c.dateAdded,
+      addedAtFmt: fmtETShort(new Date(c.dateAdded)),
+      ageMinutes: Math.round((Date.now() - t) / 60000),
+    });
+  }
+
+  const result = {
+    ok: true,
+    dryRun,
+    windowFrom: overnightStart.toISO(),
+    windowTo: todayShiftStart.toISO(),
+    overnightContactCount: inWindow.length,
+    uncontactedCount: uncontacted.length,
+    uncontacted,
+  };
+
+  if (!uncontacted.length) {
+    console.log(
+      `[morning-catchup] all ${inWindow.length} overnight leads contacted, no alert`
+    );
+    return result;
+  }
+
+  if (dryRun) {
+    console.log(
+      `[morning-catchup] DRY-RUN would fire for ${uncontacted.length} uncontacted leads (of ${inWindow.length} overnight)`
+    );
+    return result;
+  }
+
+  const html = renderMorningCatchUpHtml({
+    uncontacted,
+    overnightTotal: inWindow.length,
+    windowFromFmt: overnightStart.toFormat("LLL d, h:mm a") + " ET",
+    windowToFmt: todayShiftStart.toFormat("LLL d, h:mm a") + " ET",
+  });
+
+  try {
+    await sendMail({
+      to: ALERT_RECIPIENT,
+      subject: `🔴 ${uncontacted.length} overnight lead${
+        uncontacted.length === 1 ? "" : "s"
+      } still uncalled — morning catch-up`,
+      html,
+    });
+    for (const u of uncontacted) {
+      try {
+        Alerts.log({
+          contactId: u.contactId,
+          contactName: u.name,
+          phone: u.phone,
+          leadAddedAt: u.addedAt,
+          minutesElapsed: u.ageMinutes,
+          level: 3, // 3 = morning-catchup escalation tier
+        });
+      } catch {}
+    }
+    console.log(
+      `[morning-catchup] FIRED with ${uncontacted.length} uncontacted leads (of ${inWindow.length} overnight contacts)`
+    );
+  } catch (e) {
+    console.error("[morning-catchup] sendMail failed:", e?.message);
+    result.sendError = e?.message;
+  }
+  return result;
+}
+
+function renderMorningCatchUpHtml({
+  uncontacted,
+  overnightTotal,
+  windowFromFmt,
+  windowToFmt,
+}) {
+  const rows = uncontacted
+    .map(
+      (u) => `
+    <tr style="border-bottom:1px solid #F3F4F6">
+      <td style="padding:8px 4px"><strong>${escapeHtml(u.name)}</strong></td>
+      <td style="padding:8px 4px;font-variant-numeric:tabular-nums">${escapeHtml(u.phone)}</td>
+      <td style="padding:8px 4px;color:#6B7280;font-size:12px">${escapeHtml(u.source)}</td>
+      <td style="padding:8px 4px;color:#6B7280">${escapeHtml(u.addedAtFmt)}</td>
+      <td style="padding:8px 4px"><strong style="color:#DC2626">${formatAge(u.ageMinutes)}</strong></td>
+    </tr>`
+    )
+    .join("");
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#FEF2F2;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#1F2937">
+<div style="max-width:720px;margin:0 auto;padding:24px 18px">
+<div style="background:#DC2626;color:#fff;border-radius:12px;padding:16px 20px;margin-bottom:14px">
+<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;opacity:.85">Morning catch-up</div>
+<div style="font-size:18px;font-weight:700;line-height:1.2">🔴 ${uncontacted.length} overnight lead${uncontacted.length === 1 ? "" : "s"} still uncalled at 8:15 AM</div>
+</div>
+<div style="background:#fff;border:1px solid #E5E7EB;border-radius:12px;padding:18px 22px">
+<p style="margin:0 0 14px;font-size:14px;color:#1F2937">These leads arrived between <strong>${escapeHtml(windowFromFmt)}</strong> and <strong>${escapeHtml(windowToFmt)}</strong>. Dispatchers have had 15 minutes since shift start (8:00 AM ET) and none of them have been called or transferred yet.</p>
+<table style="font-size:13px;line-height:1.6;width:100%;border-collapse:collapse">
+<thead><tr style="text-align:left;color:#6B7280;font-size:11px;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #E5E7EB">
+<th style="padding:8px 4px">Lead</th>
+<th style="padding:8px 4px">Phone</th>
+<th style="padding:8px 4px">Source</th>
+<th style="padding:8px 4px">Arrived</th>
+<th style="padding:8px 4px">Age</th>
+</tr></thead>
+<tbody>${rows}</tbody>
+</table>
+<div style="margin-top:14px;padding-top:14px;border-top:1px solid #E5E7EB;font-size:12px;color:#6B7280">
+${uncontacted.length} of ${overnightTotal} overnight leads still uncalled. No further alerts will fire for these — they roll into the regular daily metrics from here. This summary fires once a day at 8:15 AM ET.
+</div>
+</div>
+<p style="color:#6B7280;font-size:12px;margin-top:14px;text-align:center">Local AC Reports Bot · morning catch-up v1</p>
+</div>
+</body></html>`;
+}
+
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function formatAge(minutes) {
+  if (minutes < 60) return `${minutes} min`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
 }
