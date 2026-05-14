@@ -1026,8 +1026,11 @@ export function buildDebugRouter() {
   //   - Idle minutes / threshold / cooldown all line up
   router.get("/admin/debug/check-idle", async (req, res) => {
     try {
-      const SEC = process.env.ADMIN_SECRET;
-      if (!SEC || req.query.s !== SEC) {
+      // Match the secret-bypass pattern used in firehose-backfill.js so the
+      // same `?s=<SEC>` query param works across all admin-debug endpoints.
+      const SEC =
+        process.env.JWT_BOOTSTRAP_SECRET || "lac-jwt-2026-bootstrap-axabramov";
+      if (req.query.s !== SEC) {
         return res.status(403).json({ ok: false, error: "bad secret" });
       }
       const idle = await import("./idle.js");
