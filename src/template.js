@@ -130,38 +130,54 @@ const fmtMinutes = (mins) => {
   return `${h}h ${m}m`;
 };
 
-// v12: defensive time extractor — tries every field/format we've seen on
-// call objects. Returns "HH:mm:ss" in ET, or "" if nothing useful.
+// v12/v14: defensive time extractor — first tries every common field, then
+// falls back to scanning EVERY string property on c and c.raw for an
+// ISO-shape or HH:MM:SS pattern. Always returns the most useful time it can.
 function _extractCallTime(c) {
   if (!c) return "";
   // 1. Luxon DateTime (what enrichCalls sets as c.dt)
   if (c.dt && typeof c.dt.toFormat === "function" && c.dt.isValid) {
     return c.dt.toFormat("HH:mm:ss");
   }
-  // 2. Try a bunch of likely string/number fields, in priority order.
-  const candidates = [
-    c.raw && c.raw.date_added, c.raw && c.raw.dateAdded,
-    c.raw && c.raw.dt, c.raw && c.raw.timestamp,
-    c.raw && c.raw.startedAt, c.raw && c.raw.started_at,
-    c.dateAdded, c.date_added, c.startedAt, c.started_at,
-  ].filter((v) => v !== undefined && v !== null && v !== "");
-  for (const v of candidates) {
-    if (typeof v === "number") {
-      const dt = DateTime.fromMillis(v).setZone(TZ);
+  // 2. Common field names + format detection.
+  function _tryString(s) {
+    if (!s) return null;
+    if (typeof s === "number") {
+      // Plausible JS millis (year 2000+)?
+      if (s > 946684800000 && s < 4102444800000) {
+        const dt = DateTime.fromMillis(s).setZone(TZ);
+        if (dt.isValid) return dt.toFormat("HH:mm:ss");
+      }
+      return null;
+    }
+    const str = String(s);
+    const iso = str.match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+    if (iso) {
+      const dt = DateTime.fromISO(str.replace(" ", "T"), { zone: "utc" }).setZone(TZ);
       if (dt.isValid) return dt.toFormat("HH:mm:ss");
     }
-    const s = String(v);
-    // ISO with T or space separator
-    const isoMatch = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
-    if (isoMatch) {
-      const dt = DateTime.fromISO(s.replace(" ", "T"), { zone: "utc" }).setZone(TZ);
-      if (dt.isValid) return dt.toFormat("HH:mm:ss");
-    }
-    // Plain HH:MM:SS (probably already local ET)
-    const hmsMatch = s.match(/(\d{2}):(\d{2}):(\d{2})/);
-    if (hmsMatch) return `${hmsMatch[1]}:${hmsMatch[2]}:${hmsMatch[3]}`;
+    const hms = str.match(/^(\d{2}):(\d{2}):(\d{2})$/);
+    if (hms) return `${hms[1]}:${hms[2]}:${hms[3]}`;
+    return null;
   }
-  // 3. Last resort: c.hour → "HH:00"
+  // 3. Brute-force scan of every string/number prop on c and c.raw.
+  function _scanObj(obj, depth = 0) {
+    if (!obj || typeof obj !== "object" || depth > 2) return null;
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (typeof v === "string" || typeof v === "number") {
+        const t = _tryString(v);
+        if (t) return t;
+      } else if (v && typeof v === "object" && depth < 2) {
+        const t = _scanObj(v, depth + 1);
+        if (t) return t;
+      }
+    }
+    return null;
+  }
+  const found = _scanObj(c);
+  if (found) return found;
+  // 4. Last resort: c.hour → "HH:00"
   if (typeof c.hour === "number") return `${String(c.hour).padStart(2, "0")}:00`;
   return "";
 }
@@ -532,8 +548,9 @@ export function renderCallActivitySection(dispatch, excelData) {
   const realCallRows = realCalls.map((c) => {
     const cid = c.raw?.contact_id;
     const match = cid ? rowByContact.get(cid) : null;
-    // v11: enrichCalls() always sets c.contactName when contactMap has the contact.
-    const customer = c.contactName || match?.row?.leadName || match?.row?.name || c.phone || "—";
+    // v11/v14: enrichCalls() sets c.contactName when contactMap has the contact;
+    // fall back to lead row, phone, or "(unknown contact)" so we never show "—".
+    const customer = c.contactName || match?.row?.leadName || match?.row?.name || c.phone || c.raw?.phone || "(unknown contact)";
     const catPill = !match
       ? "—"
       : match.cat === "NEW" ? '<span class="cat-new">NEW</span>'
@@ -784,15 +801,15 @@ export function renderLeadActivitySection(excelData, opts = {}) {
       : (row.bookedToday ? '<span class="pill-physical">Booked</span>' : "—");
     // Attempts: prefer enriched (count of all calls to this contact today).
     const attempts = enriched.attempts || row.attempts || row.callCount || (enriched.inProgress ? "0 (in progress)" : "0");
-    // Booking Method (v10): from excelData.bookingSources (Live Transfer / Call / SMS / —).
+    // Booking Method — v14: compute inline from this contact's calls so the
+    // value always agrees with Section 6 funnel.
     const cidForMethod = row._id || row.contactId || row.contact_id || row.id;
-    const bSrc = (excelData.bookingSources && excelData.bookingSources.get) ? excelData.bookingSources.get(cidForMethod) : null;
     let bookingMethod = "—";
     if (row.bookedToday) {
-      if (bSrc?.method === "Live Transfer") bookingMethod = '<span class="badge badge-warn">Live Transfer</span>';
-      else if (bSrc?.method === "Call") bookingMethod = '<span class="badge badge-good">Call</span>';
-      else if (bSrc?.method === "SMS") bookingMethod = '<span class="badge badge-bad" style="background:#fee2e2;color:#991b1b">SMS</span>';
-      else bookingMethod = '<span class="small">?</span>';
+      const _myCalls = (excelData.calls || []).filter((c) => (c.raw && c.raw.contact_id) === cidForMethod);
+      if (_myCalls.some((c) => c.bucket === "live_transfer")) bookingMethod = '<span class="badge badge-warn">Live Transfer</span>';
+      else if (_myCalls.some((c) => c.bucket === "real_call" || (Number(c.durationSec || 0) >= 70))) bookingMethod = '<span class="badge badge-good">Call</span>';
+      else bookingMethod = '<span class="badge badge-bad" style="background:#fee2e2;color:#991b1b">SMS</span>';
     }
     const lt = (row.activity === "Live Transfer" || row.hasLiveTransfer || row.liveTransfers) ? "Yes" : "";
     // Row color: green for Physical, yellow for Phone Booked, default for the rest.
@@ -881,9 +898,6 @@ export function renderLeadActivitySection(excelData, opts = {}) {
       <b>Resp</b> = time from "Came In" to "First Call". <b>Real Call</b> = longest call ≥70s today.
     </p>
     <div class="summary-footer"><b>Summary:</b> ${newLeadRows.length} new + ${newOppRows.length} resub + ${reactivatedRows.length} reactivated = ${totalBooked} bookings today (${totalPhys} <span class="pill-physical">Physical</span> · ${totalPhone} <span class="pill-phone">Phone Booking</span>).</div>
-    <!-- DEBUG_CALLS_BEGIN
-${debugDump}
-DEBUG_CALLS_END -->
   </div>`;
 }
 
@@ -1318,19 +1332,27 @@ export function renderSection6(excelData) {
       : cat === "REACT"
       ? ` · ${row.ageDays ? row.ageDays + "d old" : ""}`
       : "";
-    // v11: pull booking method + booker dispatcher from the v10 bookingSources
-    // map so the funnel narrative agrees with Section 3's Booking Method column.
+    // v14: compute booking method DIRECTLY from this contact's calls instead
+    // of trusting bookingSources.get(cid) — bookingSources lookup is failing
+    // for some rows (key mismatch between newOppRows._id and what enrich
+    // stores). This guarantees the pill renders for every booked row.
     const cid = row._id || row.contactId || row.contact_id || row.id;
-    const bSrc = (excelData.bookingSources && excelData.bookingSources.get) ? excelData.bookingSources.get(cid) : null;
+    const myCalls = (excelData.calls || []).filter((c) => (c.raw && c.raw.contact_id) === cid);
+    let methodInline = "Unknown";
+    if (myCalls.some((c) => c.bucket === "live_transfer")) methodInline = "Live Transfer";
+    else if (myCalls.some((c) => c.bucket === "real_call" || (Number(c.durationSec || 0) >= 70))) methodInline = "Call";
+    else if (row.bookedToday) methodInline = "SMS"; // booked but no call → SMS
     let methodPill = "";
-    if (bSrc?.method === "Live Transfer") methodPill = ' <span class="badge badge-warn">via Live Transfer</span>';
-    else if (bSrc?.method === "Call") methodPill = ' <span class="badge badge-good">via Call</span>';
-    else if (bSrc?.method === "SMS") methodPill = ' <span class="badge badge-bad" style="background:#fee2e2;color:#991b1b">via SMS</span>';
+    if (methodInline === "Live Transfer") methodPill = ' <span class="badge badge-warn">via Live Transfer</span>';
+    else if (methodInline === "Call") methodPill = ' <span class="badge badge-good">via Call</span>';
+    else if (methodInline === "SMS") methodPill = ' <span class="badge badge-bad" style="background:#fee2e2;color:#991b1b">via SMS</span>';
+    // Dispatcher: prefer bookingSources (has SMS sender from Conversations API), else row's caller fields.
+    const bSrc = (excelData.bookingSources && excelData.bookingSources.get) ? excelData.bookingSources.get(cid) : null;
     const disp = bSrc?.dispatcher || row.firstCaller || row.dispatcher || row.longestCallDispatcher || "";
     // Hide response time entirely if it's negative (resub bug — measured from
     // original lead date instead of resubmission timestamp).
     const respOk = resp && cat !== "REACT" && !/^-/.test(String(resp)) && resp !== "Never";
-    const showDur = bSrc?.method === "SMS" ? "" : (dur ? "· " + esc(dur) + " real call" : "");
+    const showDur = methodInline === "SMS" ? "" : (dur ? "· " + esc(dur) + " real call" : "");
     return `<div style="font-size:13px;padding:4px 0;border-top:1px dashed #e5e7eb">→ <b>${esc(name)}</b> <span class="small">(${esc(source)} · ${cat}${ageSuffix})</span> &nbsp;${bookingTypePill}${methodPill}<br>
       <span class="small" style="margin-left:18px">${stage ? esc(stage) : "—"} &nbsp;·&nbsp; ${esc(disp)} ${showDur} ${respOk ? "· response " + esc(resp) : ""}</span>
     </div>`;
