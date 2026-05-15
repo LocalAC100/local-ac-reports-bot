@@ -725,6 +725,7 @@ export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
   const appointmentsBooked = [];
   const bucketBookings = { morning: 0, noon: 0, afternoon: 0 };
   const seenOppIds = new Set();
+  const _bookingDiag = []; // populated below for diagnostic surfacing
   for (const p of reportedPipelines) {
     // Pull opps across ALL statuses, not just "open". For dates more than a
     // day or two in the past, bookings will have moved to "won" / "lost" /
@@ -734,13 +735,20 @@ export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
     // Use the *paginated* variant so we walk past the first 100. A busy
     // pipeline can have hundreds of new opps per day; single-page fetches
     // miss bookings from any date that's been pushed past the first page.
+    const statuses = ["open", "won", "lost", "abandoned"];
     const oppsBatches = await Promise.all(
-      ["open", "won", "lost", "abandoned"].map((status) =>
+      statuses.map((status) =>
         ghl
           .searchAllOpportunities({ pipelineId: p.id, status, maxPages: 20 })
-          .catch(() => [])
+          .catch((e) => {
+            _bookingDiag.push(`${p.name}/${status}=ERR(${e?.message?.slice(0,40)})`);
+            return [];
+          })
       )
     );
+    for (let i = 0; i < statuses.length; i++) {
+      _bookingDiag.push(`${p.name}/${statuses[i]}=${oppsBatches[i].length}`);
+    }
     const opps = oppsBatches.flat();
     for (const o of opps) {
       // Same opp can appear in multiple status buckets if the API quirks; dedupe.
@@ -1023,6 +1031,7 @@ export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
     byDispatcher: byDispatcherOut,
     responseTimeAlerts,
     appointmentsBooked,
+    _bookingDiag,
     timeOfDay,
     // v4: pipeline scope label so the email header can show it
     pipelineLabel: REPORTED_PIPELINE_NAMES.join(" + "),

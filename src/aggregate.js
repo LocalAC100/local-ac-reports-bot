@@ -150,7 +150,8 @@ function renderCallActivityAggregated(dispatch, { from, to }) {
     m[b.kind || "(none)"] = (m[b.kind || "(none)"] || 0) + 1;
     return m;
   }, {});
-  const diagnosticLine = `appointmentsBooked.length=${allBooked.length} kinds=${JSON.stringify(kindCounts)}`;
+  const oppCounts = (dispatch._bookingDiag || []).join(" | ");
+  const diagnosticLine = `appointmentsBooked.length=${allBooked.length} kinds=${JSON.stringify(kindCounts)} | opps: ${oppCounts || "(no diag)"}`;
   const totalCalls = real + voicemail + attempt;
   const avgPerDay = (n) => (dayCount ? (n / dayCount).toFixed(1) : "0");
   const avgResp = dispatch.avgResponseMinOverall;
