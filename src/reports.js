@@ -747,10 +747,18 @@ export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
       if (o.id && seenOppIds.has(o.id)) continue;
       if (o.id) seenOppIds.add(o.id);
       const stage = String(o.pipelineStageName ?? "").toLowerCase();
+      const oppStatus = String(o.status ?? "").toLowerCase();
       const isPhys = stage.includes("appointment booked") || stage.includes("appt. booked") || stage.includes("appt booked");
       const isPh = stage.includes("over phone sale") || stage.includes("over phone booked") || stage.includes("phone sale");
       const isXfer = stage.includes("live transfer");
-      if (!isPhys && !isPh && !isXfer) continue;
+      // status=won means the appointment happened — was a booking at some
+      // point even if the dispatcher has since moved the stage forward
+      // ("Completed" / "Service Done" / etc.). Daily reports don't see this
+      // because today's bookings haven't been serviced yet; weekly/monthly
+      // views look back at bookings that already converted to won, so we
+      // need this branch or they show 0.
+      const isWonBooking = oppStatus === "won";
+      if (!isPhys && !isPh && !isXfer && !isWonBooking) continue;
 
       // Only count bookings whose OPP was CREATED inside this report window.
       // Previously we used `updatedAt`, which changes on any opp edit (a call
@@ -769,16 +777,24 @@ export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
         [...byDispatcher.values()].find((d) => d.ghlUserId === o.assignedTo) || {
           name: "—",
         };
-      if (isPhys && dispatcher.physBookings != null) dispatcher.physBookings += 1;
-      if (isPh && dispatcher.phBookings != null) dispatcher.phBookings += 1;
-      if (isXfer && dispatcher.liveTransfers != null)
-        dispatcher.liveTransfers += 1;
+      // Classify. Stage match wins; otherwise (won-only branch) default to
+      // physical, since most Local AC bookings are physical site visits.
+      // Phone-sale clue: stage name contains "phone".
+      let kind;
+      if (isXfer) kind = "live_transfer";
+      else if (isPh) kind = "phone_sale";
+      else if (isPhys) kind = "physical";
+      else if (isWonBooking && stage.includes("phone")) kind = "phone_sale";
+      else kind = "physical"; // won-default
+      if (kind === "physical" && dispatcher.physBookings != null) dispatcher.physBookings += 1;
+      if (kind === "phone_sale" && dispatcher.phBookings != null) dispatcher.phBookings += 1;
+      if (kind === "live_transfer" && dispatcher.liveTransfers != null) dispatcher.liveTransfers += 1;
       appointmentsBooked.push({
         leadName: o.contact?.name || o.name || "(unnamed)",
         time: fmtTime(created),
         dispatcher: dispatcher.name,
         stage: o.pipelineStageName,
-        kind: isPhys ? "physical" : isPh ? "phone_sale" : "live_transfer",
+        kind,
       });
       if (includeTimeOfDay) bucketBookings[bucketFor(created)] += 1;
     }
