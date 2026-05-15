@@ -767,6 +767,13 @@ export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
       // need this branch or they show 0.
       const isWonBooking = oppStatus === "won";
       if (!isPhys && !isPh && !isXfer && !isWonBooking) continue;
+      // DIAG: track every opp that matched stage/status so we can see how
+      // the date filter is treating them.
+      if (_bookingDiag.length < 200) {
+        _bookingDiag.push(
+          `match:${p.name}/${oppStatus}/${(o.pipelineStageName||"").slice(0,18)} dateAdded=${o.dateAdded||"?"}`
+        );
+      }
 
       // Only count bookings whose OPP was CREATED inside this report window.
       // Previously we used `updatedAt`, which changes on any opp edit (a call
@@ -778,8 +785,19 @@ export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
       const created = DateTime.fromISO(
         o.dateAdded || o.createdAt || ""
       ).setZone(TZ);
-      if (!created.isValid) continue;
-      if (created < from || created > to) continue;
+      if (!created.isValid) {
+        if (_bookingDiag.length < 220)
+          _bookingDiag.push(`  -> invalid date`);
+        continue;
+      }
+      if (created < from || created > to) {
+        if (_bookingDiag.length < 220)
+          _bookingDiag.push(
+            `  -> outOfWindow (created=${created.toISO()} from=${from.toISO()} to=${to.toISO()})`
+          );
+        continue;
+      }
+      if (_bookingDiag.length < 220) _bookingDiag.push(`  -> KEPT`);
 
       const dispatcher =
         [...byDispatcher.values()].find((d) => d.ghlUserId === o.assignedTo) || {
