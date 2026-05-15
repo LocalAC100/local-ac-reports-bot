@@ -133,6 +133,16 @@ function renderCallActivityAggregated(dispatch, { from, to }) {
     liveTransfers += d.liveTransfers || 0;
     sms += d.sms || 0;
   }
+  // Bookings come from dispatch.appointmentsBooked — the authoritative source
+  // populated from Orlando/Tampa pipeline opps. Per-dispatcher attribution can
+  // miss bookings whose assigned-to user isn't a tracked dispatcher (e.g.
+  // INBOUND), so the total here is more honest than summing dispatcher rows.
+  const bookings = (dispatch.appointmentsBooked || []).filter(
+    (b) => b.kind === "physical" || b.kind === "phone_sale"
+  );
+  const physBookings = bookings.filter((b) => b.kind === "physical").length;
+  const phoneBookings = bookings.filter((b) => b.kind === "phone_sale").length;
+  const bookingsTotal = bookings.length;
   const totalCalls = real + voicemail + attempt;
   const avgPerDay = (n) => (dayCount ? (n / dayCount).toFixed(1) : "0");
   const avgResp = dispatch.avgResponseMinOverall;
@@ -152,6 +162,11 @@ function renderCallActivityAggregated(dispatch, { from, to }) {
         </div>`
       : "";
 
+  const bookingsStrip = `<div style="margin-top:12px;padding:10px 14px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;font-size:13px;color:#065f46">
+    <b>Bookings:</b> ${bookingsTotal} total <span style="color:#047857">(${physBookings} Physical · ${phoneBookings} Phone)</span>
+    <span style="color:#6b7280;margin-left:8px">avg ${avgPerDay(bookingsTotal)}/day across the range</span>
+  </div>`;
+
   return `<section style="margin-bottom:24px">
     <h2 style="margin:0 0 12px;font-size:18px;color:#1b2435">2. Call Activity (range totals)</h2>
     <div style="display:flex;flex-wrap:wrap;gap:10px">
@@ -162,8 +177,9 @@ function renderCallActivityAggregated(dispatch, { from, to }) {
       ${stat("Attempts", attempt)}
       ${stat("SMS", sms, "#991b1b")}
     </div>
+    ${bookingsStrip}
     ${respStrip}
-    <div style="font-size:12px;color:#7a8294;margin-top:6px">Unique-contact totals are summed per-dispatcher; same contact called by multiple dispatchers may be double-counted.</div>
+    <div style="font-size:12px;color:#7a8294;margin-top:6px">Bookings count comes from Orlando/Tampa pipeline opps (any status). The per-dispatcher column in Section 4 only attributes bookings whose assigned-to user is a tracked dispatcher; the total above is authoritative.</div>
   </section>`;
 }
 
