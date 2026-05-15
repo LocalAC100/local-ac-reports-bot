@@ -730,10 +730,14 @@ export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
     // day or two in the past, bookings will have moved to "won" / "lost" /
     // "abandoned" — fetching only "open" hid them entirely from multi-day
     // aggregated views (weekly/monthly showed 0 bookings).
+    //
+    // Use the *paginated* variant so we walk past the first 100. A busy
+    // pipeline can have hundreds of new opps per day; single-page fetches
+    // miss bookings from any date that's been pushed past the first page.
     const oppsBatches = await Promise.all(
       ["open", "won", "lost", "abandoned"].map((status) =>
         ghl
-          .searchOpportunities({ pipelineId: p.id, status })
+          .searchAllOpportunities({ pipelineId: p.id, status, maxPages: 20 })
           .catch(() => [])
       )
     );
