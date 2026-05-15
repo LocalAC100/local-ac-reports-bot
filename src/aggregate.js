@@ -144,14 +144,6 @@ function renderCallActivityAggregated(dispatch, { from, to }) {
   const physBookings = bookings.filter((b) => b.kind === "physical").length;
   const phoneBookings = bookings.filter((b) => b.kind === "phone_sale").length;
   const bookingsTotal = bookings.length;
-  // Temporary diagnostic: counts by kind so we can verify the booking
-  // classification is working as expected in production.
-  const kindCounts = allBooked.reduce((m, b) => {
-    m[b.kind || "(none)"] = (m[b.kind || "(none)"] || 0) + 1;
-    return m;
-  }, {});
-  const oppCounts = (dispatch._bookingDiag || []).join(" | ");
-  const diagnosticLine = `appointmentsBooked.length=${allBooked.length} kinds=${JSON.stringify(kindCounts)} | opps: ${oppCounts || "(no diag)"}`;
   const totalCalls = real + voicemail + attempt;
   const avgPerDay = (n) => (dayCount ? (n / dayCount).toFixed(1) : "0");
   const avgResp = dispatch.avgResponseMinOverall;
@@ -174,7 +166,6 @@ function renderCallActivityAggregated(dispatch, { from, to }) {
   const bookingsStrip = `<div style="margin-top:12px;padding:10px 14px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;font-size:13px;color:#065f46">
     <b>Bookings:</b> ${bookingsTotal} total <span style="color:#047857">(${physBookings} Physical · ${phoneBookings} Phone)</span>
     <span style="color:#6b7280;margin-left:8px">avg ${avgPerDay(bookingsTotal)}/day across the range</span>
-    <div style="font-size:11px;color:#9ca3af;margin-top:6px;font-family:monospace">diag: ${escape(diagnosticLine)}</div>
   </div>`;
 
   return `<section style="margin-bottom:24px">

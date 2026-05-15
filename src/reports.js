@@ -725,8 +725,11 @@ export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
   const appointmentsBooked = [];
   const bucketBookings = { morning: 0, noon: 0, afternoon: 0 };
   const seenOppIds = new Set();
-  const _bookingDiag = []; // populated below for diagnostic surfacing
   for (const p of reportedPipelines) {
+    // GHL's /opportunities/search returns pipelineStageId but NOT
+    // pipelineStageName for opps in many states. Resolve the name via the
+    // pipeline's own stages[] array, same as the contactStage map above.
+    const stageById = new Map((p.stages || []).map((s) => [s.id, s.name]));
     // Pull opps across ALL statuses, not just "open". For dates more than a
     // day or two in the past, bookings will have moved to "won" / "lost" /
     // "abandoned" — fetching only "open" hid them entirely from multi-day
@@ -735,56 +738,29 @@ export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
     // Use the *paginated* variant so we walk past the first 100. A busy
     // pipeline can have hundreds of new opps per day; single-page fetches
     // miss bookings from any date that's been pushed past the first page.
-    const statuses = ["open", "won", "lost", "abandoned"];
     const oppsBatches = await Promise.all(
-      statuses.map((status) =>
+      ["open", "won", "lost", "abandoned"].map((status) =>
         ghl
           .searchAllOpportunities({ pipelineId: p.id, status, maxPages: 20 })
-          .catch((e) => {
-            _bookingDiag.push(`${p.name}/${status}=ERR(${e?.message?.slice(0,40)})`);
-            return [];
-          })
+          .catch(() => [])
       )
     );
-    for (let i = 0; i < statuses.length; i++) {
-      _bookingDiag.push(`${p.name}/${statuses[i]}=${oppsBatches[i].length}`);
-    }
     const opps = oppsBatches.flat();
-    // DIAG: dump unique stage names so we can see what Local AC actually uses.
-    const stageCounts = new Map();
-    for (const o of opps) {
-      const sn = String(o.pipelineStageName ?? "(none)");
-      stageCounts.set(sn, (stageCounts.get(sn) || 0) + 1);
-    }
-    const topStages = [...stageCounts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 15)
-      .map(([n, c]) => `${n}=${c}`);
-    _bookingDiag.push(`stages@${p.name}: ${topStages.join(", ")}`);
     for (const o of opps) {
       // Same opp can appear in multiple status buckets if the API quirks; dedupe.
       if (o.id && seenOppIds.has(o.id)) continue;
       if (o.id) seenOppIds.add(o.id);
-      const stage = String(o.pipelineStageName ?? "").toLowerCase();
+      const stageName = stageById.get(o.pipelineStageId) || o.pipelineStageName || "";
+      const stage = String(stageName).toLowerCase();
       const oppStatus = String(o.status ?? "").toLowerCase();
       const isPhys = stage.includes("appointment booked") || stage.includes("appt. booked") || stage.includes("appt booked");
       const isPh = stage.includes("over phone sale") || stage.includes("over phone booked") || stage.includes("phone sale");
       const isXfer = stage.includes("live transfer");
-      // status=won means the appointment happened — was a booking at some
-      // point even if the dispatcher has since moved the stage forward
-      // ("Completed" / "Service Done" / etc.). Daily reports don't see this
-      // because today's bookings haven't been serviced yet; weekly/monthly
-      // views look back at bookings that already converted to won, so we
-      // need this branch or they show 0.
+      // status=won catches bookings that have been moved past the booking
+      // stage (e.g. to "Completed" / "Service Done") after the technician
+      // visited. Daily reports rarely see this; weekly/monthly do.
       const isWonBooking = oppStatus === "won";
       if (!isPhys && !isPh && !isXfer && !isWonBooking) continue;
-      // DIAG: track every opp that matched stage/status so we can see how
-      // the date filter is treating them.
-      if (_bookingDiag.length < 200) {
-        _bookingDiag.push(
-          `match:${p.name}/${oppStatus}/${(o.pipelineStageName||"").slice(0,18)} dateAdded=${o.dateAdded||"?"}`
-        );
-      }
 
       // Only count bookings whose OPP was CREATED inside this report window.
       // Previously we used `updatedAt`, which changes on any opp edit (a call
@@ -796,19 +772,8 @@ export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
       const created = DateTime.fromISO(
         o.dateAdded || o.createdAt || ""
       ).setZone(TZ);
-      if (!created.isValid) {
-        if (_bookingDiag.length < 220)
-          _bookingDiag.push(`  -> invalid date`);
-        continue;
-      }
-      if (created < from || created > to) {
-        if (_bookingDiag.length < 220)
-          _bookingDiag.push(
-            `  -> outOfWindow (created=${created.toISO()} from=${from.toISO()} to=${to.toISO()})`
-          );
-        continue;
-      }
-      if (_bookingDiag.length < 220) _bookingDiag.push(`  -> KEPT`);
+      if (!created.isValid) continue;
+      if (created < from || created > to) continue;
 
       const dispatcher =
         [...byDispatcher.values()].find((d) => d.ghlUserId === o.assignedTo) || {
@@ -1060,7 +1025,6 @@ export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
     byDispatcher: byDispatcherOut,
     responseTimeAlerts,
     appointmentsBooked,
-    _bookingDiag,
     timeOfDay,
     // v4: pipeline scope label so the email header can show it
     pipelineLabel: REPORTED_PIPELINE_NAMES.join(" + "),
