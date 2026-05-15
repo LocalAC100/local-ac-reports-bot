@@ -1196,6 +1196,43 @@ function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr, exclud
     const stageChanged = pipeline.oppStageChangedAt ? DateTime.fromISO(pipeline.oppStageChangedAt) : null;
     const bookedToday = bookingStages.includes(pipeline.stageName) && stageChanged?.isValid && stageChanged >= reportStart;
 
+    // v20.4 — Reactivation response time.
+    // Metric: time from the customer's FIRST inbound event today (call or SMS-
+    // worthy contact, captured as a call row here) to the dispatcher's FIRST
+    // outbound response after that.
+    //   - If the first inbound was answered live (real_call ≥70s)        → 0   ("Live")
+    //   - If inbound then outbound found later                              → diff in seconds
+    //   - If inbound but no outbound response yet                            → "Pending"
+    //   - If there's no inbound event today at all (dispatcher cold-called) → null ("—")
+    const sortedCalls = [...contactCalls].sort((a, b) => a.dt.toMillis() - b.dt.toMillis());
+    const firstInbound = sortedCalls.find((c) => c.direction === "inbound");
+    let _respSec = null;
+    let responseBucket = "—";
+    let responseTime = "—";
+    if (firstInbound) {
+      if (firstInbound.bucket === "real_call" || firstInbound.bucket === "live_transfer") {
+        _respSec = 0;
+        responseBucket = "Live";
+        responseTime = "Live";
+      } else {
+        const inboundMs = firstInbound.dt.toMillis();
+        const firstOut = sortedCalls.find(
+          (c) => c.direction === "outbound" && c.dt.toMillis() >= inboundMs
+        );
+        if (firstOut) {
+          _respSec = Math.round((firstOut.dt.toMillis() - inboundMs) / 1000);
+          responseTime = fmtDuration(_respSec);
+          if (_respSec <= 60) responseBucket = "≤ 1 min";
+          else if (_respSec <= 180) responseBucket = "≤ 3 min";
+          else if (_respSec <= 300) responseBucket = "≤ 5 min";
+          else responseBucket = "> 5 min (BAD)";
+        } else {
+          responseBucket = "Pending";
+          responseTime = "Pending";
+        }
+      }
+    }
+
     seen.add(id);
     out.push({
       _id: id,  // v19: needed by enrichBookingSources / template funnel lookups
@@ -1213,6 +1250,10 @@ function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr, exclud
       stage: pipeline.stageName || "",
       booked,
       bookedToday,
+      _respSec,                  // v20.4: numeric, used by template.js Resp badge
+      responseTime,              // v20.4: human-formatted ("1m 6s", "Live", "Pending", "—")
+      responseBucket,            // v20.4: bucket label ("≤ 1 min", "Live", etc)
+      _firstInboundAt: firstInbound ? firstInbound.dt.toFormat("HH:mm:ss") : null,
       _sortTs: best.dt.toMillis(),
     });
   }
@@ -1252,6 +1293,11 @@ function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr, exclud
       stage: pipeline.stageName || "",
       booked: true,
       bookedToday: true,  // v19: pass-2 only fires when stageChanged is TODAY
+      // v20.4: no call activity for pass-2 rows — response time doesn't apply.
+      _respSec: null,
+      responseTime: "—",
+      responseBucket: "—",
+      _firstInboundAt: null,
       _sortTs: 0,
     });
   }
@@ -1278,15 +1324,18 @@ function buildReactivatedLeads({ contactMap, pipelineMap, calls, dateStr, exclud
 function addReactivatedLeadsTab(wb, rows, stats) {
   const ws = wb.addWorksheet("Reactivated Leads");
   ws.views = [{ state: "frozen", ySplit: 4 }];
-  setColumnWidths(ws, [22, 16, 8, 13, 8, 22, 18, 12, 11, 22, 22, 10]);
+  // v20.4: added Inbound At + Response Time columns between Time (ET) and Duration.
+  setColumnWidths(ws, [22, 16, 8, 13, 8, 22, 18, 12, 12, 13, 11, 22, 22, 10]);
   applyTitleStyle(ws.getCell("A1"));
   ws.getCell("A1").value = `Reactivated Leads — Old contacts with activity today (${rows.length} leads, ${stats.booked} booked)`;
-  ws.getCell("A2").value = "Old lead = contact created before today. Activity = real call ≥70s, live transfer, or pipeline stage moved to a booked stage.";
+  ws.getCell("A2").value = "Old lead = contact created before today. Activity = real call ≥70s, live transfer, or pipeline stage moved to a booked stage. Response Time = elapsed between the customer's first inbound event today and the dispatcher's first outbound response (\"Live\" = inbound call answered live; \"—\" = no inbound event today, dispatcher cold-called).";
   ws.getCell("A2").font = { name: "Arial", size: 10, italic: true, color: { argb: "FF606060" } };
 
   const headers = [
     "Contact", "Phone", "Source", "Created", "Age (days)",
-    "Activity Today", "Dispatcher", "Time (ET)", "Duration",
+    "Activity Today", "Dispatcher", "Time (ET)",
+    "Inbound At", "Response Time",
+    "Duration",
     "Pipeline", "Stage",
     "Booked Today",
   ];
@@ -1298,7 +1347,10 @@ function addReactivatedLeadsTab(wb, rows, stats) {
     const row = ws.getRow(5 + i);
     row.values = [
       r.name, r.phone, r.source, r.dateAdded, r.ageDays,
-      r.activity, r.dispatcher, r.activityTime, r.durationFmt,
+      r.activity, r.dispatcher, r.activityTime,
+      r._firstInboundAt || "",
+      r.responseTime || "—",
+      r.durationFmt,
       r.pipeline, r.stage,
       r.bookedToday
         ? (r.stage === "Over Phone Booked" ? "Phone Booking"
@@ -1451,7 +1503,7 @@ function addBookingSourcesTab(wb, { newLeadRows, newOppRows, reactivatedRows, pi
       bookingType,
       src.dispatcher || r.firstCaller || r.dispatcher || r.longestCallDispatcher || "",
       r.longestCallDuration || r.durationFmt || "",
-      cat === "REACT" ? "N/A" : (r.responseTime || ""),
+      r.responseTime || (cat === "REACT" ? "—" : ""),
       r.cameIn || r.dateAdded || "",
       bookingTime,
       src.smsBody || "",

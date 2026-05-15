@@ -821,7 +821,26 @@ export function renderLeadActivitySection(excelData, opts = {}) {
     // (rowStyle is used in the <tr> tag below; legacy rowClass var removed.)
     const respSec = Number(row._respSec || 0);
     let respBadge = `<span class="small">${esc(resp)}</span>`;
-    if (cat !== "REACT" && respSec > 0) {
+    if (cat === "REACT") {
+      // v20.4 — REACT response time = elapsed between customer's first inbound
+      // event today and dispatcher's first outbound response.
+      //   row._respSec === null      → no inbound event today (dispatcher cold-called)
+      //   row._respSec === 0         → answered live on inbound (no wait)
+      //   row._respSec > 0           → real measured wait
+      //   row.responseBucket "Pending" → inbound seen but no response yet
+      if (row._respSec === 0) {
+        respBadge = `<span class="badge badge-good">Live</span>`;
+      } else if (typeof row._respSec === "number" && row._respSec > 0) {
+        if (row._respSec <= 60) respBadge = `<span class="badge badge-good">≤ 1 min</span>`;
+        else if (row._respSec <= 180) respBadge = `<span class="badge badge-warn">≤ 3 min</span>`;
+        else if (row._respSec <= 300) respBadge = `<span class="badge badge-warn">≤ 5 min</span>`;
+        else respBadge = `<span class="badge badge-bad">&gt; 5 min</span>`;
+      } else if (row.responseBucket === "Pending") {
+        respBadge = `<span class="badge badge-bad">Pending</span>`;
+      } else {
+        respBadge = `<span class="small">—</span>`;
+      }
+    } else if (respSec > 0) {
       // Note: respSec for RESUB rows is unreliable until the upstream excel-report
       // fix lands — it's measured from the original lead date rather than the
       // resubmission timestamp. Negative / huge values fall through to "—".
@@ -829,8 +848,6 @@ export function renderLeadActivitySection(excelData, opts = {}) {
       else if (respSec <= 180) respBadge = `<span class="badge badge-warn">≤ 3 min</span>`;
       else if (respSec <= 300) respBadge = `<span class="badge badge-warn">≤ 5 min</span>`;
       else respBadge = `<span class="badge badge-bad">&gt; 5 min</span>`;
-    } else if (cat === "REACT") {
-      respBadge = `<span class="small">N/A</span>`;
     } else if (respSec <= 0) {
       // Negative or zero — likely the resub bug. Show dash until fixed upstream.
       respBadge = `<span class="small">—</span>`;
