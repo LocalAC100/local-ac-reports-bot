@@ -739,12 +739,15 @@ export function renderLeadActivitySection(excelData, opts = {}) {
         <tr><td>&gt; 3 min</td><td>${s.gt3} (${pct(s.gt3, s.total)})</td></tr>
         <tr><td>Never called</td><td>${s.neverCalled}</td></tr>`;
     const bookPct = s.realCalls > 0 ? pct(s.booked, s.realCalls) : "0%";
+    // v20.5: top-line conversion rate — bookings / total leads in this category.
+    const convPct = s.total > 0 ? pct(s.booked, s.total) : "0%";
     return `<table>
       ${respRows}
       <tr><td>Real Calls (≥70s)</td><td>${s.realCalls}</td></tr>
       <tr><td>Live Transfers</td><td>${s.liveTransfers}</td></tr>
       <tr><td><b>Booked Today</b></td><td><b>${s.booked}</b></td></tr>
       <tr><td colspan="2" class="booking-breakdown">└ ${s.bookedPhysical} <span class="pill-physical">Physical</span> &nbsp; ${s.bookedPhone} <span class="pill-phone">Phone Booking</span></td></tr>
+      <tr><td><b>Conversion Rate</b></td><td><b>${convPct}</b> <span class="small">(${s.booked} of ${s.total})</span></td></tr>
       <tr><td><b>Real → Book</b></td><td><b>${bookPct}</b> <span class="small">(${s.booked} of ${s.realCalls})</span></td></tr>
     </table>`;
   }
