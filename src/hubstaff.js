@@ -145,6 +145,28 @@ export async function listOrgUsers() {
 
 // activities: per-user time entries with activity %, broken into 10-min slots
 // from/to are ISO strings (UTC); Hubstaff converts using the org timezone.
+//
+// Pagination: Hubstaff caps each response at page_limit=500 (max). For multi-
+// day ranges this WILL truncate — 7 days × 4 dispatchers × ~80 ten-min slots
+// per dispatcher per day = ~2200 slots, which means everything past slot 500
+// is lost. We follow the cursor (`pagination.next_page_start_id`) until empty.
+async function paginated(path, baseParams) {
+  const all = [];
+  let cursor = null;
+  // Safety stop — Hubstaff's hard upper bound; ~25k slots covers a month.
+  for (let i = 0; i < 50; i++) {
+    const params = { ...baseParams };
+    if (cursor != null) params.page_start_id = cursor;
+    const data = await get(path, params);
+    const rows = data?.activities ?? data?.daily_activities ?? data?.screenshots ?? data?.timesheets ?? [];
+    if (Array.isArray(rows) && rows.length) all.push(...rows);
+    const next = data?.pagination?.next_page_start_id;
+    if (!next || next === cursor) break;
+    cursor = next;
+  }
+  return all;
+}
+
 export async function getActivities({ from, to, userIds }) {
   const params = {
     "time_slot[start]": from,
@@ -152,26 +174,25 @@ export async function getActivities({ from, to, userIds }) {
     page_limit: 500,
   };
   if (userIds?.length) params["user_ids[]"] = userIds;
-  const data = await get(
+  return paginated(
     `/organizations/${config.hubstaff.orgId}/activities`,
     params
   );
-  return data?.activities ?? [];
 }
 
 export async function getDailyActivities({ date, userIds }) {
   // Hubstaff's "daily activities" endpoint returns one row per user per day.
+  // For a single-day call the page is almost never full, but paginate defensively.
   const params = {
     "date[start]": date,
     "date[stop]": date,
     page_limit: 500,
   };
   if (userIds?.length) params["user_ids[]"] = userIds;
-  const data = await get(
+  return paginated(
     `/organizations/${config.hubstaff.orgId}/activities/daily`,
     params
   );
-  return data?.daily_activities ?? [];
 }
 
 // Screenshots from Hubstaff. Each screenshot has a URL we can pull and hash.

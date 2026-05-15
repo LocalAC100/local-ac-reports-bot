@@ -76,8 +76,14 @@ function renderRangeHeader({ mode, from, to, generatedAt }) {
 function renderHubstaffAggregated(hub, { from, to }) {
   const dayCount = daysInRange(from, to);
   const rows = (hub.perEmployee || [])
-    .filter((emp) => !emp.noHubstaff)
     .map((emp) => {
+      if (emp.noHubstaff) {
+        return `<tr>
+          <td>${escape(emp.name || "—")}</td>
+          <td colspan="3" style="text-align:center;color:#9ca3af">no Hubstaff data</td>
+          <td style="text-align:right;color:#7a8294">${dayCount} days</td>
+        </tr>`;
+      }
       const workedSec = (emp.workedMinutes || 0) * 60;
       // Find scheduled hours from EMPLOYEES roster
       const rosterEmp = EMPLOYEES.find((e) => e.name === emp.name);
@@ -85,13 +91,10 @@ function renderHubstaffAggregated(hub, { from, to }) {
       const schedHoursPerDay = rosterEmp?.scheduledHoursPerDay || rosterEmp?.scheduledHours || 0;
       const scheduledSec = schedHoursPerDay * 3600 * dayCount;
       const paidSec = scheduledSec > 0 ? Math.min(workedSec, scheduledSec) : workedSec;
-      // Activity % from single-day dailyActivities — flag as "first day only"
-      // when range > 1 day, since the upstream call doesn't aggregate.
+      // Activity % is now aggregated across the range (sum active sec / sum
+      // tracked sec across every day in window).
       const activityPct = emp.activityPct ?? 0;
-      const activityLabel =
-        dayCount > 1
-          ? `${activityPct}% <span style="color:#9ca3af;font-size:11px">(first day)</span>`
-          : `${activityPct}%`;
+      const activityLabel = `${activityPct}%`;
       return `<tr>
         <td>${escape(emp.name || "—")}</td>
         <td style="text-align:right">${fmtHours(workedSec)} h</td>
@@ -144,8 +147,8 @@ function renderCallActivityAggregated(dispatch, { from, to }) {
   const respStrip =
     avgResp != null
       ? `<div style="margin-top:12px;padding:10px 14px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;font-size:13px;color:#1e3a8a">
-          <b>Avg new-lead response time:</b> ${avgResp.toFixed(1)} min
-          (${dispatch.orlandoNewLeadsCount || 0} new leads in range, recomputed from raw)
+          <b>Avg Orlando-NEW response time:</b> ${avgResp.toFixed(1)} min
+          (${dispatch.orlandoNewLeadsCount || 0} qualifying samples — leads added to the Orlando pipeline within 60 min of contact creation, with at least one outbound dispatcher call. NOT the total new-lead count.)
         </div>`
       : "";
 

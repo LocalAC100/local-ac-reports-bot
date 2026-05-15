@@ -99,22 +99,41 @@ export async function buildHubstaffSection({ from, to, includeTotals }) {
   });
   const userIds = matched.map((m) => m.hubstaffUserId).filter(Boolean);
 
-  // Daily activity rows give us the TRUE percentage (0–100). The per-slot
-  // /activities endpoint returns `overall` as raw input-event counts, NOT a
-  // percentage — that's what produced the 531% / 156% nonsense in the v5
-  // report. We pull both: per-slot for the hourly breakdown, daily for the
-  // headline activity %.
-  const dailyDate = from.setZone(TZ).toFormat("yyyy-LL-dd");
-  const [activities, timesheets, dailyActivities] = await Promise.all([
+  // Daily activity rows give us the TRUE percentage (0–100) for a single day.
+  // The per-slot /activities endpoint returns `overall` as ACTIVE-SECONDS
+  // (verified May 7 2026), not a 0-100 percentage. For single-day reports we
+  // pull /activities/daily for the headline %; for multi-day ranges we fetch
+  // per-day daily rows so we can sum active + tracked across the whole window.
+  const dayList = [];
+  {
+    let cur = from.setZone(TZ).startOf("day");
+    const end = to.setZone(TZ).startOf("day");
+    // Hard cap at 62 days as a safety belt against accidentally huge ranges.
+    for (let i = 0; i < 62 && cur <= end; i++) {
+      dayList.push(cur.toFormat("yyyy-LL-dd"));
+      cur = cur.plus({ days: 1 });
+    }
+  }
+  const [activities, timesheets, dailyByDay] = await Promise.all([
     hubstaff.getActivities({ from: fromIso, to: toIso, userIds }).catch(() => []),
     hubstaff.getTimesheets({ from: fromIso, to: toIso, userIds }).catch(() => []),
-    hubstaff
-      .getDailyActivities({ date: dailyDate, userIds })
-      .catch(() => []),
+    // For ranges >1 day, fetch every day in parallel and aggregate. For a
+    // single day this is one call, equivalent to the old single-day fetch.
+    Promise.all(
+      dayList.map((d) =>
+        hubstaff.getDailyActivities({ date: d, userIds }).catch(() => [])
+      )
+    ),
   ]);
+  // Aggregate daily-activity rows across the range: sum overall + tracked per user.
   const dailyByUser = new Map();
-  for (const d of dailyActivities) {
-    dailyByUser.set(d.user_id, d);
+  for (const dayRows of dailyByDay) {
+    for (const d of dayRows) {
+      const cur = dailyByUser.get(d.user_id) || { user_id: d.user_id, overall: 0, tracked: 0 };
+      cur.overall += Number(d.overall || 0);
+      cur.tracked += Number(d.tracked || 0);
+      dailyByUser.set(d.user_id, cur);
+    }
   }
 
   // Aggregate per-employee: hourly activity %, total tracked, clock in/out
@@ -705,11 +724,24 @@ export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
   //   - "Live Transfer"                         → transferred immediately to sales
   const appointmentsBooked = [];
   const bucketBookings = { morning: 0, noon: 0, afternoon: 0 };
+  const seenOppIds = new Set();
   for (const p of reportedPipelines) {
-    const opps = await ghl
-      .searchOpportunities({ pipelineId: p.id, status: "open" })
-      .catch(() => []);
+    // Pull opps across ALL statuses, not just "open". For dates more than a
+    // day or two in the past, bookings will have moved to "won" / "lost" /
+    // "abandoned" — fetching only "open" hid them entirely from multi-day
+    // aggregated views (weekly/monthly showed 0 bookings).
+    const oppsBatches = await Promise.all(
+      ["open", "won", "lost", "abandoned"].map((status) =>
+        ghl
+          .searchOpportunities({ pipelineId: p.id, status })
+          .catch(() => [])
+      )
+    );
+    const opps = oppsBatches.flat();
     for (const o of opps) {
+      // Same opp can appear in multiple status buckets if the API quirks; dedupe.
+      if (o.id && seenOppIds.has(o.id)) continue;
+      if (o.id) seenOppIds.add(o.id);
       const stage = String(o.pipelineStageName ?? "").toLowerCase();
       const isPhys = stage.includes("appointment booked") || stage.includes("appt. booked") || stage.includes("appt booked");
       const isPh = stage.includes("over phone sale") || stage.includes("over phone booked") || stage.includes("phone sale");
