@@ -750,6 +750,17 @@ export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
       _bookingDiag.push(`${p.name}/${statuses[i]}=${oppsBatches[i].length}`);
     }
     const opps = oppsBatches.flat();
+    // DIAG: dump unique stage names so we can see what Local AC actually uses.
+    const stageCounts = new Map();
+    for (const o of opps) {
+      const sn = String(o.pipelineStageName ?? "(none)");
+      stageCounts.set(sn, (stageCounts.get(sn) || 0) + 1);
+    }
+    const topStages = [...stageCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 15)
+      .map(([n, c]) => `${n}=${c}`);
+    _bookingDiag.push(`stages@${p.name}: ${topStages.join(", ")}`);
     for (const o of opps) {
       // Same opp can appear in multiple status buckets if the API quirks; dedupe.
       if (o.id && seenOppIds.has(o.id)) continue;
