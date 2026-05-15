@@ -16,11 +16,51 @@
 
 import { DateTime } from "luxon";
 import { TZ } from "./time.js";
-import { EMPLOYEES } from "./employees.js";
+import { EMPLOYEES, expectedShiftFor } from "./employees.js";
 import {
   buildHubstaffSection,
   buildDispatcherSection,
 } from "./reports.js";
+
+function _hhmmToMin(s) {
+  if (!s || typeof s !== "string") return null;
+  const [h, m] = s.split(":").map((x) => parseInt(x, 10));
+  if (isNaN(h) || isNaN(m)) return null;
+  return h * 60 + m;
+}
+
+// Sum scheduled paid minutes for an employee across the date range, day by day.
+// Matches the daily report's pay formula: shift length minus break budget.
+// Days the employee is off (schedule[dow] = null) contribute 0.
+function scheduledPaidMinutes(emp, from, to) {
+  if (!emp?.schedule) return 0;
+  const brkBudget = emp.breakMinutesPerShift ?? 0;
+  let total = 0;
+  let cur = from.setZone(TZ).startOf("day");
+  const end = to.setZone(TZ).startOf("day");
+  for (let i = 0; i < 62 && cur <= end; i++) {
+    const shift = expectedShiftFor(emp, cur);
+    if (shift) {
+      const startMin = _hhmmToMin(shift.start);
+      const endMin = _hhmmToMin(shift.end);
+      if (startMin != null && endMin != null) {
+        total += Math.max(0, endMin - startMin - brkBudget);
+      }
+    }
+    cur = cur.plus({ days: 1 });
+  }
+  return total;
+}
+
+function fmtMinutes(min) {
+  if (min == null || !isFinite(min)) return "—";
+  const m = Math.max(0, Math.round(min));
+  const h = Math.floor(m / 60);
+  const r = m % 60;
+  if (h === 0) return `${r}m`;
+  if (r === 0) return `${h}h`;
+  return `${h}h ${r}m`;
+}
 
 function fmtDur(sec) {
   if (sec == null || !isFinite(sec)) return "—";
@@ -29,11 +69,6 @@ function fmtDur(sec) {
   const m = Math.floor((s % 3600) / 60);
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
-}
-
-function fmtHours(sec) {
-  if (sec == null || !isFinite(sec)) return "—";
-  return (sec / 3600).toFixed(1);
 }
 
 function daysInRange(from, to) {
@@ -73,50 +108,106 @@ function renderRangeHeader({ mode, from, to, generatedAt }) {
 // perEmployee rows from buildHubstaffSection have shape:
 //   { name, role, clockIn, clockOut, workedMinutes, breakMinutes, breakOver,
 //     activityPct, activityFlag, statusFlag }
+// Pay formula matches the daily report:
+//   scheduled_min_per_day = shift_length - break_budget   (days off contribute 0)
+//   range_scheduled_min   = sum of per-day scheduled across the date range
+//   paid_min              = min(worked, range_scheduled)
+//   cost                  = (paid_min / 60) * pay_rate
 function renderHubstaffAggregated(hub, { from, to }) {
   const dayCount = daysInRange(from, to);
-  const rows = (hub.perEmployee || [])
-    .map((emp) => {
-      if (emp.noHubstaff) {
+  const rowsData = (hub.perEmployee || []).map((emp) => {
+    const rosterEmp = EMPLOYEES.find(
+      (e) =>
+        String(e.name || "").toLowerCase() === String(emp.name || "").toLowerCase() ||
+        String(e.fullName || "").toLowerCase() === String(emp.name || "").toLowerCase()
+    );
+    const workedMin = emp.noHubstaff ? null : emp.workedMinutes || 0;
+    const scheduledMin = rosterEmp ? scheduledPaidMinutes(rosterEmp, from, to) : 0;
+    const paidMin =
+      workedMin == null
+        ? null
+        : scheduledMin > 0
+        ? Math.min(workedMin, scheduledMin)
+        : workedMin;
+    const payRate = rosterEmp?.payRate ?? 0;
+    const cost = paidMin != null ? (paidMin / 60) * payRate : 0;
+    const activityPct = emp.activityPct ?? 0;
+    return {
+      name: emp.name,
+      noHubstaff: emp.noHubstaff,
+      workedMin,
+      scheduledMin,
+      paidMin,
+      payRate,
+      cost,
+      activityPct,
+    };
+  });
+
+  const rows = rowsData
+    .map((r) => {
+      if (r.noHubstaff) {
         return `<tr>
-          <td>${escape(emp.name || "—")}</td>
+          <td>${escape(r.name)}</td>
+          <td style="text-align:right">${fmtMinutes(r.scheduledMin)}</td>
           <td colspan="3" style="text-align:center;color:#9ca3af">no Hubstaff data</td>
-          <td style="text-align:right;color:#7a8294">${dayCount} days</td>
+          <td style="text-align:right">${r.payRate ? `$${r.payRate}/hr` : "—"}</td>
+          <td style="text-align:right">$0.00</td>
         </tr>`;
       }
-      const workedSec = (emp.workedMinutes || 0) * 60;
-      // Find scheduled hours from EMPLOYEES roster
-      const rosterEmp = EMPLOYEES.find((e) => e.name === emp.name);
-      // Use sched hours-per-day if present; otherwise leave paid = worked.
-      const schedHoursPerDay = rosterEmp?.scheduledHoursPerDay || rosterEmp?.scheduledHours || 0;
-      const scheduledSec = schedHoursPerDay * 3600 * dayCount;
-      const paidSec = scheduledSec > 0 ? Math.min(workedSec, scheduledSec) : workedSec;
-      // Activity % is now aggregated across the range (sum active sec / sum
-      // tracked sec across every day in window).
-      const activityPct = emp.activityPct ?? 0;
-      const activityLabel = `${activityPct}%`;
+      const overNote =
+        r.workedMin != null && r.scheduledMin > 0 && r.workedMin > r.scheduledMin
+          ? ` <span style="color:#9ca3af;font-size:11px">(actual ${fmtMinutes(r.workedMin)} capped)</span>`
+          : "";
       return `<tr>
-        <td>${escape(emp.name || "—")}</td>
-        <td style="text-align:right">${fmtHours(workedSec)} h</td>
-        <td style="text-align:right">${fmtHours(paidSec)} h</td>
-        <td style="text-align:right">${activityLabel}</td>
-        <td style="text-align:right;color:#7a8294">${dayCount} days</td>
+        <td>${escape(r.name)}</td>
+        <td style="text-align:right">${fmtMinutes(r.scheduledMin)}</td>
+        <td style="text-align:right">${fmtMinutes(r.workedMin)}</td>
+        <td style="text-align:right;font-weight:600">${fmtMinutes(r.paidMin)}${overNote}</td>
+        <td style="text-align:right">${r.activityPct}%</td>
+        <td style="text-align:right">${r.payRate ? `$${r.payRate}/hr` : "—"}</td>
+        <td style="text-align:right;font-weight:600">$${(r.cost || 0).toFixed(2)}</td>
       </tr>`;
     })
     .join("");
+
+  // Totals row
+  const totalScheduled = rowsData.reduce((s, r) => s + (r.scheduledMin || 0), 0);
+  const totalWorked = rowsData.reduce(
+    (s, r) => s + (r.workedMin != null ? r.workedMin : 0),
+    0
+  );
+  const totalPaid = rowsData.reduce(
+    (s, r) => s + (r.paidMin != null ? r.paidMin : 0),
+    0
+  );
+  const totalCost = rowsData.reduce((s, r) => s + (r.cost || 0), 0);
+
   return `<section style="margin-bottom:24px">
-    <h2 style="margin:0 0 12px;font-size:18px;color:#1b2435">1. Hubstaff Hours</h2>
+    <h2 style="margin:0 0 12px;font-size:18px;color:#1b2435">1. Hubstaff Hours <span style="font-size:13px;color:#7a8294;font-weight:400">— ${dayCount} days</span></h2>
     <table style="width:100%;border-collapse:collapse;font-size:14px">
       <thead><tr style="background:#f5f7fb;text-align:left">
         <th style="padding:8px 10px">Employee</th>
-        <th style="padding:8px 10px;text-align:right">Worked (range)</th>
+        <th style="padding:8px 10px;text-align:right">Scheduled</th>
+        <th style="padding:8px 10px;text-align:right">Worked</th>
         <th style="padding:8px 10px;text-align:right">Paid (capped)</th>
         <th style="padding:8px 10px;text-align:right">Activity %</th>
-        <th style="padding:8px 10px;text-align:right">Range</th>
+        <th style="padding:8px 10px;text-align:right">Pay rate</th>
+        <th style="padding:8px 10px;text-align:right">Cost</th>
       </tr></thead>
-      <tbody>${rows || `<tr><td colspan="5" style="padding:14px;color:#7a8294">No Hubstaff data for this range.</td></tr>`}</tbody>
+      <tbody>${rows || `<tr><td colspan="7" style="padding:14px;color:#7a8294">No Hubstaff data for this range.</td></tr>`}
+        <tr style="background:#f5f7fb;font-weight:700">
+          <td style="padding:8px 10px">TOTAL</td>
+          <td style="padding:8px 10px;text-align:right">${fmtMinutes(totalScheduled)}</td>
+          <td style="padding:8px 10px;text-align:right">${fmtMinutes(totalWorked)}</td>
+          <td style="padding:8px 10px;text-align:right">${fmtMinutes(totalPaid)}</td>
+          <td></td>
+          <td></td>
+          <td style="padding:8px 10px;text-align:right">$${totalCost.toFixed(2)}</td>
+        </tr>
+      </tbody>
     </table>
-    <div style="font-size:12px;color:#7a8294;margin-top:6px">Worked hours summed across the range. Paid hours capped at scheduled. Status badges (on/off/late) are per-day and omitted in aggregated views.</div>
+    <div style="font-size:12px;color:#7a8294;margin-top:6px"><b>Pay formula:</b> <code>min(worked, scheduled paid hours) × rate</code> across the range. Scheduled paid hours = shift length − break budget, summed day-by-day (off-days contribute 0).</div>
   </section>`;
 }
 
