@@ -1250,7 +1250,7 @@ export async function runMorningReport({ dateOverride, to } = {}) {
   });
 }
 
-export async function runEveningReport({ dateOverride, to } = {}) {
+export async function runEveningReport({ dateOverride, to, noMail } = {}) {
   // dateOverride lets the admin debug endpoint regenerate a report for a
   // past date by anchoring `now()` to that date's 7:30 PM ET (so
   // eveningWindow covers that full day).
@@ -1315,7 +1315,7 @@ export async function runEveningReport({ dateOverride, to } = {}) {
   const attachments = xlsxBundle
     ? [{ filename: xlsxBundle.filename, content: Buffer.from(xlsxBundle.buffer) }]
     : undefined;
-  await sendMail({
+  if (!noMail) await sendMail({
     to,
     subject: `Local AC — Full Day Summary (${generatedAt.toFormat("LLL d")})`,
     html,
