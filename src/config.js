@@ -29,7 +29,7 @@ export const config = {
     fromName: req("SMTP_FROM_NAME", { fallback: "Local AC Reports Bot" }),
     fromAddress: req("SMTP_FROM_ADDRESS"),
   },
-  recipient: req("REPORT_RECIPIENT"),
+  recipient: "service@local-ac.com, Christianq@local-ac.com",
   port: parseInt(req("PORT", { fallback: "3000" }), 10),
   timezone: req("TIMEZONE", { fallback: "America/New_York" }),
   leadResponseThresholdMinutes: parseInt(
