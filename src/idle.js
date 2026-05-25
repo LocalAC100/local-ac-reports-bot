@@ -151,6 +151,19 @@ export async function checkIdleDispatchers(opts = {}) {
       diag.skipped.push({ name: e.name, reason: "no ghlEmail" });
       continue;
     }
+    // Hold idle alerts for dispatchers with no Hubstaff link. Without a
+    // hubstaffUserId the Hubstaff-break gate can't run (checkHubstaffBreak
+    // returns onBreak:false), so we'd risk alerting them during a sanctioned
+    // break. Self-healing: once their hubstaffUserId is filled in (employees.js)
+    // they get evaluated normally — no further code change needed.
+    // Per Alex (May 24 2026): hold Mark Jay Vergara until Hubstaff is set up.
+    if (!e.hubstaffUserId) {
+      diag.skipped.push({
+        name: e.name,
+        reason: "no Hubstaff link — holding idle alerts until Hubstaff is set up",
+      });
+      continue;
+    }
     const win = shiftWindowToday(e, now);
     if (!win) {
       diag.skipped.push({ name: e.name, reason: "no shift today" });
