@@ -237,7 +237,7 @@ export function buildFirehoseBackfillRouter() {
       const t0 = Date.now();
       try {
         const dateOverride = req.query.date || undefined;
-        await runEveningReport({ dateOverride, to: req.query.to });
+        await runEveningReport({ dateOverride, to: req.query.to, noMail: req.query.nomail === "1" });
         res.json({
           ok: true,
           kind: "evening-report",
