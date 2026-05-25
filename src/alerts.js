@@ -41,7 +41,7 @@ const BUSINESS_START_HOUR = 8;
 const BUSINESS_END_HOUR = 21; // 9 PM ET — matches dispatcher shift end
 const WARNING_DELAY_MS = 3 * 60 * 1000;
 const ESCALATION_DELAY_MS = 10 * 60 * 1000;
-const ALERT_RECIPIENT = "service@local-ac.com";
+const ALERT_RECIPIENT = "service@local-ac.com, Christianq@local-ac.com";
 
 // contactId -> { t3, t10, contactName, phone, leadAddedAt, level1FireAt, level2FireAt }
 const pendingAlerts = new Map();
@@ -380,11 +380,11 @@ export async function onNewLead({ contactId, contactName, phone, leadAddedAt }) 
   if (!isBusinessHours(leadDate)) {
     // Overnight leads do NOT schedule the 3-min / 10-min timers — the
     // dispatchers aren't on shift to receive the call. Instead, the
-    // morning catch-up cron at 8:15 AM ET scans all overnight leads and
+    // morning catch-up cron at 8:30 AM ET scans all overnight leads and
     // fires a single summary alert for any that still haven't been
     // contacted by then.
     console.log(
-      `[live-alert] overnight lead (outside 8 AM–9 PM ET), skipping live timers, will be checked at 8:15 AM by morning catch-up: ${contactId} @ ${leadDate.toISOString()}`
+      `[live-alert] overnight lead (outside 8 AM–9 PM ET), skipping live timers, will be checked at 8:30 AM by morning catch-up: ${contactId} @ ${leadDate.toISOString()}`
     );
     return;
   }
@@ -497,7 +497,7 @@ export function initAlerts() {
 }
 
 // =====================================================================
-// Morning catch-up — fires once a day at 8:15 AM ET. Scans every lead that
+// Morning catch-up — fires once a day at 8:30 AM ET. Scans every lead that
 // arrived overnight (9 PM previous day through 8 AM today) and emits a
 // single summary alert listing any that still haven't been contacted by
 // dispatchers. Overnight leads do NOT get the live 3-min / 10-min timers,
@@ -691,10 +691,10 @@ function renderMorningCatchUpHtml({
 <div style="max-width:720px;margin:0 auto;padding:24px 18px">
 <div style="background:#DC2626;color:#fff;border-radius:12px;padding:16px 20px;margin-bottom:14px">
 <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;opacity:.85">Morning catch-up</div>
-<div style="font-size:18px;font-weight:700;line-height:1.2">🔴 ${uncontacted.length} overnight lead${uncontacted.length === 1 ? "" : "s"} still uncalled at 8:15 AM</div>
+<div style="font-size:18px;font-weight:700;line-height:1.2">🔴 ${uncontacted.length} overnight lead${uncontacted.length === 1 ? "" : "s"} still uncalled at 8:30 AM</div>
 </div>
 <div style="background:#fff;border:1px solid #E5E7EB;border-radius:12px;padding:18px 22px">
-<p style="margin:0 0 14px;font-size:14px;color:#1F2937">These leads arrived between <strong>${escapeHtml(windowFromFmt)}</strong> and <strong>${escapeHtml(windowToFmt)}</strong>. Dispatchers have had 15 minutes since shift start (8:00 AM ET) and none of them have been called or transferred yet.</p>
+<p style="margin:0 0 14px;font-size:14px;color:#1F2937">These leads arrived between <strong>${escapeHtml(windowFromFmt)}</strong> and <strong>${escapeHtml(windowToFmt)}</strong>. Dispatchers have had 30 minutes since shift start (8:00 AM ET) and none of them have been called or transferred yet.</p>
 <table style="font-size:13px;line-height:1.6;width:100%;border-collapse:collapse">
 <thead><tr style="text-align:left;color:#6B7280;font-size:11px;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #E5E7EB">
 <th style="padding:8px 4px">Lead</th>
@@ -706,7 +706,7 @@ function renderMorningCatchUpHtml({
 <tbody>${rows}</tbody>
 </table>
 <div style="margin-top:14px;padding-top:14px;border-top:1px solid #E5E7EB;font-size:12px;color:#6B7280">
-${uncontacted.length} of ${overnightTotal} overnight leads still uncalled. No further alerts will fire for these — they roll into the regular daily metrics from here. This summary fires once a day at 8:15 AM ET.
+${uncontacted.length} of ${overnightTotal} overnight leads still uncalled. No further alerts will fire for these — they roll into the regular daily metrics from here. This summary fires once a day at 8:30 AM ET.
 </div>
 </div>
 <p style="color:#6B7280;font-size:12px;margin-top:14px;text-align:center">Local AC Reports Bot · morning catch-up v1</p>

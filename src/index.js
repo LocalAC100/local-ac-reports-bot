@@ -1,15 +1,17 @@
 // Entry point. Boots the HTTP server (for the GHL webhook + healthz) and
 // schedules the daily reports via node-cron in the configured timezone.
 //
-// SCHEDULE (v20.2, locked May 14 2026):
+// SCHEDULE (v20.9, locked May 24 2026):
 //   12:00 PM ET     Morning Snapshot — today midnight to noon
-//    9:00 PM ET     Evening Snapshot — today (full-day-to-date)
-//    7:00 AM ET     Full Day Summary of YESTERDAY (so Tuesday 7 AM = Monday recap)
-//    2:00 AM ET     Firehose backfill for yesterday (feeds the 7 AM evening report)
-//    8:15 AM ET     Morning catch-up — overnight leads still uncontacted (v20.2)
+//   10:00 PM ET     Evening / Full-Day report — today (full-day-to-date)
+//    2:00 AM ET     Firehose backfill for yesterday
+//    8:30 AM ET     Morning catch-up — overnight leads still uncontacted
 //   */15 6-22 ET    Firehose backfill for today (every 15 min during business hours)
-//   */5  8-20 ET    Dispatcher-idle check — 15-min threshold, Hubstaff-break-aware
 //   */5  *   *      JWT refresh (Firebase id_token expires in ~1hr; refresh keeps backfill alive)
+//
+// Per Alex (May 24 2026): removed the 7 AM yesterday-recap email and the
+// dispatcher-idle (15-min no-call) alerts entirely. Idle code is kept in
+// idle.js + the /admin/debug/check-idle endpoint, but is no longer scheduled.
 //
 // On boot: re-arm any pending lead alerts from /var/data/pending-alerts.json so
 // Render restarts don't lose mid-flight 10-min escalation timers.
@@ -18,7 +20,6 @@ import { config } from "./config.js";
 import { buildServer } from "./server.js";
 import { runMorningReport, runEveningReport } from "./reports.js";
 import { backfillDate, refreshStoredJwt } from "./firehose-backfill.js";
-import { checkIdleDispatchers } from "./idle.js";
 import { initAlerts, runMorningCatchUp } from "./alerts.js";
 
 const app = buildServer();
@@ -56,15 +57,13 @@ cron.schedule(
   { timezone: config.timezone }
 );
 
-// 9:00 PM ET — Evening Snapshot of TODAY (full day so far).
-// Same renderer as the 7 AM next-day report, but covers TODAY rather than yesterday.
-// Gives Alex a near-end-of-business read on how the day went before the official
-// next-morning recap fires at 7 AM.
+// 10:00 PM ET — Evening / Full-Day report of TODAY (full day so far).
+// This is the nightly wrap-up Alex asked to lock at 10 PM.
 cron.schedule(
-  "0 21 * * *",
+  "0 22 * * *",
   async () => {
     const dateOverride = todayET();
-    console.log(`[cron] evening snapshot (today=${dateOverride}) starting`);
+    console.log(`[cron] evening report (today=${dateOverride}) starting`);
     try {
       await runEveningReport({ dateOverride });
       console.log(`[cron] evening snapshot sent`);
@@ -75,25 +74,8 @@ cron.schedule(
   { timezone: config.timezone }
 );
 
-// 7:00 AM ET — Full Day Summary of YESTERDAY.
-// When Alex opens his inbox at 7 AM Tuesday, he sees Monday's complete recap.
-cron.schedule(
-  "0 7 * * *",
-  async () => {
-    const dateOverride = yesterdayET();
-    console.log(`[cron] evening report (yesterday=${dateOverride}) starting`);
-    try {
-      await runEveningReport({ dateOverride });
-      console.log(`[cron] evening report sent`);
-    } catch (e) {
-      console.error(`[cron] evening report failed`, e);
-    }
-  },
-  { timezone: config.timezone }
-);
-
 console.log(
-  `[cron] scheduled morning=12:00 evening_snapshot=21:00(today) yesterday_recap=07:00 tz=${config.timezone}`
+  `[cron] scheduled morning=12:00 evening=22:00(today) catchup=08:30 tz=${config.timezone}`
 );
 
 // =====================================================================
@@ -154,14 +136,14 @@ cron.schedule(
 );
 
 // =====================================================================
-// Morning catch-up (v20.2). 8:15 AM ET — scan every lead that arrived
+// Morning catch-up. 8:30 AM ET — scan every lead that arrived
 // overnight (9 PM previous day through 8 AM today) and emit a single
 // summary email listing any that still haven't been contacted by the
 // dispatchers. Overnight leads do NOT get the live 3-min / 10-min timers,
 // so this is their only alert path.
 // =====================================================================
 cron.schedule(
-  "15 8 * * *",
+  "30 8 * * *",
   async () => {
     console.log("[morning-catchup-cron] running at", new Date().toISOString());
     try {
@@ -171,28 +153,6 @@ cron.schedule(
       );
     } catch (e) {
       console.error("[morning-catchup-cron] ERR", (e && e.message) || e);
-    }
-  },
-  { timezone: "America/New_York" }
-);
-
-// =====================================================================
-// Dispatcher-idle cron (v20). Every 5 min between 8 AM and 8 PM ET (so the
-// last evaluation happens at 8:55 PM, comfortably inside the 9 PM shift end).
-// checkIdleDispatchers() already gates on each dispatcher's individual shift
-// window, on idleAlertsExcluded, and on Hubstaff break status.
-// =====================================================================
-cron.schedule(
-  "*/5 8-20 * * *",
-  async () => {
-    console.log("[idle-cron] running at", new Date().toISOString());
-    try {
-      const r = await checkIdleDispatchers();
-      console.log(
-        `[idle-cron] OK fired=${r.fired} skipped=${r.skipped.length} evaluated=${r.evaluated.length} suppressed_break=${r.suppressedByBreak} cooldown=${r.suppressedByCooldown}`
-      );
-    } catch (e) {
-      console.error("[idle-cron] ERR", (e && e.message) || e);
     }
   },
   { timezone: "America/New_York" }
