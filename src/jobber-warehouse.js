@@ -33,7 +33,7 @@ import { gql } from "./jobber.js";
 import { db } from "./db.js";
 
 const TZ = "America/New_York";
-let PAGE_SIZE = 25; // smaller pages: enriched queries cost more (tunable via ?first=)
+let PAGE_SIZE = 15; // smaller pages: enriched queries cost more (tunable via ?first=)
 const PAGE_CAP = 2000;
 const SECRET = process.env.JWT_BOOTSTRAP_SECRET || "lac-jwt-2026-bootstrap-axabramov";
 
@@ -116,14 +116,15 @@ CREATE INDEX IF NOT EXISTS idx_jw_att_obj ON jw_note_attachments(object_type, ob
 // ---------------------------------------------------------------------------
 const NOTE_FIELDS = `id message createdAt lastEditedAt
   createdBy { __typename ... on User { id name { full } } ... on Client { id name } }
-  fileAttachments { nodes { id fileName contentType fileSize url thumbnailUrl createdAt } }`;
+  fileAttachments(first: 15) { nodes { id fileName contentType fileSize url thumbnailUrl createdAt } }`;
 
+// Cap nested lists with first: — Jobber's query-cost engine charges unbounded
+// connections at their MAX, so caps are what keep the page under budget.
+// Only fetch the object's own note type (client-level notes are captured under clients).
 function notesSelection(ownType) {
-  const frags = [`... on ClientNote { ${NOTE_FIELDS} }`];
-  if (ownType && ownType !== "ClientNote") frags.push(`... on ${ownType} { ${NOTE_FIELDS} }`);
-  return `notes { nodes { __typename ${frags.join(" ")} } }`;
+  return `notes(first: 15) { nodes { __typename ... on ${ownType} { ${NOTE_FIELDS} } } }`;
 }
-const LINE_ITEMS = `lineItems { nodes { id name description quantity unitPrice totalPrice } }`;
+const LINE_ITEMS = `lineItems(first: 50) { nodes { id name description quantity unitPrice totalPrice } }`;
 
 // ---------------------------------------------------------------------------
 // Persisters for nested notes / line items / attachments
