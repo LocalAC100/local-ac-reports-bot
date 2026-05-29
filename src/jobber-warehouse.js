@@ -17,8 +17,9 @@
 // - Nightly FULL re-pull, upsert by id. Notes/line-items/attachments are pulled
 //   NESTED in each object's page query (no per-record fan-out) and replaced per
 //   parent object on each sync.
-// - Throttle-aware with paced pagination. PAGE_SIZE tunable via ?first= because
-//   enriched (nested) queries cost more against Jobber's query-cost budget.
+// - Throttle-aware with paced pagination. Nested lists are capped with first:
+//   and PAGE_SIZE kept small because Jobber charges nested connections at their
+//   first: value regardless of how few rows actually exist.
 //
 // SCHEMA NOTES (verified live, Jobber GraphQL 2025-04-16):
 //   notes -> <Object>NoteUnion (members include ClientNote + the object's own
@@ -33,7 +34,7 @@ import { gql } from "./jobber.js";
 import { db } from "./db.js";
 
 const TZ = "America/New_York";
-let PAGE_SIZE = 15; // smaller pages: enriched queries cost more (tunable via ?first=)
+let PAGE_SIZE = 5; // enriched (nested) queries are costly; default kept low (tunable via ?first=)
 const PAGE_CAP = 2000;
 const SECRET = process.env.JWT_BOOTSTRAP_SECRET || "lac-jwt-2026-bootstrap-axabramov";
 
@@ -116,15 +117,15 @@ CREATE INDEX IF NOT EXISTS idx_jw_att_obj ON jw_note_attachments(object_type, ob
 // ---------------------------------------------------------------------------
 const NOTE_FIELDS = `id message createdAt lastEditedAt
   createdBy { __typename ... on User { id name { full } } ... on Client { id name } }
-  fileAttachments(first: 15) { nodes { id fileName contentType fileSize url thumbnailUrl createdAt } }`;
+  fileAttachments(first: 5) { nodes { id fileName contentType fileSize url thumbnailUrl createdAt } }`;
 
 // Cap nested lists with first: — Jobber's query-cost engine charges unbounded
 // connections at their MAX, so caps are what keep the page under budget.
 // Only fetch the object's own note type (client-level notes are captured under clients).
 function notesSelection(ownType) {
-  return `notes(first: 15) { nodes { __typename ... on ${ownType} { ${NOTE_FIELDS} } } }`;
+  return `notes(first: 8) { nodes { __typename ... on ${ownType} { ${NOTE_FIELDS} } } }`;
 }
-const LINE_ITEMS = `lineItems(first: 50) { nodes { id name description quantity unitPrice totalPrice } }`;
+const LINE_ITEMS = `lineItems(first: 30) { nodes { id name description quantity unitPrice totalPrice } }`;
 
 // ---------------------------------------------------------------------------
 // Persisters for nested notes / line items / attachments
