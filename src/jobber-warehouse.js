@@ -17,9 +17,7 @@
 // - Nightly FULL re-pull, upsert by id. Notes/line-items/attachments are pulled
 //   NESTED in each object's page query (no per-record fan-out) and replaced per
 //   parent object on each sync.
-// - Throttle-aware with paced pagination. Nested lists are capped with first:
-//   and PAGE_SIZE kept small because Jobber charges nested connections at their
-//   first: value regardless of how few rows actually exist.
+// - Throttle-aware with paced pagination.
 //
 // SCHEMA NOTES (verified live, Jobber GraphQL 2025-04-16):
 //   notes -> <Object>NoteUnion (members include ClientNote + the object's own
@@ -30,8 +28,16 @@
 
 import cron from "node-cron";
 import express from "express";
+import axios from "axios";
+import fs from "fs";
+import path from "path";
+import crypto from "crypto";
 import { gql } from "./jobber.js";
 import { db } from "./db.js";
+
+// Phase B: where downloaded attachment files live on the persistent disk.
+const ATT_DIR = process.env.RENDER ? "/var/data/jw-attachments" : "./data/jw-attachments";
+try { fs.mkdirSync(ATT_DIR, { recursive: true }); } catch {}
 
 const TZ = "America/New_York";
 let PAGE_SIZE = 5; // enriched (nested) queries are costly; default kept low (tunable via ?first=)
@@ -111,6 +117,10 @@ CREATE INDEX IF NOT EXISTS idx_jw_notes_obj ON jw_notes(object_type, object_id);
 CREATE INDEX IF NOT EXISTS idx_jw_line_items_obj ON jw_line_items(object_type, object_id);
 CREATE INDEX IF NOT EXISTS idx_jw_att_obj ON jw_note_attachments(object_type, object_id);
 `);
+
+// Migration: track the on-disk file hash for dedupe (Phase B downloads).
+try { db.exec(`ALTER TABLE jw_note_attachments ADD COLUMN sha256 TEXT`); }
+catch (e) { if (!/duplicate column/i.test(e.message || "")) console.warn("[jw] sha256 migration:", e.message); }
 
 // ---------------------------------------------------------------------------
 // GraphQL fragments for nested notes + line items
@@ -448,7 +458,56 @@ export function warehouseStatus() {
   try { attachmentBytes = db.prepare(`SELECT COALESCE(SUM(file_size),0) AS b FROM jw_note_attachments`).get().b; }
   catch {}
   const state = db.prepare(`SELECT * FROM jw_sync_state`).all();
-  return { counts, attachmentBytes, attachmentGB: attachmentBytes != null ? +(attachmentBytes / 1e9).toFixed(3) : null, state };
+  let downloadedCount = 0, downloadedBytes = 0;
+  try {
+    const r = db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(file_size),0) AS b FROM jw_note_attachments WHERE downloaded = 1`).get();
+    downloadedCount = r.n; downloadedBytes = r.b;
+  } catch {}
+  return {
+    counts, attachmentBytes,
+    attachmentGB: attachmentBytes != null ? +(attachmentBytes / 1e9).toFixed(3) : null,
+    downloadedFiles: downloadedCount, downloadedGB: +(downloadedBytes / 1e9).toFixed(3),
+    state,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Phase B: download the actual attachment files (disk-capped, deduped)
+// ---------------------------------------------------------------------------
+// Downloads files for attachments created on/after `sinceYear` that aren't yet
+// on disk. Hard-capped by maxBytes so it can NEVER fill the 1 GB persistent
+// disk (and crash the bot). Re-runnable: only grabs downloaded=0 rows.
+export async function downloadAttachments({ sinceYear = 2026, maxBytes = 700 * 1024 * 1024 } = {}) {
+  const since = `${sinceYear}-01-01`;
+  const rows = db.prepare(
+    `SELECT id, url, file_name FROM jw_note_attachments
+     WHERE downloaded = 0 AND url IS NOT NULL AND created_at >= ?`
+  ).all(since);
+  const setDone = db.prepare(`UPDATE jw_note_attachments SET downloaded = 1, storage_path = ?, sha256 = ? WHERE id = ?`);
+  let downloaded = 0, bytes = 0, errors = 0, stopped = false;
+  for (const r of rows) {
+    if (bytes >= maxBytes) { stopped = true; console.warn("[jw-dl] maxBytes cap reached; stopping"); break; }
+    try {
+      const resp = await axios.get(r.url, {
+        responseType: "arraybuffer", timeout: 90000,
+        maxContentLength: 200 * 1024 * 1024, maxBodyLength: 200 * 1024 * 1024,
+      });
+      const buf = Buffer.from(resp.data);
+      const sha = crypto.createHash("sha256").update(buf).digest("hex");
+      const safe = String(r.file_name || "file").replace(/[^A-Za-z0-9._-]+/g, "_");
+      const fp = path.join(ATT_DIR, `${r.id}-${safe}`);
+      fs.writeFileSync(fp, buf);
+      setDone.run(fp, sha, r.id);
+      downloaded++; bytes += buf.length;
+    } catch (e) {
+      errors++;
+      console.warn("[jw-dl] failed", r.id, e.message);
+    }
+    await sleep(150);
+  }
+  const result = { candidates: rows.length, downloaded, errors, mb: +(bytes / 1e6).toFixed(1), stopped, sinceYear };
+  console.log("[jw-dl] done", result);
+  return result;
 }
 
 let scheduled = false;
@@ -460,6 +519,8 @@ export function initJobberWarehouse() {
     async () => {
       console.log("[jw-cron] nightly Jobber warehouse sync starting");
       try { await runFullSync(); } catch (e) { console.error("[jw-cron] failed:", e.message); }
+      // After the data sync, download 2026+ attachment files (disk-capped).
+      try { await downloadAttachments({ sinceYear: 2026 }); } catch (e) { console.error("[jw-cron] download failed:", e.message); }
     },
     { timezone: TZ }
   );
@@ -513,6 +574,20 @@ export function buildJobberWarehouseRouter() {
       res.json({ ok: true, sql, rowCount: rows.length, rows });
     } catch (e) {
       res.status(400).json({ ok: false, error: e.message });
+    }
+  });
+
+  // Phase B: download 2026+ attachment files to disk (background). ?sinceYear= optional.
+  router.get("/admin/jobber/wh/download/" + SECRET, (req, res) => {
+    const sinceYear = req.query.sinceYear ? parseInt(req.query.sinceYear, 10) : 2026;
+    const wait = req.query.wait === "1";
+    if (wait) {
+      downloadAttachments({ sinceYear })
+        .then((r) => res.json({ ok: true, ...r }))
+        .catch((e) => res.status(500).json({ ok: false, error: e.message }));
+    } else {
+      downloadAttachments({ sinceYear }).catch((e) => console.error("[jw-dl] background error:", e.message));
+      res.json({ ok: true, started: true, sinceYear, note: "Downloading in background. Poll /admin/jobber/wh/status/<secret> for downloadedFiles/downloadedGB." });
     }
   });
 
