@@ -1,28 +1,30 @@
 // Jobber Warehouse — full local mirror of Jobber data for the Control Room.
 //
 // PURPOSE
-// Instead of asking Jobber's API live on every question (slow, costly, capped
-// at ~20 records), we keep a complete local copy of Jobber in SQLite and answer
-// questions from that copy. This module owns the ingestion side only.
+// Keep a complete local copy of Jobber in SQLite and answer questions from that
+// copy instead of hitting Jobber live on every question.
+//
+// PHASE A (this version) adds, alongside the core objects:
+//   - line items (the products/equipment on quotes, jobs, invoices, requests)
+//   - notes (message + author + created/edited timestamps) on every object
+//   - an INVENTORY of every note file attachment (fileName, contentType,
+//     fileSize, url, thumbnailUrl) — metadata only, NO file downloads yet.
+//     Summing file_size tells us how much disk Phase B downloads will need.
 //
 // DESIGN
-// - Additive & isolated: creates its own jw_* tables via the shared db handle.
-//   Does NOT touch any alert/report/cron code in index.js, alerts.js, etc.
-// - Nightly FULL re-pull that upserts by Jobber id (idempotent). Data volume is
-//   small (~25k records), so a full refresh is simpler and more robust than
-//   fragile incremental cursors, and stays well within Jobber's rate limits
-//   (2500 req / 5 min; ~10k-point cost budget restoring 500/s).
-// - The one-time backfill is just runFullSync() executed once.
-// - Every row also stores the full raw node JSON, so no field is ever lost even
-//   if we didn't break it out into its own column.
+// - Additive & isolated: own jw_* tables via the shared db handle. Touches no
+//   alert/report/cron code.
+// - Nightly FULL re-pull, upsert by id. Notes/line-items/attachments are pulled
+//   NESTED in each object's page query (no per-record fan-out) and replaced per
+//   parent object on each sync.
+// - Throttle-aware with paced pagination.
 //
-// SCHEMA NOTES (verified live against Jobber GraphQL 2025-04-16):
-//   clients/requests/quotes/jobs/invoices/users are top-level connections.
-//   updatedAt exists on clients/requests/quotes/jobs/invoices.
-//   Quote amount is nested: amounts { total }.  Payments are NOT a top-level
-//   list — invoice.paymentsTotal carries the paid amount.
-//
-// Auth/transport is reused from ./jobber.js (gql()).
+// SCHEMA NOTES (verified live, Jobber GraphQL 2025-04-16):
+//   notes -> <Object>NoteUnion (members include ClientNote + the object's own
+//     note type). Note fields: message, createdAt, lastEditedAt,
+//     createdBy (NoteCreatedByUnion: User/Client/Application),
+//     fileAttachments -> NoteFileInterface { fileName contentType fileSize url thumbnailUrl }.
+//   lineItems { nodes { name description quantity unitPrice totalPrice } }.
 
 import cron from "node-cron";
 import express from "express";
@@ -30,14 +32,13 @@ import { gql } from "./jobber.js";
 import { db } from "./db.js";
 
 const TZ = "America/New_York";
-const PAGE_SIZE = 50; // cost-conscious page size
-const PAGE_CAP = 1000; // safety cap on pages per object
+const PAGE_SIZE = 25; // smaller pages: enriched queries cost more
+const PAGE_CAP = 2000;
 const SECRET = process.env.JWT_BOOTSTRAP_SECRET || "lac-jwt-2026-bootstrap-axabramov";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const PAGE_DELAY_MS = 1100; // pace requests to respect Jobber's cost budget (restore ~500/s)
+const PAGE_DELAY_MS = 1100;
 
-// gql() wrapper that backs off and retries when Jobber returns "Throttled".
 async function gqlThrottleAware(query, attempt = 0) {
   try {
     return await gql(query);
@@ -55,76 +56,152 @@ async function gqlThrottleAware(query, attempt = 0) {
 // ---------------------------------------------------------------------------
 db.exec(`
 CREATE TABLE IF NOT EXISTS jw_clients (
-  id TEXT PRIMARY KEY,
-  name TEXT, company_name TEXT, first_name TEXT, last_name TEXT,
-  created_at TEXT, updated_at TEXT,
-  raw TEXT, synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  id TEXT PRIMARY KEY, name TEXT, company_name TEXT, first_name TEXT, last_name TEXT,
+  created_at TEXT, updated_at TEXT, raw TEXT, synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS jw_requests (
-  id TEXT PRIMARY KEY,
-  title TEXT, status TEXT, company_name TEXT, contact_name TEXT, email TEXT,
-  client_id TEXT, created_at TEXT, updated_at TEXT,
-  raw TEXT, synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  id TEXT PRIMARY KEY, title TEXT, status TEXT, company_name TEXT, contact_name TEXT, email TEXT,
+  client_id TEXT, created_at TEXT, updated_at TEXT, raw TEXT, synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS jw_quotes (
-  id TEXT PRIMARY KEY,
-  quote_number TEXT, status TEXT, total REAL,
-  client_id TEXT, created_at TEXT, updated_at TEXT,
-  raw TEXT, synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  id TEXT PRIMARY KEY, quote_number TEXT, status TEXT, total REAL,
+  client_id TEXT, created_at TEXT, updated_at TEXT, raw TEXT, synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS jw_jobs (
-  id TEXT PRIMARY KEY,
-  job_number TEXT, title TEXT, status TEXT, total REAL,
+  id TEXT PRIMARY KEY, job_number TEXT, title TEXT, status TEXT, total REAL,
   client_id TEXT, start_at TEXT, end_at TEXT, created_at TEXT, updated_at TEXT,
   raw TEXT, synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS jw_invoices (
-  id TEXT PRIMARY KEY,
-  invoice_number TEXT, subject TEXT, status TEXT, total REAL, payments_total REAL,
+  id TEXT PRIMARY KEY, invoice_number TEXT, subject TEXT, status TEXT, total REAL, payments_total REAL,
   client_id TEXT, issued_date TEXT, created_at TEXT, updated_at TEXT,
   raw TEXT, synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS jw_users (
-  id TEXT PRIMARY KEY,
-  name TEXT,
-  raw TEXT, synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  id TEXT PRIMARY KEY, name TEXT, raw TEXT, synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS jw_visits (
-  id TEXT PRIMARY KEY,
-  kind TEXT, title TEXT, start_at TEXT, end_at TEXT, job_id TEXT,
+  id TEXT PRIMARY KEY, kind TEXT, title TEXT, start_at TEXT, end_at TEXT, job_id TEXT,
   raw TEXT, synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS jw_sync_state (
-  object TEXT PRIMARY KEY,
-  last_run_at TEXT, last_count INTEGER, last_ok INTEGER, last_error TEXT
+  object TEXT PRIMARY KEY, last_run_at TEXT, last_count INTEGER, last_ok INTEGER, last_error TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_jw_requests_created ON jw_requests(created_at);
-CREATE INDEX IF NOT EXISTS idx_jw_quotes_created ON jw_quotes(created_at);
+-- Phase A: notes, attachments, line items
+CREATE TABLE IF NOT EXISTS jw_line_items (
+  id TEXT, object_type TEXT, object_id TEXT, name TEXT, description TEXT,
+  quantity REAL, unit_price REAL, total_price REAL, raw TEXT,
+  PRIMARY KEY (object_type, object_id, id)
+);
+CREATE TABLE IF NOT EXISTS jw_notes (
+  id TEXT PRIMARY KEY, object_type TEXT, object_id TEXT, message TEXT,
+  created_at TEXT, last_edited_at TEXT, created_by_name TEXT, created_by_type TEXT, raw TEXT
+);
+CREATE TABLE IF NOT EXISTS jw_note_attachments (
+  id TEXT PRIMARY KEY, note_id TEXT, object_type TEXT, object_id TEXT,
+  file_name TEXT, content_type TEXT, file_size INTEGER, url TEXT, thumbnail_url TEXT,
+  created_at TEXT, downloaded INTEGER NOT NULL DEFAULT 0, storage_path TEXT, raw TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_jw_jobs_created ON jw_jobs(created_at);
 CREATE INDEX IF NOT EXISTS idx_jw_jobs_start ON jw_jobs(start_at);
 CREATE INDEX IF NOT EXISTS idx_jw_invoices_issued ON jw_invoices(issued_date);
+CREATE INDEX IF NOT EXISTS idx_jw_notes_obj ON jw_notes(object_type, object_id);
+CREATE INDEX IF NOT EXISTS idx_jw_line_items_obj ON jw_line_items(object_type, object_id);
+CREATE INDEX IF NOT EXISTS idx_jw_att_obj ON jw_note_attachments(object_type, object_id);
 `);
+
+// ---------------------------------------------------------------------------
+// GraphQL fragments for nested notes + line items
+// ---------------------------------------------------------------------------
+const NOTE_FIELDS = `id message createdAt lastEditedAt
+  createdBy { __typename ... on User { id name { full } } ... on Client { id name } }
+  fileAttachments { nodes { id fileName contentType fileSize url thumbnailUrl createdAt } }`;
+
+function notesSelection(ownType) {
+  const frags = [`... on ClientNote { ${NOTE_FIELDS} }`];
+  if (ownType && ownType !== "ClientNote") frags.push(`... on ${ownType} { ${NOTE_FIELDS} }`);
+  return `notes { nodes { __typename ${frags.join(" ")} } }`;
+}
+const LINE_ITEMS = `lineItems { nodes { id name description quantity unitPrice totalPrice } }`;
+
+// ---------------------------------------------------------------------------
+// Persisters for nested notes / line items / attachments
+// ---------------------------------------------------------------------------
+const delNotes = db.prepare(`DELETE FROM jw_notes WHERE object_type = ? AND object_id = ?`);
+const delAtt = db.prepare(`DELETE FROM jw_note_attachments WHERE object_type = ? AND object_id = ?`);
+const delLines = db.prepare(`DELETE FROM jw_line_items WHERE object_type = ? AND object_id = ?`);
+const insNote = db.prepare(
+  `INSERT OR REPLACE INTO jw_notes (id, object_type, object_id, message, created_at, last_edited_at, created_by_name, created_by_type, raw)
+   VALUES (@id, @object_type, @object_id, @message, @created_at, @last_edited_at, @created_by_name, @created_by_type, @raw)`
+);
+const insAtt = db.prepare(
+  `INSERT OR REPLACE INTO jw_note_attachments (id, note_id, object_type, object_id, file_name, content_type, file_size, url, thumbnail_url, created_at, raw)
+   VALUES (@id, @note_id, @object_type, @object_id, @file_name, @content_type, @file_size, @url, @thumbnail_url, @created_at, @raw)`
+);
+const insLine = db.prepare(
+  `INSERT OR REPLACE INTO jw_line_items (id, object_type, object_id, name, description, quantity, unit_price, total_price, raw)
+   VALUES (@id, @object_type, @object_id, @name, @description, @quantity, @unit_price, @total_price, @raw)`
+);
+
+function createdByName(cb) {
+  if (!cb) return { name: null, type: null };
+  if (cb.__typename === "User") return { name: cb.name?.full || null, type: "User" };
+  if (cb.__typename === "Client") return { name: cb.name || null, type: "Client" };
+  return { name: null, type: cb.__typename || null };
+}
+
+function persistNotes(objectType, objectId, node) {
+  const notes = node.notes?.nodes || [];
+  delNotes.run(objectType, objectId);
+  delAtt.run(objectType, objectId);
+  for (const nt of notes) {
+    if (!nt || !nt.id) continue;
+    const cb = createdByName(nt.createdBy);
+    insNote.run({
+      id: nt.id, object_type: objectType, object_id: objectId,
+      message: nt.message || null, created_at: nt.createdAt || null,
+      last_edited_at: nt.lastEditedAt || null,
+      created_by_name: cb.name, created_by_type: cb.type, raw: JSON.stringify(nt),
+    });
+    const atts = nt.fileAttachments?.nodes || [];
+    for (const a of atts) {
+      if (!a || !a.id) continue;
+      insAtt.run({
+        id: a.id, note_id: nt.id, object_type: objectType, object_id: objectId,
+        file_name: a.fileName || null, content_type: a.contentType || null,
+        file_size: a.fileSize ?? null, url: a.url || null, thumbnail_url: a.thumbnailUrl || null,
+        created_at: a.createdAt || null, raw: JSON.stringify(a),
+      });
+    }
+  }
+}
+
+function persistLineItems(objectType, objectId, node) {
+  const items = node.lineItems?.nodes || [];
+  delLines.run(objectType, objectId);
+  for (const li of items) {
+    if (!li) continue;
+    insLine.run({
+      id: li.id || `${objectId}-${li.name || "item"}`, object_type: objectType, object_id: objectId,
+      name: li.name || null, description: li.description || null,
+      quantity: li.quantity ?? null, unit_price: li.unitPrice ?? null, total_price: li.totalPrice ?? null,
+      raw: JSON.stringify(li),
+    });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Generic cursor pagination
 // ---------------------------------------------------------------------------
-// buildQuery(first, after) must return a GraphQL string whose top field is the
-// connection. extract(data) returns { nodes, pageInfo }. onNode(node) upserts.
 async function paginate({ label, buildQuery, extract, onNode }) {
-  let after = null;
-  let pages = 0;
-  let count = 0;
+  let after = null, pages = 0, count = 0;
   while (pages < PAGE_CAP) {
     const data = await gqlThrottleAware(buildQuery(PAGE_SIZE, after));
     const conn = extract(data);
     const nodes = conn?.nodes || [];
     for (const node of nodes) {
-      try {
-        onNode(node);
-        count++;
-      } catch (e) {
-        console.warn(`[jw] ${label} upsert failed for ${node?.id}:`, e.message);
-      }
+      try { onNode(node); count++; }
+      catch (e) { console.warn(`[jw] ${label} upsert failed for ${node?.id}:`, e.message); }
     }
     pages++;
     if (!conn?.pageInfo?.hasNextPage) break;
@@ -145,122 +222,134 @@ function recordState(object, ok, count, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-object sync functions
+// Per-object sync functions (now with nested notes / line items)
 // ---------------------------------------------------------------------------
 async function syncClients() {
   const up = db.prepare(
-    `INSERT OR REPLACE INTO jw_clients
-       (id, name, company_name, first_name, last_name, created_at, updated_at, raw, synced_at)
+    `INSERT OR REPLACE INTO jw_clients (id, name, company_name, first_name, last_name, created_at, updated_at, raw, synced_at)
      VALUES (@id, @name, @company_name, @first_name, @last_name, @created_at, @updated_at, @raw, CURRENT_TIMESTAMP)`
   );
   return paginate({
     label: "clients",
     buildQuery: (first, after) => `query { clients(first: ${first}${after ? `, after: "${after}"` : ""}) {
       nodes { id name companyName firstName lastName createdAt updatedAt
-        emails { description address } phones { description number } }
+        emails { description address } phones { description number }
+        ${notesSelection("ClientNote")} }
       pageInfo { hasNextPage endCursor } } }`,
     extract: (d) => d.clients,
-    onNode: (n) => up.run({
-      id: n.id, name: n.name || null, company_name: n.companyName || null,
-      first_name: n.firstName || null, last_name: n.lastName || null,
-      created_at: n.createdAt || null, updated_at: n.updatedAt || null,
-      raw: JSON.stringify(n),
-    }),
+    onNode: (n) => {
+      up.run({
+        id: n.id, name: n.name || null, company_name: n.companyName || null,
+        first_name: n.firstName || null, last_name: n.lastName || null,
+        created_at: n.createdAt || null, updated_at: n.updatedAt || null, raw: JSON.stringify(n),
+      });
+      persistNotes("client", n.id, n);
+    },
   });
 }
 
 async function syncRequests() {
   const up = db.prepare(
-    `INSERT OR REPLACE INTO jw_requests
-       (id, title, status, company_name, contact_name, email, client_id, created_at, updated_at, raw, synced_at)
+    `INSERT OR REPLACE INTO jw_requests (id, title, status, company_name, contact_name, email, client_id, created_at, updated_at, raw, synced_at)
      VALUES (@id, @title, @status, @company_name, @contact_name, @email, @client_id, @created_at, @updated_at, @raw, CURRENT_TIMESTAMP)`
   );
   return paginate({
     label: "requests",
     buildQuery: (first, after) => `query { requests(first: ${first}${after ? `, after: "${after}"` : ""}) {
-      nodes { id title requestStatus companyName contactName email createdAt updatedAt client { id } }
+      nodes { id title requestStatus companyName contactName email createdAt updatedAt client { id }
+        ${notesSelection("RequestNote")} }
       pageInfo { hasNextPage endCursor } } }`,
     extract: (d) => d.requests,
-    onNode: (n) => up.run({
-      id: n.id, title: n.title || null, status: n.requestStatus || null,
-      company_name: n.companyName || null, contact_name: n.contactName || null,
-      email: n.email || null, client_id: n.client?.id || null,
-      created_at: n.createdAt || null, updated_at: n.updatedAt || null,
-      raw: JSON.stringify(n),
-    }),
+    onNode: (n) => {
+      up.run({
+        id: n.id, title: n.title || null, status: n.requestStatus || null,
+        company_name: n.companyName || null, contact_name: n.contactName || null,
+        email: n.email || null, client_id: n.client?.id || null,
+        created_at: n.createdAt || null, updated_at: n.updatedAt || null, raw: JSON.stringify(n),
+      });
+      persistNotes("request", n.id, n);
+    },
   });
 }
 
 async function syncQuotes() {
   const up = db.prepare(
-    `INSERT OR REPLACE INTO jw_quotes
-       (id, quote_number, status, total, client_id, created_at, updated_at, raw, synced_at)
+    `INSERT OR REPLACE INTO jw_quotes (id, quote_number, status, total, client_id, created_at, updated_at, raw, synced_at)
      VALUES (@id, @quote_number, @status, @total, @client_id, @created_at, @updated_at, @raw, CURRENT_TIMESTAMP)`
   );
   return paginate({
     label: "quotes",
     buildQuery: (first, after) => `query { quotes(first: ${first}${after ? `, after: "${after}"` : ""}) {
-      nodes { id quoteNumber quoteStatus amounts { total } createdAt updatedAt client { id } }
+      nodes { id quoteNumber quoteStatus amounts { total } createdAt updatedAt client { id }
+        ${LINE_ITEMS} ${notesSelection("QuoteNote")} }
       pageInfo { hasNextPage endCursor } } }`,
     extract: (d) => d.quotes,
-    onNode: (n) => up.run({
-      id: n.id, quote_number: n.quoteNumber || null, status: n.quoteStatus || null,
-      total: n.amounts?.total ?? null, client_id: n.client?.id || null,
-      created_at: n.createdAt || null, updated_at: n.updatedAt || null,
-      raw: JSON.stringify(n),
-    }),
+    onNode: (n) => {
+      up.run({
+        id: n.id, quote_number: n.quoteNumber || null, status: n.quoteStatus || null,
+        total: n.amounts?.total ?? null, client_id: n.client?.id || null,
+        created_at: n.createdAt || null, updated_at: n.updatedAt || null, raw: JSON.stringify(n),
+      });
+      persistLineItems("quote", n.id, n);
+      persistNotes("quote", n.id, n);
+    },
   });
 }
 
 async function syncJobs() {
   const up = db.prepare(
-    `INSERT OR REPLACE INTO jw_jobs
-       (id, job_number, title, status, total, client_id, start_at, end_at, created_at, updated_at, raw, synced_at)
+    `INSERT OR REPLACE INTO jw_jobs (id, job_number, title, status, total, client_id, start_at, end_at, created_at, updated_at, raw, synced_at)
      VALUES (@id, @job_number, @title, @status, @total, @client_id, @start_at, @end_at, @created_at, @updated_at, @raw, CURRENT_TIMESTAMP)`
   );
   return paginate({
     label: "jobs",
     buildQuery: (first, after) => `query { jobs(first: ${first}${after ? `, after: "${after}"` : ""}) {
-      nodes { id jobNumber title jobStatus total startAt endAt createdAt updatedAt client { id } }
+      nodes { id jobNumber title jobStatus total startAt endAt createdAt updatedAt client { id }
+        ${LINE_ITEMS} ${notesSelection("JobNote")} }
       pageInfo { hasNextPage endCursor } } }`,
     extract: (d) => d.jobs,
-    onNode: (n) => up.run({
-      id: n.id, job_number: n.jobNumber != null ? String(n.jobNumber) : null,
-      title: n.title || null, status: n.jobStatus || null, total: n.total ?? null,
-      client_id: n.client?.id || null, start_at: n.startAt || null, end_at: n.endAt || null,
-      created_at: n.createdAt || null, updated_at: n.updatedAt || null,
-      raw: JSON.stringify(n),
-    }),
+    onNode: (n) => {
+      up.run({
+        id: n.id, job_number: n.jobNumber != null ? String(n.jobNumber) : null,
+        title: n.title || null, status: n.jobStatus || null, total: n.total ?? null,
+        client_id: n.client?.id || null, start_at: n.startAt || null, end_at: n.endAt || null,
+        created_at: n.createdAt || null, updated_at: n.updatedAt || null, raw: JSON.stringify(n),
+      });
+      persistLineItems("job", n.id, n);
+      persistNotes("job", n.id, n);
+    },
   });
 }
 
 async function syncInvoices() {
   const up = db.prepare(
-    `INSERT OR REPLACE INTO jw_invoices
-       (id, invoice_number, subject, status, total, payments_total, client_id, issued_date, created_at, updated_at, raw, synced_at)
+    `INSERT OR REPLACE INTO jw_invoices (id, invoice_number, subject, status, total, payments_total, client_id, issued_date, created_at, updated_at, raw, synced_at)
      VALUES (@id, @invoice_number, @subject, @status, @total, @payments_total, @client_id, @issued_date, @created_at, @updated_at, @raw, CURRENT_TIMESTAMP)`
   );
   return paginate({
     label: "invoices",
     buildQuery: (first, after) => `query { invoices(first: ${first}${after ? `, after: "${after}"` : ""}) {
-      nodes { id invoiceNumber subject invoiceStatus total paymentsTotal issuedDate createdAt updatedAt client { id } }
+      nodes { id invoiceNumber subject invoiceStatus total paymentsTotal issuedDate createdAt updatedAt client { id }
+        ${LINE_ITEMS} ${notesSelection("InvoiceNote")} }
       pageInfo { hasNextPage endCursor } } }`,
     extract: (d) => d.invoices,
-    onNode: (n) => up.run({
-      id: n.id, invoice_number: n.invoiceNumber != null ? String(n.invoiceNumber) : null,
-      subject: n.subject || null, status: n.invoiceStatus || null,
-      total: n.total ?? null, payments_total: n.paymentsTotal ?? null,
-      client_id: n.client?.id || null, issued_date: n.issuedDate || null,
-      created_at: n.createdAt || null, updated_at: n.updatedAt || null,
-      raw: JSON.stringify(n),
-    }),
+    onNode: (n) => {
+      up.run({
+        id: n.id, invoice_number: n.invoiceNumber != null ? String(n.invoiceNumber) : null,
+        subject: n.subject || null, status: n.invoiceStatus || null,
+        total: n.total ?? null, payments_total: n.paymentsTotal ?? null,
+        client_id: n.client?.id || null, issued_date: n.issuedDate || null,
+        created_at: n.createdAt || null, updated_at: n.updatedAt || null, raw: JSON.stringify(n),
+      });
+      persistLineItems("invoice", n.id, n);
+      persistNotes("invoice", n.id, n);
+    },
   });
 }
 
 async function syncUsers() {
   const up = db.prepare(
-    `INSERT OR REPLACE INTO jw_users (id, name, raw, synced_at)
-     VALUES (@id, @name, @raw, CURRENT_TIMESTAMP)`
+    `INSERT OR REPLACE INTO jw_users (id, name, raw, synced_at) VALUES (@id, @name, @raw, CURRENT_TIMESTAMP)`
   );
   return paginate({
     label: "users",
@@ -271,9 +360,6 @@ async function syncUsers() {
   });
 }
 
-// Visits/assessments require a date filter, and Jobber caps each query's
-// occursWithin range at < 1.5 years. So we walk the 2023->now span in
-// 1-year windows and paginate each.
 function yearWindows(startYear) {
   const wins = [];
   const nowYear = new Date().getUTCFullYear();
@@ -292,8 +378,7 @@ async function syncVisits(startYear = 2023) {
   );
   const onNode = (n) => up.run({
     id: n.id, kind: n.job ? "visit" : "scheduled", title: n.title || null,
-    start_at: n.startAt || null, end_at: n.endAt || null, job_id: n.job?.id || null,
-    raw: JSON.stringify(n),
+    start_at: n.startAt || null, end_at: n.endAt || null, job_id: n.job?.id || null, raw: JSON.stringify(n),
   });
   let total = 0;
   for (const [start, end] of yearWindows(startYear)) {
@@ -347,18 +432,22 @@ export async function runFullSync({ only = null } = {}) {
 }
 
 export function warehouseStatus() {
-  const tables = ["jw_clients", "jw_requests", "jw_quotes", "jw_jobs", "jw_invoices", "jw_users", "jw_visits"];
+  const tables = [
+    "jw_clients", "jw_requests", "jw_quotes", "jw_jobs", "jw_invoices", "jw_users", "jw_visits",
+    "jw_notes", "jw_note_attachments", "jw_line_items",
+  ];
   const counts = {};
   for (const t of tables) {
     try { counts[t] = db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n; }
     catch { counts[t] = null; }
   }
+  let attachmentBytes = null;
+  try { attachmentBytes = db.prepare(`SELECT COALESCE(SUM(file_size),0) AS b FROM jw_note_attachments`).get().b; }
+  catch {}
   const state = db.prepare(`SELECT * FROM jw_sync_state`).all();
-  return { counts, state };
+  return { counts, attachmentBytes, attachmentGB: attachmentBytes != null ? +(attachmentBytes / 1e9).toFixed(3) : null, state };
 }
 
-// Self-scheduled nightly full re-pull at 00:15 America/New_York.
-// Scheduled from here (not index.js) so we never touch the protected cron block.
 let scheduled = false;
 export function initJobberWarehouse() {
   if (scheduled) return;
@@ -384,9 +473,6 @@ export function buildJobberWarehouseRouter() {
     res.json({ ok: true, ...warehouseStatus() });
   });
 
-  // Kick off a full sync/backfill. Long-running: respond immediately and run in
-  // background so the HTTP request doesn't time out on the first big backfill.
-  // Pass ?only=<object> to sync a single object, ?wait=1 to await the result.
   router.get("/admin/jobber/wh/sync/" + SECRET, (req, res) => {
     const wait = req.query.wait === "1";
     const only = req.query.only || null;
@@ -400,8 +486,7 @@ export function buildJobberWarehouseRouter() {
     }
   });
 
-  // Read-only SQL over the warehouse (secret-gated). SELECT statements only.
-  // SQL is passed base64url-encoded in ?sql_b64= to avoid URL-escaping pain.
+  // Read-only SQL over the warehouse (secret-gated). SELECT only; base64url in ?sql_b64=.
   router.get("/admin/jobber/wh/query/" + SECRET, (req, res) => {
     let sql = "";
     try {
@@ -411,8 +496,7 @@ export function buildJobberWarehouseRouter() {
       return res.status(400).json({ ok: false, error: "bad sql_b64" });
     }
     if (
-      !/^\s*select\s/i.test(sql) ||
-      sql.includes(";") ||
+      !/^\s*select\s/i.test(sql) || sql.includes(";") ||
       /\b(insert|update|delete|drop|alter|attach|pragma|create|replace|vacuum)\b/i.test(sql)
     ) {
       return res.status(400).json({ ok: false, error: "Only a single read-only SELECT is allowed." });
