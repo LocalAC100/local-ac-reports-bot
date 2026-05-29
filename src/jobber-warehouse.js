@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS jw_sync_state (
 CREATE INDEX IF NOT EXISTS idx_jw_requests_created ON jw_requests(created_at);
 CREATE INDEX IF NOT EXISTS idx_jw_quotes_created ON jw_quotes(created_at);
 CREATE INDEX IF NOT EXISTS idx_jw_jobs_created ON jw_jobs(created_at);
+CREATE INDEX IF NOT EXISTS idx_jw_jobs_start ON jw_jobs(start_at);
 CREATE INDEX IF NOT EXISTS idx_jw_invoices_issued ON jw_invoices(issued_date);
 `);
 
@@ -396,6 +397,31 @@ export function buildJobberWarehouseRouter() {
     } else {
       runFullSync({ only }).catch((e) => console.error("[jw] background sync error:", e.message));
       res.json({ ok: true, started: true, note: "Sync running in background. Poll /admin/jobber/wh/status/<secret>." });
+    }
+  });
+
+  // Read-only SQL over the warehouse (secret-gated). SELECT statements only.
+  // SQL is passed base64url-encoded in ?sql_b64= to avoid URL-escaping pain.
+  router.get("/admin/jobber/wh/query/" + SECRET, (req, res) => {
+    let sql = "";
+    try {
+      const b64 = String(req.query.sql_b64 || "");
+      sql = Buffer.from(b64.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+    } catch {
+      return res.status(400).json({ ok: false, error: "bad sql_b64" });
+    }
+    if (
+      !/^\s*select\s/i.test(sql) ||
+      sql.includes(";") ||
+      /\b(insert|update|delete|drop|alter|attach|pragma|create|replace|vacuum)\b/i.test(sql)
+    ) {
+      return res.status(400).json({ ok: false, error: "Only a single read-only SELECT is allowed." });
+    }
+    try {
+      const rows = db.prepare(sql).all();
+      res.json({ ok: true, sql, rowCount: rows.length, rows });
+    } catch (e) {
+      res.status(400).json({ ok: false, error: e.message });
     }
   });
 
