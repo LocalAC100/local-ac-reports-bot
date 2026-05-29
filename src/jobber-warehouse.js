@@ -17,7 +17,8 @@
 // - Nightly FULL re-pull, upsert by id. Notes/line-items/attachments are pulled
 //   NESTED in each object's page query (no per-record fan-out) and replaced per
 //   parent object on each sync.
-// - Throttle-aware with paced pagination.
+// - Throttle-aware with paced pagination. PAGE_SIZE tunable via ?first= because
+//   enriched (nested) queries cost more against Jobber's query-cost budget.
 //
 // SCHEMA NOTES (verified live, Jobber GraphQL 2025-04-16):
 //   notes -> <Object>NoteUnion (members include ClientNote + the object's own
@@ -32,7 +33,7 @@ import { gql } from "./jobber.js";
 import { db } from "./db.js";
 
 const TZ = "America/New_York";
-const PAGE_SIZE = 25; // smaller pages: enriched queries cost more
+let PAGE_SIZE = 25; // smaller pages: enriched queries cost more (tunable via ?first=)
 const PAGE_CAP = 2000;
 const SECRET = process.env.JWT_BOOTSTRAP_SECRET || "lac-jwt-2026-bootstrap-axabramov";
 
@@ -476,6 +477,10 @@ export function buildJobberWarehouseRouter() {
   router.get("/admin/jobber/wh/sync/" + SECRET, (req, res) => {
     const wait = req.query.wait === "1";
     const only = req.query.only || null;
+    if (req.query.first) {
+      const f = parseInt(req.query.first, 10);
+      if (Number.isFinite(f) && f >= 1 && f <= 200) PAGE_SIZE = f;
+    }
     if (wait) {
       runFullSync({ only })
         .then((r) => res.json({ ok: true, ...r }))
