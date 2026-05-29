@@ -270,28 +270,45 @@ async function syncUsers() {
   });
 }
 
-// Visits/assessments require a date filter. Scoped from 2023 forward.
-async function syncVisits(sinceIso = "2023-01-01T00:00:00Z") {
-  const nowIso = new Date().toISOString();
+// Visits/assessments require a date filter, and Jobber caps each query's
+// occursWithin range at < 1.5 years. So we walk the 2023->now span in
+// 1-year windows and paginate each.
+function yearWindows(startYear) {
+  const wins = [];
+  const nowYear = new Date().getUTCFullYear();
+  for (let y = startYear; y <= nowYear; y++) {
+    const start = `${y}-01-01T00:00:00Z`;
+    const end = y === nowYear ? new Date().toISOString() : `${y + 1}-01-01T00:00:00Z`;
+    wins.push([start, end]);
+  }
+  return wins;
+}
+
+async function syncVisits(startYear = 2023) {
   const up = db.prepare(
     `INSERT OR REPLACE INTO jw_visits (id, kind, title, start_at, end_at, job_id, raw, synced_at)
      VALUES (@id, @kind, @title, @start_at, @end_at, @job_id, @raw, CURRENT_TIMESTAMP)`
   );
-  return paginate({
-    label: "visits",
-    buildQuery: (first, after) => `query { scheduledItems(first: ${first}${after ? `, after: "${after}"` : ""}, filter: { occursWithin: { startAt: "${sinceIso}", endAt: "${nowIso}" } }) {
-      nodes {
-        ... on Visit { id title startAt endAt job { id } }
-        ... on Assessment { id title startAt endAt }
-      }
-      pageInfo { hasNextPage endCursor } } }`,
-    extract: (d) => d.scheduledItems,
-    onNode: (n) => up.run({
-      id: n.id, kind: n.job ? "visit" : "scheduled", title: n.title || null,
-      start_at: n.startAt || null, end_at: n.endAt || null, job_id: n.job?.id || null,
-      raw: JSON.stringify(n),
-    }),
+  const onNode = (n) => up.run({
+    id: n.id, kind: n.job ? "visit" : "scheduled", title: n.title || null,
+    start_at: n.startAt || null, end_at: n.endAt || null, job_id: n.job?.id || null,
+    raw: JSON.stringify(n),
   });
+  let total = 0;
+  for (const [start, end] of yearWindows(startYear)) {
+    total += await paginate({
+      label: `visits ${start.slice(0, 4)}`,
+      buildQuery: (first, after) => `query { scheduledItems(first: ${first}${after ? `, after: "${after}"` : ""}, filter: { occursWithin: { startAt: "${start}", endAt: "${end}" } }) {
+        nodes {
+          ... on Visit { id title startAt endAt job { id } }
+          ... on Assessment { id title startAt endAt }
+        }
+        pageInfo { hasNextPage endCursor } } }`,
+      extract: (d) => d.scheduledItems,
+      onNode,
+    });
+  }
+  return total;
 }
 
 // ---------------------------------------------------------------------------
