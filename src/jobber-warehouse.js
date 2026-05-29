@@ -279,7 +279,7 @@ async function syncVisits(sinceIso = "2023-01-01T00:00:00Z") {
   );
   return paginate({
     label: "visits",
-    buildQuery: (first, after) => `query { scheduledItems(first: ${first}${after ? `, after: "${after}"` : ""}, filter: { occursWithin: { startDate: "${sinceIso}", endDate: "${nowIso}" } }) {
+    buildQuery: (first, after) => `query { scheduledItems(first: ${first}${after ? `, after: "${after}"` : ""}, filter: { occursWithin: { startAt: "${sinceIso}", endAt: "${nowIso}" } }) {
       nodes {
         ... on Visit { id title startAt endAt job { id } }
         ... on Assessment { id title startAt endAt }
@@ -307,10 +307,11 @@ const JOBS = [
   ["visits", syncVisits],
 ];
 
-export async function runFullSync() {
+export async function runFullSync({ only = null } = {}) {
   const started = Date.now();
   const results = {};
-  for (const [name, fn] of JOBS) {
+  const jobs = only ? JOBS.filter(([name]) => name === only) : JOBS;
+  for (const [name, fn] of jobs) {
     try {
       const count = await fn();
       results[name] = { ok: true, count };
@@ -367,14 +368,16 @@ export function buildJobberWarehouseRouter() {
 
   // Kick off a full sync/backfill. Long-running: respond immediately and run in
   // background so the HTTP request doesn't time out on the first big backfill.
+  // Pass ?only=<object> to sync a single object, ?wait=1 to await the result.
   router.get("/admin/jobber/wh/sync/" + SECRET, (req, res) => {
     const wait = req.query.wait === "1";
+    const only = req.query.only || null;
     if (wait) {
-      runFullSync()
+      runFullSync({ only })
         .then((r) => res.json({ ok: true, ...r }))
         .catch((e) => res.status(500).json({ ok: false, error: e.message }));
     } else {
-      runFullSync().catch((e) => console.error("[jw] background sync error:", e.message));
+      runFullSync({ only }).catch((e) => console.error("[jw] background sync error:", e.message));
       res.json({ ok: true, started: true, note: "Sync running in background. Poll /admin/jobber/wh/status/<secret>." });
     }
   });
