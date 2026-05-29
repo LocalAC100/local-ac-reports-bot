@@ -34,6 +34,22 @@ const PAGE_SIZE = 50; // cost-conscious page size
 const PAGE_CAP = 1000; // safety cap on pages per object
 const SECRET = process.env.JWT_BOOTSTRAP_SECRET || "lac-jwt-2026-bootstrap-axabramov";
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const PAGE_DELAY_MS = 1100; // pace requests to respect Jobber's cost budget (restore ~500/s)
+
+// gql() wrapper that backs off and retries when Jobber returns "Throttled".
+async function gqlThrottleAware(query, attempt = 0) {
+  try {
+    return await gql(query);
+  } catch (e) {
+    if (/throttl/i.test(e.message || "") && attempt < 8) {
+      await sleep(6000 + attempt * 2000);
+      return gqlThrottleAware(query, attempt + 1);
+    }
+    throw e;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
@@ -98,7 +114,7 @@ async function paginate({ label, buildQuery, extract, onNode }) {
   let pages = 0;
   let count = 0;
   while (pages < PAGE_CAP) {
-    const data = await gql(buildQuery(PAGE_SIZE, after));
+    const data = await gqlThrottleAware(buildQuery(PAGE_SIZE, after));
     const conn = extract(data);
     const nodes = conn?.nodes || [];
     for (const node of nodes) {
@@ -112,6 +128,7 @@ async function paginate({ label, buildQuery, extract, onNode }) {
     pages++;
     if (!conn?.pageInfo?.hasNextPage) break;
     after = conn.pageInfo.endCursor;
+    await sleep(PAGE_DELAY_MS);
   }
   return count;
 }
@@ -255,13 +272,14 @@ async function syncUsers() {
 
 // Visits/assessments require a date filter. Scoped from 2023 forward.
 async function syncVisits(sinceIso = "2023-01-01T00:00:00Z") {
+  const nowIso = new Date().toISOString();
   const up = db.prepare(
     `INSERT OR REPLACE INTO jw_visits (id, kind, title, start_at, end_at, job_id, raw, synced_at)
      VALUES (@id, @kind, @title, @start_at, @end_at, @job_id, @raw, CURRENT_TIMESTAMP)`
   );
   return paginate({
     label: "visits",
-    buildQuery: (first, after) => `query { scheduledItems(first: ${first}${after ? `, after: "${after}"` : ""}, filter: { startAt: { after: "${sinceIso}" } }) {
+    buildQuery: (first, after) => `query { scheduledItems(first: ${first}${after ? `, after: "${after}"` : ""}, filter: { occursWithin: { startDate: "${sinceIso}", endDate: "${nowIso}" } }) {
       nodes {
         ... on Visit { id title startAt endAt job { id } }
         ... on Assessment { id title startAt endAt }
