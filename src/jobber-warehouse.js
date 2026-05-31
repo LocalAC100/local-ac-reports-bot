@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS jw_users (
 );
 CREATE TABLE IF NOT EXISTS jw_visits (
   id TEXT PRIMARY KEY, kind TEXT, title TEXT, start_at TEXT, end_at TEXT, job_id TEXT,
+  assigned_users TEXT,
   raw TEXT, synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS jw_sync_state (
@@ -126,6 +127,10 @@ catch (e) { if (!/duplicate column/i.test(e.message || "")) console.warn("[jw] s
 // Migration: capture the assigned salesperson(s) on each job (added 2026-05 for the Sales Report).
 try { db.exec(`ALTER TABLE jw_jobs ADD COLUMN assigned_users TEXT`); }
 catch (e) { if (!/duplicate column/i.test(e.message || "")) console.warn("[jw] assigned_users migration:", e.message); }
+
+// Migration: capture the assigned salesperson on each visit/assessment (the appointment's rep).
+try { db.exec(`ALTER TABLE jw_visits ADD COLUMN assigned_users TEXT`); }
+catch (e) { if (!/duplicate column/i.test(e.message || "")) console.warn("[jw] visits assigned_users migration:", e.message); }
 
 // ---------------------------------------------------------------------------
 // GraphQL fragments for nested notes + line items
@@ -323,7 +328,6 @@ async function syncJobs() {
     label: "jobs",
     buildQuery: (first, after) => `query { jobs(first: ${first}${after ? `, after: "${after}"` : ""}) {
       nodes { id jobNumber title jobStatus total startAt endAt createdAt updatedAt client { id }
-        assignedUsers { nodes { id name { full } } }
         ${LINE_ITEMS} ${notesSelection("JobNote")} }
       pageInfo { hasNextPage endCursor } } }`,
     extract: (d) => d.jobs,
@@ -396,12 +400,16 @@ function yearWindows(startYear) {
 
 async function syncVisits(startYear = 2023) {
   const up = db.prepare(
-    `INSERT OR REPLACE INTO jw_visits (id, kind, title, start_at, end_at, job_id, raw, synced_at)
-     VALUES (@id, @kind, @title, @start_at, @end_at, @job_id, @raw, CURRENT_TIMESTAMP)`
+    `INSERT OR REPLACE INTO jw_visits (id, kind, title, start_at, end_at, job_id, assigned_users, raw, synced_at)
+     VALUES (@id, @kind, @title, @start_at, @end_at, @job_id, @assigned_users, @raw, CURRENT_TIMESTAMP)`
   );
   const onNode = (n) => up.run({
     id: n.id, kind: n.job ? "visit" : "scheduled", title: n.title || null,
-    start_at: n.startAt || null, end_at: n.endAt || null, job_id: n.job?.id || null, raw: JSON.stringify(n),
+    start_at: n.startAt || null, end_at: n.endAt || null, job_id: n.job?.id || null,
+    assigned_users: (n.assignedUsers?.nodes?.length)
+      ? JSON.stringify(n.assignedUsers.nodes.map((u) => ({ id: u.id, name: u.name?.full || null })))
+      : null,
+    raw: JSON.stringify(n),
   });
   let total = 0;
   for (const [start, end] of yearWindows(startYear)) {
@@ -409,8 +417,8 @@ async function syncVisits(startYear = 2023) {
       label: `visits ${start.slice(0, 4)}`,
       buildQuery: (first, after) => `query { scheduledItems(first: ${first}${after ? `, after: "${after}"` : ""}, filter: { occursWithin: { startAt: "${start}", endAt: "${end}" } }) {
         nodes {
-          ... on Visit { id title startAt endAt job { id } }
-          ... on Assessment { id title startAt endAt }
+          ... on Visit { id title startAt endAt job { id } assignedUsers { nodes { id name { full } } } }
+          ... on Assessment { id title startAt endAt assignedUsers { nodes { id name { full } } } }
         }
         pageInfo { hasNextPage endCursor } } }`,
       extract: (d) => d.scheduledItems,
@@ -601,12 +609,17 @@ export function buildJobberWarehouseRouter() {
     }
   });
 
-  // One-off probe to validate the assignedUsers field on jobs (read-only, fixed query).
+  // Read-only GraphQL probe for schema discovery. ?q_b64=<base64url read query>. Mutations blocked.
   router.get("/admin/jobber/wh/probe-job/" + SECRET, async (req, res) => {
     try {
-      const data = await gqlThrottleAware(
-        `query { jobs(first: 1) { nodes { id title assignedUsers { nodes { id name { full } } } } } }`
-      );
+      let q = `query { jobs(first: 1) { nodes { id title } } }`;
+      if (req.query.q_b64) {
+        q = Buffer.from(String(req.query.q_b64).replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+      }
+      if (/\b(mutation|subscription)\b/i.test(q)) {
+        return res.status(400).json({ ok: false, error: "Only read queries allowed." });
+      }
+      const data = await gqlThrottleAware(q);
       res.json({ ok: true, data });
     } catch (e) {
       res.status(400).json({ ok: false, error: e.message });
