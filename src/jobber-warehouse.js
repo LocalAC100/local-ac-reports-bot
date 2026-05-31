@@ -328,6 +328,7 @@ async function syncJobs() {
     label: "jobs",
     buildQuery: (first, after) => `query { jobs(first: ${first}${after ? `, after: "${after}"` : ""}) {
       nodes { id jobNumber title jobStatus total startAt endAt createdAt updatedAt client { id }
+        visits(first: 3) { nodes { assignedUsers { nodes { id name { full } } } } }
         ${LINE_ITEMS} ${notesSelection("JobNote")} }
       pageInfo { hasNextPage endCursor } } }`,
     extract: (d) => d.jobs,
@@ -337,9 +338,7 @@ async function syncJobs() {
         title: n.title || null, status: n.jobStatus || null, total: n.total ?? null,
         client_id: n.client?.id || null, start_at: n.startAt || null, end_at: n.endAt || null,
         created_at: n.createdAt || null, updated_at: n.updatedAt || null,
-        assigned_users: (n.assignedUsers?.nodes?.length)
-          ? JSON.stringify(n.assignedUsers.nodes.map((u) => ({ id: u.id, name: u.name?.full || null })))
-          : null,
+        assigned_users: (() => { const m = {}; (n.visits?.nodes || []).forEach((vv) => (vv.assignedUsers?.nodes || []).forEach((u) => { m[u.id] = u.name?.full || null; })); const a = Object.keys(m).map((id) => ({ id, name: m[id] })); return a.length ? JSON.stringify(a) : null; })(),
         raw: JSON.stringify(n),
       });
       persistLineItems("job", n.id, n);
