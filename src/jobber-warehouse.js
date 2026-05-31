@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS jw_quotes (
 CREATE TABLE IF NOT EXISTS jw_jobs (
   id TEXT PRIMARY KEY, job_number TEXT, title TEXT, status TEXT, total REAL,
   client_id TEXT, start_at TEXT, end_at TEXT, created_at TEXT, updated_at TEXT,
+  assigned_users TEXT,
   raw TEXT, synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS jw_invoices (
@@ -121,6 +122,10 @@ CREATE INDEX IF NOT EXISTS idx_jw_att_obj ON jw_note_attachments(object_type, ob
 // Migration: track the on-disk file hash for dedupe (Phase B downloads).
 try { db.exec(`ALTER TABLE jw_note_attachments ADD COLUMN sha256 TEXT`); }
 catch (e) { if (!/duplicate column/i.test(e.message || "")) console.warn("[jw] sha256 migration:", e.message); }
+
+// Migration: capture the assigned salesperson(s) on each job (added 2026-05 for the Sales Report).
+try { db.exec(`ALTER TABLE jw_jobs ADD COLUMN assigned_users TEXT`); }
+catch (e) { if (!/duplicate column/i.test(e.message || "")) console.warn("[jw] assigned_users migration:", e.message); }
 
 // ---------------------------------------------------------------------------
 // GraphQL fragments for nested notes + line items
@@ -311,13 +316,14 @@ async function syncQuotes() {
 
 async function syncJobs() {
   const up = db.prepare(
-    `INSERT OR REPLACE INTO jw_jobs (id, job_number, title, status, total, client_id, start_at, end_at, created_at, updated_at, raw, synced_at)
-     VALUES (@id, @job_number, @title, @status, @total, @client_id, @start_at, @end_at, @created_at, @updated_at, @raw, CURRENT_TIMESTAMP)`
+    `INSERT OR REPLACE INTO jw_jobs (id, job_number, title, status, total, client_id, start_at, end_at, created_at, updated_at, assigned_users, raw, synced_at)
+     VALUES (@id, @job_number, @title, @status, @total, @client_id, @start_at, @end_at, @created_at, @updated_at, @assigned_users, @raw, CURRENT_TIMESTAMP)`
   );
   return paginate({
     label: "jobs",
     buildQuery: (first, after) => `query { jobs(first: ${first}${after ? `, after: "${after}"` : ""}) {
       nodes { id jobNumber title jobStatus total startAt endAt createdAt updatedAt client { id }
+        assignedUsers { nodes { id name { full } } }
         ${LINE_ITEMS} ${notesSelection("JobNote")} }
       pageInfo { hasNextPage endCursor } } }`,
     extract: (d) => d.jobs,
@@ -326,7 +332,11 @@ async function syncJobs() {
         id: n.id, job_number: n.jobNumber != null ? String(n.jobNumber) : null,
         title: n.title || null, status: n.jobStatus || null, total: n.total ?? null,
         client_id: n.client?.id || null, start_at: n.startAt || null, end_at: n.endAt || null,
-        created_at: n.createdAt || null, updated_at: n.updatedAt || null, raw: JSON.stringify(n),
+        created_at: n.createdAt || null, updated_at: n.updatedAt || null,
+        assigned_users: (n.assignedUsers?.nodes?.length)
+          ? JSON.stringify(n.assignedUsers.nodes.map((u) => ({ id: u.id, name: u.name?.full || null })))
+          : null,
+        raw: JSON.stringify(n),
       });
       persistLineItems("job", n.id, n);
       persistNotes("job", n.id, n);
@@ -588,6 +598,18 @@ export function buildJobberWarehouseRouter() {
     } else {
       downloadAttachments({ sinceYear }).catch((e) => console.error("[jw-dl] background error:", e.message));
       res.json({ ok: true, started: true, sinceYear, note: "Downloading in background. Poll /admin/jobber/wh/status/<secret> for downloadedFiles/downloadedGB." });
+    }
+  });
+
+  // One-off probe to validate the assignedUsers field on jobs (read-only, fixed query).
+  router.get("/admin/jobber/wh/probe-job/" + SECRET, async (req, res) => {
+    try {
+      const data = await gqlThrottleAware(
+        `query { jobs(first: 1) { nodes { id title assignedUsers { nodes { id name { full } } } } } }`
+      );
+      res.json({ ok: true, data });
+    } catch (e) {
+      res.status(400).json({ ok: false, error: e.message });
     }
   });
 
