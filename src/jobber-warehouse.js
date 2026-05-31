@@ -34,6 +34,7 @@ import path from "path";
 import crypto from "crypto";
 import { gql } from "./jobber.js";
 import { db } from "./db.js";
+import { sendMail } from "./mailer.js";
 
 // Phase B: where downloaded attachment files live on the persistent disk.
 const ATT_DIR = process.env.RENDER ? "/var/data/jw-attachments" : "./data/jw-attachments";
@@ -541,7 +542,114 @@ export function initJobberWarehouse() {
     },
     { timezone: TZ }
   );
+  cron.schedule(
+    "0 7 * * *",
+    async () => {
+      console.log("[jw-sales] 7 AM daily sales report email starting");
+      try { await runSalesEmail(yesterdayET()); } catch (e) { console.error("[jw-sales] failed:", e.message); }
+    },
+    { timezone: TZ }
+  );
   console.log("[jw] nightly warehouse sync scheduled for 00:15 " + TZ);
+  console.log("[jw] daily sales report email scheduled for 07:00 " + TZ);
+}
+
+// ---------------------------------------------------------------------------
+// Daily Sales Report (HVAC Free Estimate appointments) + 7 AM email
+// ---------------------------------------------------------------------------
+const SALES_RECIPIENTS = "service@local-ac.com";
+
+function yesterdayET() {
+  const d = new Date(Date.now() - 86400000);
+  return d.toLocaleString("en-CA", { timeZone: TZ }).slice(0, 10);
+}
+function parseAssigned(s) {
+  if (!s) return [];
+  try { return (JSON.parse(s) || []).map((u) => u && u.name).filter(Boolean); }
+  catch { return []; }
+}
+function classifyOutcome(msg) {
+  const t = (msg || "").toLowerCase();
+  const lender = /aqua|foundation|chowder|microf|synchrony|financ/.test(t);
+  const declined = /declin|denied|not approv|turned down|no approv/.test(t);
+  if (declined && /aqua|foundation/.test(t) && /chowder|microf/.test(t)) return "Financing wall - not the rep's fault";
+  if (declined && lender) return "Financing issue";
+  if (/follow ?up|think|call back|callback|consider|2nd opinion|second opinion|get back|spouse|wife|husband/.test(t)) return "Still alive - follow up";
+  if (/price|expensive|competitor|cheaper|shop|too high/.test(t)) return "Price / competition";
+  if (/no ?show|not home|reschedul|cancel/.test(t)) return "No-show / reschedule";
+  if (t.trim()) return "Other - see notes";
+  return "No note yet";
+}
+function buildSalesReport(dateStr) {
+  const jobs = db.prepare(
+    `SELECT j.id, j.title, j.status, j.assigned_users, j.client_id, c.name AS client
+     FROM jw_jobs j LEFT JOIN jw_clients c ON c.id = j.client_id
+     WHERE j.title LIKE '%Free Estimate%' AND substr(j.start_at,1,10) = ?`
+  ).all(dateStr);
+  const invForClient = db.prepare(
+    `SELECT total, created_at FROM jw_invoices WHERE client_id = ? AND substr(created_at,1,10) >= ? ORDER BY created_at DESC LIMIT 1`
+  );
+  const lastNote = db.prepare(
+    `SELECT created_by_name, message FROM jw_notes WHERE object_type='job' AND object_id = ? ORDER BY created_at DESC LIMIT 1`
+  );
+  const rows = jobs.map((j) => {
+    const reps = parseAssigned(j.assigned_users);
+    const rep = reps[0] || "Unassigned";
+    const phone = /\(ph\)/i.test(j.title || "");
+    const inv = invForClient.get(j.client_id, dateStr);
+    const sold = !!inv;
+    const note = lastNote.get(j.id) || {};
+    return { client: j.client || "(unknown)", rep, type: phone ? "Phone" : "Physical",
+      sold, ticket: sold ? (inv.total || 0) : 0,
+      outcome: sold ? "Sold" : classifyOutcome(note.message), noteBy: note.created_by_name || null };
+  });
+  const total = rows.length;
+  const physical = rows.filter((r) => r.type === "Physical").length;
+  const phone = total - physical;
+  const sold = rows.filter((r) => r.sold).length;
+  const revenue = rows.reduce((a, r) => a + (r.ticket || 0), 0);
+  const byRep = {};
+  for (const r of rows) {
+    byRep[r.rep] = byRep[r.rep] || { rep: r.rep, jobs: 0, physical: 0, phone: 0, sold: 0 };
+    byRep[r.rep].jobs++; byRep[r.rep][r.type === "Physical" ? "physical" : "phone"]++;
+    if (r.sold) byRep[r.rep].sold++;
+  }
+  return { date: dateStr, total, physical, phone, sold,
+    conversion: total ? Math.round((sold / total) * 100) : 0,
+    revenue, avgTicket: sold ? Math.round(revenue / sold) : 0,
+    byRep: Object.values(byRep), rows };
+}
+function renderSalesEmailHtml(r) {
+  const money = (n) => "$" + (n || 0).toLocaleString("en-US");
+  const repRows = r.byRep.map((x) =>
+    `<tr><td>${x.rep}</td><td align="center">${x.jobs}</td><td align="center">${x.physical}</td><td align="center">${x.phone}</td><td align="center">${x.sold}</td><td align="center">${x.jobs ? Math.round((x.sold / x.jobs) * 100) : 0}%</td></tr>`).join("");
+  const jobRows = r.rows.map((x) =>
+    `<tr><td>${x.client}</td><td>${x.rep}</td><td>${x.type}</td><td>${x.sold ? "Sold" : x.outcome}</td><td align="right">${x.sold ? money(x.ticket) : "-"}</td><td>${x.noteBy ? "note by " + x.noteBy : ""}</td></tr>`).join("");
+  return `<div style="font-family:Arial,sans-serif;font-size:14px;color:#222">
+  <h2 style="margin:0 0 4px">Local AC - Daily Sales Report</h2>
+  <p style="color:#666;margin:0 0 12px">${r.date} &middot; HVAC Free Estimate appointments</p>
+  <p><b>${r.total}</b> appointments (${r.physical} physical, ${r.phone} phone) &middot; <b>${r.sold} sold</b> &middot; conversion <b>${r.conversion}%</b> &middot; revenue <b>${money(r.revenue)}</b>${r.sold ? " &middot; avg ticket " + money(r.avgTicket) : ""}</p>
+  <h3>By rep</h3>
+  <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse">
+  <tr style="background:#f3f3f3"><th>Rep</th><th>Jobs</th><th>Physical</th><th>Phone</th><th>Sold</th><th>Conv.</th></tr>
+  ${repRows || '<tr><td colspan="6">No appointments.</td></tr>'}
+  </table>
+  <h3>Appointments</h3>
+  <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse">
+  <tr style="background:#f3f3f3"><th>Customer</th><th>Rep</th><th>Type</th><th>Outcome</th><th>Ticket</th><th>Notes</th></tr>
+  ${jobRows || '<tr><td colspan="6">No appointments.</td></tr>'}
+  </table>
+  <p style="color:#888;font-size:12px;margin-top:16px">From the Jobber warehouse. Not-sold outcome is classified from the rep's note. Sold = an invoice created for the customer on/after the appointment date.</p>
+  </div>`;
+}
+export async function runSalesEmail(dateStr, { nomail = false } = {}) {
+  const date = dateStr || yesterdayET();
+  const r = buildSalesReport(date);
+  const html = renderSalesEmailHtml(r);
+  const label = new Date(date + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  let sent = false;
+  if (!nomail) { await sendMail({ to: SALES_RECIPIENTS, subject: `Local AC - Sales Report (${label})`, html }); sent = true; }
+  return { date, sent, recipients: SALES_RECIPIENTS, summary: { total: r.total, sold: r.sold, conversion: r.conversion, revenue: r.revenue, byRep: r.byRep }, htmlLen: html.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -622,6 +730,16 @@ export function buildJobberWarehouseRouter() {
       res.json({ ok: true, data });
     } catch (e) {
       res.status(400).json({ ok: false, error: e.message });
+    }
+  });
+
+  // Daily sales report email: build from warehouse + send via mailer. ?date=YYYY-MM-DD&nomail=1
+  router.get("/admin/jobber/wh/sales-email/" + SECRET, async (req, res) => {
+    try {
+      const r = await runSalesEmail(req.query.date || null, { nomail: req.query.nomail === "1" });
+      res.json({ ok: true, ...r });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message });
     }
   });
 
