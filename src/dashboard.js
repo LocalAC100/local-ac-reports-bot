@@ -384,8 +384,7 @@ export function buildDashboardRouter() {
         console.error("[dispatch] archive failed:", e?.message);
       }
       const subject = `Local AC — ${safeMode[0].toUpperCase()}${safeMode.slice(1)} Dispatch (${range.from.toFormat("LLL d")} → ${range.to.toFormat("LLL d")})`;
-      await sendMail({ subject, html });
-      if (req.body && req.body.email) { try { await sendMail({ to: "service@local-ac.com, Christianq@local-ac.com", subject: "Local AC - Dispatch " + safeMode + " report", html: html }); } catch (e) { console.error("dispatch email failed:", e.message); } }
+      if (req.body && req.body.email) await sendMail({ subject, html });
       return res.json({
         ok: true,
         mode: safeMode,
