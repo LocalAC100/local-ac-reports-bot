@@ -856,8 +856,9 @@ export function buildJobberWarehouseRouter() {
       try {
         const body = JSON.parse(raw || "{}");
         if (!body.html) return res.status(400).json({ ok: false, error: "html required" });
-        await sendMail({ to: SALES_RECIPIENTS, subject: body.subject || "Local AC - Sales Report", html: body.html });
-        res.json({ ok: true, sent: true, to: SALES_RECIPIENTS, htmlLen: body.html.length });
+        const recips = Array.isArray(body.to) && body.to.length ? body.to : SALES_RECIPIENTS;
+        await sendMail({ to: recips, subject: body.subject || "Local AC - Sales Report", html: body.html });
+        res.json({ ok: true, sent: true, to: recips, htmlLen: body.html.length });
       } catch (e) {
         res.status(500).json({ ok: false, error: e.message });
       }
