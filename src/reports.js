@@ -22,6 +22,7 @@ import {
   renderHubstaffSection,
   renderCallActivitySection,
   renderDispatcherPerformanceSection,
+  renderOldLeadsBookedSection,
   renderLeadActivitySection,
   renderHourXDispatcherSection,
   renderSection6,
@@ -769,11 +770,20 @@ export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
       // touched them — exactly the bug Alex saw with Frank's 2 bookings on
       // May 7. `dateAdded` is when the opp was first created, which is a
       // tighter (and accurate-by-default) proxy for "booked in this window."
-      const created = DateTime.fromISO(
+      // "Booked today" = the day it ENTERED the booked stage (lastStageChangeAt),
+      // falling back to opp-creation when GHL omits it. Catches older leads
+      // booked today regardless of how they were contacted.
+      const oppCreated = DateTime.fromISO(
         o.dateAdded || o.createdAt || ""
       ).setZone(TZ);
+      const stageMoved = DateTime.fromISO(
+        o.lastStageChangeAt || o.dateAdded || o.createdAt || ""
+      ).setZone(TZ);
+      const created = stageMoved.isValid ? stageMoved : oppCreated;
       if (!created.isValid) continue;
       if (created < from || created > to) continue;
+      // Old lead = opportunity created before today but booked today.
+      const isOldLead = oppCreated.isValid && oppCreated < from;
 
       const dispatcher =
         [...byDispatcher.values()].find((d) => d.ghlUserId === o.assignedTo) || {
@@ -788,17 +798,26 @@ export async function buildDispatcherSection({ from, to, includeTimeOfDay }) {
       else if (isPhys) kind = "physical";
       else if (isWonBooking && stage.includes("phone")) kind = "phone_sale";
       else kind = "physical"; // won-default
-      if (kind === "physical" && dispatcher.physBookings != null) dispatcher.physBookings += 1;
-      if (kind === "phone_sale" && dispatcher.phBookings != null) dispatcher.phBookings += 1;
-      if (kind === "live_transfer" && dispatcher.liveTransfers != null) dispatcher.liveTransfers += 1;
+      // Keep established Section 4 / booking-ratio numbers unchanged: only
+      // NEW-lead bookings feed the per-dispatcher booking counters. Old-lead
+      // bookings appear in the dedicated Old Leads Booked Today section.
+      if (!isOldLead) {
+        if (kind === "physical" && dispatcher.physBookings != null) dispatcher.physBookings += 1;
+        if (kind === "phone_sale" && dispatcher.phBookings != null) dispatcher.phBookings += 1;
+        if (kind === "live_transfer" && dispatcher.liveTransfers != null) dispatcher.liveTransfers += 1;
+      }
       appointmentsBooked.push({
         leadName: o.contact?.name || o.name || "(unnamed)",
         time: fmtTime(created),
         dispatcher: dispatcher.name,
         stage: o.pipelineStageName,
         kind,
+        isOldLead,
+        leadAgeDays: oppCreated.isValid
+          ? Math.max(0, Math.floor(from.diff(oppCreated, "days").days))
+          : null,
       });
-      if (includeTimeOfDay) bucketBookings[bucketFor(created)] += 1;
+      if (includeTimeOfDay && !isOldLead) bucketBookings[bucketFor(created)] += 1;
     }
   }
 
@@ -1221,6 +1240,7 @@ export async function runMorningReport({ dateOverride, to } = {}) {
       renderCallActivitySection(dispatch, excelData),
       renderLeadActivitySection(excelData, { generatedAt }),
       renderDispatcherPerformanceSection(dispatch, excelData),
+      renderOldLeadsBookedSection(dispatch),
       renderHourXDispatcherSection(excelData),
       renderSection6(excelData),
     ],
@@ -1297,6 +1317,7 @@ export async function runEveningReport({ dateOverride, to, noMail } = {}) {
       renderCallActivitySection(dispatch, excelData),
       renderLeadActivitySection(excelData, { generatedAt }),
       renderDispatcherPerformanceSection(dispatch, excelData),
+      renderOldLeadsBookedSection(dispatch),
       renderHourXDispatcherSection(excelData),
       renderSection6(excelData),
     ],
