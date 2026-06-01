@@ -65,8 +65,9 @@ function renderNav({ user, activeNav }) {
   ];
   if (user.role === "admin") nav.push({ href: "/settings/users", label: "Users", key: "users" });
   return `<header class="topbar">
-  <div class="brand">
-    <div class="brand-icon">${LOGO_SVG}</div>
+  <div class="brand" style="display:flex;align-items:center;gap:14px">
+    <style>.brand-chip svg{width:34px;height:34px;display:block}</style>
+    <span class="brand-chip" style="background:#fff;border-radius:10px;padding:6px 12px;display:inline-flex;align-items:center;gap:10px;box-shadow:0 2px 6px rgba(0,0,0,0.22)">${LOGO_SVG}<span style="display:flex;flex-direction:column;line-height:1.04"><span style="font-family:Arial,Helvetica,sans-serif;font-weight:800;font-size:20px;letter-spacing:0.5px;color:#1B57A8">LOCAL AC</span><span style="font-family:Arial,Helvetica,sans-serif;font-weight:700;font-size:9px;letter-spacing:1.5px;margin-top:3px"><span style="color:#E63952">HEATING</span> <span style="color:#1B57A8">&amp; COOLING</span></span></span></span>
     <div class="brand-text">Control Room</div>
   </div>
   <nav class="primary-nav">
