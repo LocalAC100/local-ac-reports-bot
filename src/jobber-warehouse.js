@@ -864,5 +864,260 @@ export function buildJobberWarehouseRouter() {
       }
     });
   });
+  // ---- Sales report web page (secret-gated) ----
+  const SALES_PAGE_HTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local AC — Sales Report</title>
+<style>
+  :root{ --blue:#0f4c81; --line:#e0e0e0; }
+  *{ box-sizing:border-box; }
+  body{ font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; color:#1a1a1a; margin:0; background:#f5f7fa; }
+  .wrap{ max-width:900px; margin:0 auto; padding:18px; }
+  h1{ font-size:22px; margin:0 0 2px; }
+  .sub{ color:#666; margin-bottom:16px; font-size:13px; }
+  .controls{ background:#fff; border:1px solid var(--line); border-radius:10px; padding:14px; display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:18px; }
+  .modes{ display:flex; gap:6px; }
+  .modes button{ border:1px solid var(--blue); background:#fff; color:var(--blue); padding:7px 14px; border-radius:6px; cursor:pointer; font-size:13px; }
+  .modes button.active{ background:var(--blue); color:#fff; }
+  .fld{ display:flex; flex-direction:column; font-size:12px; color:#555; gap:3px; }
+  .fld input{ padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:13px; }
+  .run{ background:var(--blue); color:#fff; border:none; padding:9px 20px; border-radius:6px; cursor:pointer; font-size:14px; font-weight:bold; }
+  .hidden{ display:none; }
+  #out{ background:#fff; border:1px solid var(--line); border-radius:10px; padding:18px; min-height:120px; }
+  .band{ background:var(--blue); color:#fff; border-radius:8px; padding:14px 16px; margin-bottom:8px; }
+  table{ width:100%; border-collapse:collapse; font-size:12.5px; margin:8px 0 6px; }
+  th,td{ padding:7px; border-bottom:1px solid #eee; }
+  thead tr{ background:#f0f3f7; }
+  .center{ text-align:center; } .right{ text-align:right; }
+  .hl{ background:#e3eef8; font-weight:bold; }
+  .totrow td{ border-top:2px solid var(--blue); background:#f7f9fc; font-weight:bold; }
+  .muted{ color:#888; font-weight:normal; }
+  .boxes{ display:flex; gap:12px; margin:14px 0; flex-wrap:wrap; }
+  .box{ flex:1; min-width:240px; border:1px solid var(--line); border-radius:8px; padding:12px; font-size:13px; }
+  h2.rep{ font-size:16px; border-bottom:2px solid var(--blue); padding-bottom:4px; margin-top:24px; }
+  .sold{ color:#1a7a3c; } .notsold{ color:#777; }
+  .lead{ padding:3px 0; border-bottom:1px solid #f2f2f2; font-size:13px; }
+  .followbox{ background:#fff4f4; border:1px solid #f3b0b0; border-left:5px solid #d32f2f; border-radius:6px; padding:12px; margin:10px 0 6px; }
+  .followbox .hd{ color:#d32f2f; font-weight:bold; margin-bottom:6px; }
+  .err{ color:#b00020; } .loading{ color:#888; }
+  .note{ color:#555; font-style:italic; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Local AC — Sales Report</h1>
+  <div class="sub">HVAC Free Estimate appointments &middot; live from the Control Room warehouse</div>
+
+  <div class="controls">
+    <div class="modes">
+      <button id="mDay" onclick="setMode('day')">Day</button>
+      <button id="mWeek" onclick="setMode('week')">Week</button>
+      <button id="mRange" onclick="setMode('range')">Custom range</button>
+    </div>
+    <div class="fld" id="f1"><label id="l1">Date</label><input type="date" id="d1"></div>
+    <div class="fld hidden" id="f2"><label>End date</label><input type="date" id="d2"></div>
+    <button class="run" onclick="run()">Run report</button>
+  </div>
+
+  <div id="out"><div class="loading">Pick a date and click Run report.</div></div>
+</div>
+
+<script>
+var QBASE = "/admin/jobber/wh/query/%%SECRET%%?sql_b64=";
+var REPS = ["Alexander Abramov","Salvatore Albano","Kelvin Fernandez"];
+var SHORT = { "Alexander Abramov":"Alexander", "Salvatore Albano":"Salvatore", "Kelvin Fernandez":"Kelvin" };
+var mode = "week";
+
+function b64url(s){ return btoa(unescape(encodeURIComponent(s))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""); }
+function esc(s){ return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function money(n){ return "$"+Math.round(n).toLocaleString(); }
+function pct(a,b){ return b>0 ? Math.round(a*100/b)+"%" : "&ndash;"; }
+function iso(d){ return d.toISOString().slice(0,10); }
+function addDays(s, n){ var d=new Date(s+"T00:00:00"); d.setDate(d.getDate()+n); return iso(d); }
+
+async function q(sql){
+  var r = await fetch(QBASE + b64url(sql));
+  var j = await r.json();
+  if(!j.ok) throw new Error(j.error||"query failed");
+  return j.rows||[];
+}
+
+function setMode(m){
+  mode = m;
+  document.getElementById("mDay").className = m==="day"?"active":"";
+  document.getElementById("mWeek").className = m==="week"?"active":"";
+  document.getElementById("mRange").className = m==="range"?"active":"";
+  document.getElementById("l1").textContent = m==="range" ? "Start date" : (m==="week" ? "Any date in week" : "Date");
+  document.getElementById("f2").className = m==="range" ? "fld" : "fld hidden";
+}
+
+function rangeFor(){
+  var d1 = document.getElementById("d1").value;
+  if(!d1) return null;
+  if(mode==="day") return { start:d1, end:d1, label:d1 };
+  if(mode==="range"){ var d2=document.getElementById("d2").value||d1; return { start:d1, end:d2, label:d1+" to "+d2 }; }
+  // week: Sunday..Saturday containing d1
+  var dt = new Date(d1+"T00:00:00"); var dow = dt.getDay();
+  var start = addDays(d1, -dow); var end = addDays(start, 6);
+  return { start:start, end:end, label:"Week of "+start+" (Sun) – "+end+" (Sat)" };
+}
+
+function parseReps(s){
+  try{ var arr=JSON.parse(s||"[]"); return arr.map(function(x){return x.name;}).filter(function(n){return n && n!=="Maor";}); }
+  catch(e){ return []; }
+}
+function repOf(names){ if(!names.length) return null; return names[names.length-1]; } // closer default = last assignee
+
+var FIN = /declin|denied|no credit|no pace|chowder|turned down|credit wall|not approv/i;
+var HOT = /hot|first option|wrap|tomorrow|will buy|sold on|freezing|waiting on|follow ?up|call ?back|shopping|interested|thinking/i;
+
+async function run(){
+  var rg = rangeFor();
+  var out = document.getElementById("out");
+  if(!rg){ out.innerHTML = '<div class="err">Please pick a date first.</div>'; return; }
+  out.innerHTML = '<div class="loading">Loading '+esc(rg.label)+' ...</div>';
+  var endp = addDays(rg.end, 30); // invoice window: catch late invoicing
+  try{
+    var jobsSql =
+      "SELECT j.id, j.title, c.name client, j.assigned_users rep, j.client_id, " +
+      "(SELECT i.total FROM jw_invoices i WHERE i.client_id=j.client_id AND substr(i.created_at,1,10) BETWEEN '"+rg.start+"' AND '"+endp+"' ORDER BY i.created_at DESC LIMIT 1) inv_total, " +
+      "(SELECT i.status FROM jw_invoices i WHERE i.client_id=j.client_id AND substr(i.created_at,1,10) BETWEEN '"+rg.start+"' AND '"+endp+"' ORDER BY i.created_at DESC LIMIT 1) inv_status " +
+      "FROM jw_jobs j LEFT JOIN jw_clients c ON c.id=j.client_id " +
+      "WHERE j.title LIKE '%HVAC Free Estimate%' AND substr(j.start_at,1,10) BETWEEN '"+rg.start+"' AND '"+rg.end+"' AND j.assigned_users NOT LIKE '%Maor%' " +
+      "ORDER BY j.assigned_users, c.name";
+    var notesSql =
+      "SELECT n.object_id oid, n.created_by_name author, n.message msg FROM jw_jobs j JOIN jw_notes n ON n.object_id=j.id " +
+      "WHERE j.title LIKE '%HVAC Free Estimate%' AND substr(j.start_at,1,10) BETWEEN '"+rg.start+"' AND '"+rg.end+"' AND j.assigned_users NOT LIKE '%Maor%' " +
+      "AND n.created_by_name IN ('Alexander Abramov','Salvatore Albano','Kelvin Fernandez')";
+
+    var jobs = await q(jobsSql);
+    var notes = await q(notesSql);
+    var noteBy = {};
+    notes.forEach(function(n){ noteBy[n.oid] = (noteBy[n.oid]? noteBy[n.oid]+" / ":"") + (n.msg||""); });
+
+    render(rg, jobs, noteBy);
+  }catch(e){
+    out.innerHTML = '<div class="err">Error: '+esc(e.message)+'</div>';
+  }
+}
+
+function blankRep(){ return { phys:0, phone:0, soldPhys:0, soldPhone:0, booked:0, physDecl:0, sold:[], lost:[], follow:[] }; }
+
+function render(rg, jobs, noteBy){
+  var R = {}; REPS.forEach(function(n){ R[n]=blankRep(); });
+  var unknown = blankRep();
+
+  jobs.forEach(function(j){
+    var names = parseReps(j.rep);
+    var repName = repOf(names);
+    var bucket = (repName && R[repName]) ? R[repName] : unknown;
+    var phone = /\(PH\)/i.test(j.title);
+    var sold = j.inv_total != null;
+    var note = noteBy[j.id] || "";
+    if(phone) bucket.phone++; else bucket.phys++;
+    if(sold){
+      if(phone) bucket.soldPhone++; else bucket.soldPhys++;
+      bucket.booked += Number(j.inv_total)||0;
+      bucket.sold.push({ client:j.client, amt:Number(j.inv_total)||0, phone:phone, status:j.inv_status });
+    } else {
+      var decl = FIN.test(note);
+      if(decl && !phone) bucket.physDecl++;
+      bucket.lost.push({ client:j.client, phone:phone, note:note, decl:decl });
+      if(!decl){ // live / needs follow-up
+        bucket.follow.push({ client:j.client, phone:phone, note:note, hot:HOT.test(note) });
+      }
+    }
+  });
+
+  // company totals
+  var C = blankRep();
+  REPS.forEach(function(n){ var r=R[n]; C.phys+=r.phys; C.phone+=r.phone; C.soldPhys+=r.soldPhys; C.soldPhone+=r.soldPhone; C.booked+=r.booked; C.physDecl+=r.physDecl; });
+
+  function rates(r){
+    var appts=r.phys+r.phone, sold=r.soldPhys+r.soldPhone;
+    return { appts:appts, sold:sold,
+      all:pct(sold,appts), phone:(r.phone? pct(r.soldPhone,r.phone):"&ndash;"),
+      phys:pct(r.soldPhys,r.phys), sell:pct(r.soldPhys, r.phys-r.physDecl),
+      sellD:(r.phys-r.physDecl) };
+  }
+
+  var html = "";
+  var cr = rates(C);
+  var avg = cr.sold>0 ? money(C.booked/cr.sold) : "$0";
+  html += '<div class="band"><div style="font-size:12px;opacity:.85;text-transform:uppercase;letter-spacing:.5px">'+esc(rg.label)+'</div>';
+  html += '<div style="font-size:15px;margin-top:4px"><b>'+cr.appts+'</b> appts ('+C.phys+' physical / '+C.phone+' phone) &nbsp;|&nbsp; <b>'+cr.sold+'</b> sold &nbsp;|&nbsp; <b>'+money(C.booked)+'</b> booked &nbsp;|&nbsp; <b>'+avg+'</b> avg ticket</div>';
+  html += '<div style="font-size:14px;margin-top:6px;background:rgba(255,255,255,.12);border-radius:6px;padding:6px 10px;display:inline-block">Close &mdash; Physical <b>'+cr.phys+'</b> &middot; Sellable <b>'+cr.sell+'</b> &middot; Phone <b>'+cr.phone+'</b> &middot; All '+cr.all+'</div></div>';
+
+  // table
+  html += '<table><thead><tr><th style="text-align:left">Rep</th><th>Appts<br><span class="muted">phys/phone</span></th><th>Sold</th><th>All</th><th>Phone</th><th class="hl">Physical</th><th>Sellable<br><span class="muted">phys&minus;fin</span></th><th class="right">Booked</th></tr></thead><tbody>';
+  REPS.forEach(function(n){
+    var r=R[n], x=rates(r);
+    html += '<tr><td><b>'+SHORT[n]+'</b></td>'+
+      '<td class="center">'+x.appts+' <span class="muted">('+r.phys+'/'+r.phone+')</span></td>'+
+      '<td class="center">'+x.sold+'</td>'+
+      '<td class="center">'+x.all+'</td>'+
+      '<td class="center">'+x.phone+'</td>'+
+      '<td class="center hl">'+x.phys+' <span class="muted">('+r.soldPhys+'/'+r.phys+')</span></td>'+
+      '<td class="center">'+x.sell+' <span class="muted">('+r.soldPhys+'/'+x.sellD+')</span></td>'+
+      '<td class="right">'+money(r.booked)+'</td></tr>';
+  });
+  html += '<tr class="totrow"><td>Company</td><td class="center">'+cr.appts+' <span class="muted">('+C.phys+'/'+C.phone+')</span></td><td class="center">'+cr.sold+'</td><td class="center">'+cr.all+'</td><td class="center">'+cr.phone+'</td><td class="center hl">'+cr.phys+' <span class="muted">('+C.soldPhys+'/'+C.phys+')</span></td><td class="center">'+cr.sell+' <span class="muted">('+C.soldPhys+'/'+(C.phys-C.physDecl)+')</span></td><td class="right">'+money(C.booked)+'</td></tr>';
+  html += '</tbody></table>';
+  html += '<div class="muted" style="font-size:11.5px;margin-bottom:6px">Sold includes draft invoices. Physical excludes phone (PH) appointments. Sellable = physical minus full-waterfall financing declines. Shared appointments credited to the closer (last assignee). Maor excluded.</div>';
+
+  // boxes
+  var totDecl = C.physDecl; // physical declines; plus phone declines counted in lost
+  var totApp = cr.appts;
+  html += '<div class="boxes">';
+  html += '<div class="box"><div style="font-weight:bold;margin-bottom:6px">Phone vs in-home</div>In-home: <b>'+C.phys+' &rarr; '+C.soldPhys+' sold ('+pct(C.soldPhys,C.phys)+')</b><br>Phone: <b>'+C.phone+' &rarr; '+C.soldPhone+' sold ('+pct(C.soldPhone,C.phone)+')</b></div>';
+  html += '<div class="box"><div style="font-weight:bold;margin-bottom:6px">Credit / financing walls (physical)</div><div style="font-size:22px;font-weight:bold;color:var(--blue)">'+C.physDecl+' of '+C.phys+' &nbsp;<span class="muted" style="font-size:14px">('+pct(C.physDecl,C.phys)+')</span></div><div class="muted" style="font-size:12px;margin-top:4px">In-home deals lost to a financing/credit decline &mdash; not sales misses. Removing them lifts the physical rate to the sellable rate.</div></div>';
+  html += '</div>';
+
+  // per rep detail
+  REPS.forEach(function(n){
+    var r=R[n], x=rates(r);
+    html += '<h2 class="rep">'+SHORT[n]+' &mdash; Physical '+x.phys+', Sellable '+x.sell+'</h2>';
+    if(r.sold.length){
+      html += '<div><b class="sold">Sold ('+r.sold.length+'):</b> ';
+      html += r.sold.map(function(s){ return esc(s.client)+' '+money(s.amt)+(s.phone?' (phone)':'')+(s.status==='draft'?' [draft]':''); }).join(' &middot; ');
+      html += '</div>';
+    }
+    if(r.lost.length){
+      html += '<div style="margin-top:6px"><b class="notsold">Not sold ('+r.lost.length+'):</b></div>';
+      r.lost.forEach(function(l){
+        html += '<div class="lead">'+esc(l.client)+(l.phone?' <span class="muted">(phone)</span>':'')+(l.decl?' <span style="color:#b00020">[financing/credit wall]</span>':'')+(l.note?' &mdash; <span class="note">'+esc(l.note.slice(0,180))+'</span>':' <span class="muted">&mdash; no note logged</span>')+'</div>';
+      });
+    }
+    if(r.follow.length){
+      html += '<div class="followbox"><div class="hd">FOLLOW UP / STILL LIVE &mdash; '+SHORT[n]+'</div>';
+      r.follow.forEach(function(f){
+        html += '<div class="lead" style="border-color:#f3d0d0">'+(f.hot?'&#128293; ':'')+'<b>'+esc(f.client)+'</b>'+(f.phone?' <span class="muted">(phone)</span>':'')+(f.note?' &mdash; <span class="note">'+esc(f.note.slice(0,160))+'</span>':' <span class="muted">&mdash; no outcome logged; needs a callback</span>')+'</div>';
+      });
+      html += '</div>';
+    }
+    if(!r.sold.length && !r.lost.length){ html += '<div class="muted">No appointments in this period.</div>'; }
+  });
+
+  document.getElementById("out").innerHTML = html;
+}
+
+// init: default to this week
+(function(){
+  var today = new Date();
+  document.getElementById("d1").value = today.toISOString().slice(0,10);
+  document.getElementById("d2").value = today.toISOString().slice(0,10);
+  setMode("week");
+})();
+</script>
+</body>
+</html>
+`;
+  router.get("/admin/jobber/wh/sales/" + SECRET, (req, res) => {
+    res.type("html").send(SALES_PAGE_HTML.split("%%SECRET%%").join(SECRET));
+  });
+
   return router;
 }
