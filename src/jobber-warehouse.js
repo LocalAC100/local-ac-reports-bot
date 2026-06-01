@@ -848,5 +848,20 @@ export function buildJobberWarehouseRouter() {
     }
   });
 
+  // Send a fully-composed report (HTML built by the agent). POST JSON {subject, html}. Recipient fixed.
+  router.post("/admin/jobber/wh/send-report/" + SECRET, (req, res) => {
+    let raw = "";
+    req.on("data", (c) => { raw += c; if (raw.length > 2000000) req.destroy(); });
+    req.on("end", async () => {
+      try {
+        const body = JSON.parse(raw || "{}");
+        if (!body.html) return res.status(400).json({ ok: false, error: "html required" });
+        await sendMail({ to: SALES_RECIPIENTS, subject: body.subject || "Local AC - Sales Report", html: body.html });
+        res.json({ ok: true, sent: true, to: SALES_RECIPIENTS, htmlLen: body.html.length });
+      } catch (e) {
+        res.status(500).json({ ok: false, error: e.message });
+      }
+    });
+  });
   return router;
 }
