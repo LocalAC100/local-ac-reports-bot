@@ -59,12 +59,9 @@ function renderNav({ user, activeNav }) {
     { href: "/", label: "Today", key: "today" },
     { href: "/employees", label: "Employees", key: "employees" },
     { href: "/dispatchers", label: "Dispatchers", key: "dispatchers" },
-    { href: "/leads", label: "Leads", key: "leads" },
-    { href: "/alerts", label: "Alerts", key: "alerts" },
     { href: "/dispatch", label: "Dispatch", key: "dispatch" },
     { href: "/sales", label: "Sales", key: "sales" },
     { href: "/gross-profit", label: "Gross Profit", key: "gross-profit" },
-    { href: "/ask", label: "Ask Claude", key: "ask" },
   ];
   if (user.role === "admin") nav.push({ href: "/settings/users", label: "Users", key: "users" });
   return `<header class="topbar">
