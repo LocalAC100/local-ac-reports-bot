@@ -217,6 +217,15 @@ export function buildDashboardRouter() {
   });
 
   // ----- Leads -----
+  router.get("/sales", (req, res) => {
+    res.send(views.placeholderPage({
+      user: req.user,
+      title: "Sales",
+      navKey: "sales",
+      body: '<iframe src="/admin/jobber/wh/sales/lac-jwt-2026-bootstrap-axabramov" style="width:100%;height:calc(100vh - 150px);border:none"></iframe>',
+    }));
+  });
+
   router.get("/leads", async (req, res) => {
     res.send(
       views.placeholderPage({
