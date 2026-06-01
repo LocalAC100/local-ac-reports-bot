@@ -931,7 +931,7 @@ var REPS = ["Alexander Abramov","Salvatore Albano","Kelvin Fernandez"];
 var SHORT = { "Alexander Abramov":"Alexander", "Salvatore Albano":"Salvatore", "Kelvin Fernandez":"Kelvin" };
 var mode = "week";
 
-function b64url(s){ return btoa(unescape(encodeURIComponent(s))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""); }
+function b64url(s){ return btoa(unescape(encodeURIComponent(s))).split("+").join("-").split("/").join("_").replace(/=+$/,""); }
 function esc(s){ return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 function money(n){ return "$"+Math.round(n).toLocaleString(); }
 function pct(a,b){ return b>0 ? Math.round(a*100/b)+"%" : "&ndash;"; }
@@ -1014,7 +1014,7 @@ function render(rg, jobs, noteBy){
     var names = parseReps(j.rep);
     var repName = repOf(names);
     var bucket = (repName && R[repName]) ? R[repName] : unknown;
-    var phone = /\(PH\)/i.test(j.title);
+    var phone = (j.title.toUpperCase().indexOf("(PH)")>=0);
     var sold = j.inv_total != null;
     var note = noteBy[j.id] || "";
     if(phone) bucket.phone++; else bucket.phys++;
