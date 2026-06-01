@@ -42,6 +42,9 @@ export function layout({ title, body, user, flash, activeNav = "" }) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escape(title)} |* Control Room</title>
   <link rel="icon" href="${FAVICON_DATA_URL}">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700&display=swap">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -70,8 +73,8 @@ function renderNav({ user, activeNav }) {
     <div style="display:flex;align-items:center;gap:14px">
       <div style="width:1px;height:30px;background:rgba(255,255,255,0.28)"></div>
       <div style="display:flex;flex-direction:column;line-height:1.12">
-        <span style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-weight:700;font-size:19px;letter-spacing:0.4px;color:#ffffff">Control Room</span>
-        <span style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-weight:600;font-size:9.5px;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,0.62);margin-top:3px">Operations Dashboard</span>
+        <span style="font-family:Poppins,-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-weight:700;font-size:19px;letter-spacing:0.4px;color:#ffffff">Control Room</span>
+        <span style="font-family:Poppins,-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;font-weight:600;font-size:9.5px;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,0.62);margin-top:3px">Operations Dashboard</span>
       </div>
     </div>
   </div>
