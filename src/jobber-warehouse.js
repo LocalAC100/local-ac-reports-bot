@@ -920,6 +920,8 @@ export function buildJobberWarehouseRouter() {
     <div class="fld" id="f1"><label id="l1">Date</label><input type="date" id="d1"></div>
     <div class="fld hidden" id="f2"><label>End date</label><input type="date" id="d2"></div>
     <button class="run" onclick="run()">Run report</button>
+    <button class="run" style="background:#1a7a3c" onclick="emailReport()">Email report</button>
+    <span id="emStatus" style="font-size:12px;color:#555;margin-left:8px"></span>
   </div>
 
   <div id="out"><div class="loading">Pick a date and click Run report.</div></div>
@@ -1101,10 +1103,34 @@ function render(rg, jobs, noteBy){
     if(!r.sold.length && !r.lost.length){ html += '<div class="muted">No appointments in this period.</div>'; }
   });
 
+  window.__rep = { label: rg.label, C: C, R: R };
   document.getElementById("out").innerHTML = html;
 }
 
-// init: default to this week
+async function emailReport(){
+  var st = document.getElementById('emStatus');
+  if(!window.__rep){ st.textContent = 'Run a report first.'; return; }
+  var rep = window.__rep, C = rep.C, R = rep.R;
+  function rt(r){ var a=r.phys+r.phone, so=r.soldPhys+r.soldPhone; return { appts:a, sold:so, all:pct(so,a), phone:(r.phone?pct(r.soldPhone,r.phone):'-'), phys:pct(r.soldPhys,r.phys), sell:pct(r.soldPhys,r.phys-r.physDecl), sd:(r.phys-r.physDecl) }; }
+  var cr = rt(C);
+  var h = '<div style="font-family:Arial,Helvetica,sans-serif;color:#1a1a1a">';
+  h += '<h2 style="color:#0f4c81;margin:0 0 4px">Local AC - Sales Report</h2>';
+  h += '<p style="color:#555;margin:0 0 10px"><b>' + rep.label + '</b></p>';
+  h += '<p>' + cr.appts + ' appts (' + C.phys + ' physical / ' + C.phone + ' phone) &nbsp;|&nbsp; <b>' + cr.sold + '</b> sold &nbsp;|&nbsp; <b>' + money(C.booked) + '</b> booked</p>';
+  h += '<p>Close rate &mdash; Physical <b>' + cr.phys + '</b> &middot; Sellable <b>' + cr.sell + '</b> &middot; Phone ' + cr.phone + ' &middot; All ' + cr.all + '</p>';
+  h += '<table cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-size:13px;border:1px solid #ccc"><tr style="background:#f0f3f7"><th align="left">Rep</th><th>Appts</th><th>Sold</th><th>All</th><th>Phone</th><th>Physical</th><th>Sellable</th><th align="right">Booked</th></tr>';
+  REPS.forEach(function(n){ var r=R[n], x=rt(r); h += '<tr><td><b>'+SHORT[n]+'</b></td><td align="center">'+x.appts+' ('+r.phys+'/'+r.phone+')</td><td align="center">'+x.sold+'</td><td align="center">'+x.all+'</td><td align="center">'+x.phone+'</td><td align="center"><b>'+x.phys+'</b> ('+r.soldPhys+'/'+r.phys+')</td><td align="center">'+x.sell+' ('+r.soldPhys+'/'+x.sd+')</td><td align="right">'+money(r.booked)+'</td></tr>'; });
+  h += '<tr style="background:#f7f9fc;font-weight:bold"><td>Company</td><td align="center">'+cr.appts+' ('+C.phys+'/'+C.phone+')</td><td align="center">'+cr.sold+'</td><td align="center">'+cr.all+'</td><td align="center">'+cr.phone+'</td><td align="center">'+cr.phys+' ('+C.soldPhys+'/'+C.phys+')</td><td align="center">'+cr.sell+'</td><td align="right">'+money(C.booked)+'</td></tr>';
+  h += '</table></div>';
+  st.textContent = 'Sending...';
+  try{
+    var rr = await fetch('/admin/jobber/wh/send-report/%%SECRET%%', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ subject:'Local AC - Sales Report (' + rep.label + ')', html:h, to:['service@local-ac.com','salvatorea@local-ac.com','christianq@local-ac.com'] }) });
+    var j = await rr.json();
+    st.textContent = j.ok ? ('Emailed to team (' + (j.to ? j.to.length : 3) + ' recipients).') : ('Error: ' + (j.error || 'failed'));
+  }catch(e){ st.textContent = 'Error: ' + e.message; }
+}
+
+  // init: default to this week
 (function(){
   var today = new Date();
   document.getElementById("d1").value = today.toISOString().slice(0,10);
