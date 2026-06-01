@@ -1048,6 +1048,21 @@ function _firstNameOf(input) {
   return raw.split(/\s+/)[0];
 }
 
+export function renderOldLeadsBookedSection(dispatch) {
+  const all = (dispatch && dispatch.appointmentsBooked) || [];
+  const old = all.filter((b) => b && b.isOldLead);
+  const head = `<div class='section'><h2>Old Leads Booked Today</h2><div class='subhead'>Bookings today on leads that first came in on an earlier day - NOT included in the New-Lead booking totals above.</div>`;
+  if (!old.length) return head + `<p class='small'>No older leads were booked today.</p></div>`;
+  const cnt = (k) => old.filter((b) => b.kind === k).length;
+  const phys = cnt('physical'), phone = cnt('phone_sale'), xfer = cnt('live_transfer');
+  const byDisp = new Map();
+  old.forEach((b) => byDisp.set(b.dispatcher || '-', (byDisp.get(b.dispatcher || '-') || 0) + 1));
+  const label = (k) => k === 'phone_sale' ? `<span class='pill-phone'>Phone Booking</span>` : k === 'live_transfer' ? 'Live Transfer' : `<span class='pill-physical'>Physical</span>`;
+  const listRows = old.map((b) => `<tr><td>${b.leadName || '(unnamed)'}</td><td>${b.dispatcher || '-'}</td><td>${b.time || ''}</td><td>${label(b.kind)}</td><td>${b.leadAgeDays == null ? '' : b.leadAgeDays + 'd'}</td></tr>`).join('');
+  const dispRows = [...byDisp.entries()].sort((a, b) => b[1] - a[1]).map(([n, c]) => `<tr><td>${n}</td><td>${c}</td></tr>`).join('');
+  return head + `<div class='summary-footer'><b>${old.length}</b> old lead${old.length === 1 ? '' : 's'} booked today &middot; ${phys} Physical &middot; ${phone} Phone${xfer ? ` &middot; ${xfer} Live Transfer` : ''}</div><table><thead><tr><th>Lead</th><th>Dispatcher</th><th>Time</th><th>Type</th><th>Age</th></tr></thead><tbody>${listRows}</tbody></table><div class='subhead' style='margin-top:8px'>By dispatcher</div><table><thead><tr><th>Dispatcher</th><th>Old Leads Booked</th></tr></thead><tbody>${dispRows}</tbody></table></div>`;
+}
+
 export function renderHourXDispatcherSection(excelData) {
   if (!excelData) return "";
   const { calls = [], newLeadRows = [], newOppRows = [], reactivatedRows = [] } = excelData;
