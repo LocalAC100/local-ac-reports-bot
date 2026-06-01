@@ -62,6 +62,7 @@ function renderNav({ user, activeNav }) {
     { href: "/leads", label: "Leads", key: "leads" },
     { href: "/alerts", label: "Alerts", key: "alerts" },
     { href: "/dispatch", label: "Dispatch", key: "dispatch" },
+    { href: "/sales", label: "Sales", key: "sales" },
     { href: "/gross-profit", label: "Gross Profit", key: "gross-profit" },
     { href: "/ask", label: "Ask Claude", key: "ask" },
   ];
