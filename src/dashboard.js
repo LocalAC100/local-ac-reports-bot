@@ -361,7 +361,7 @@ export function buildDashboardRouter() {
         const targetDate =
           date || now().minus({ days: 1 }).toFormat("yyyy-LL-dd");
         // runEveningReport already archives in reports_history + emails.
-        await runEveningReport({ dateOverride: targetDate });
+        await runEveningReport({ dateOverride: targetDate, noMail: !(req.body && req.body.email) });
         return res.json({
           ok: true,
           mode: "daily",
@@ -385,6 +385,7 @@ export function buildDashboardRouter() {
       }
       const subject = `Local AC — ${safeMode[0].toUpperCase()}${safeMode.slice(1)} Dispatch (${range.from.toFormat("LLL d")} → ${range.to.toFormat("LLL d")})`;
       await sendMail({ subject, html });
+      if (req.body && req.body.email) { try { await sendMail({ to: "service@local-ac.com, Christianq@local-ac.com", subject: "Local AC - Dispatch " + safeMode + " report", html: html }); } catch (e) { console.error("dispatch email failed:", e.message); } }
       return res.json({
         ok: true,
         mode: safeMode,
@@ -525,6 +526,7 @@ export function buildDashboardRouter() {
           var form = document.getElementById('dispatch-form');
           var fd = new FormData(form);
           for (var pair of fd.entries()) { body[pair[0]] = pair[1]; }
+          body.email = window.__dispEmail ? 1 : 0; window.__dispEmail = false;
           try {
             var r = await fetch('/dispatch/generate', {
               method:'POST',
@@ -559,7 +561,8 @@ export function buildDashboardRouter() {
         <input type="hidden" name="mode" value="${escapeHtml(mode)}" />
         ${pickerHtml}
         <button type="submit" class="btn btn-primary" style="height:38px">View</button>
-        <button type="button" id="rt-btn" class="btn btn-primary" style="height:38px;background:#138a36">Real-time report</button>
+        <button type="button" id="rt-btn" class="btn btn-primary" style="height:38px;background:#138a36">Run report</button>
+        <button type="button" id="rt-email-btn" class="btn btn-primary" style="height:36px;background:#1a7a3c" onclick="window.__dispEmail=true;document.getElementById('rt-btn').click();">Email report</button>
         <span id="rt-status"></span>
       </form>
       <div class="dispatch-report">${bodyContent}</div>
