@@ -711,7 +711,7 @@ function buildWeeklyReport(start, end) {
   const byDay = Object.keys(byDayMap).sort().map((d) => ({ date: d, ...agg(byDayMap[d]) }));
   return { start, end, ...agg(rows), byRep, byDay };
 }
-function renderWeeklyHtml(r) {
+function renderWeeklyHtml(r, summary) {
   const money = (n) => "$" + (n || 0).toLocaleString("en-US");
   const dow = (d) => new Date(d + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
   const repRows = r.byRep.map((x) =>
@@ -721,6 +721,7 @@ function renderWeeklyHtml(r) {
   return `<div style="font-family:Arial,sans-serif;font-size:14px;color:#222">
   <h2 style="margin:0 0 4px">Local AC - Weekly Sales Report</h2>
   <p style="color:#666;margin:0 0 12px">${dow(r.start)} &ndash; ${dow(r.end)} &middot; HVAC Free Estimate appointments</p>
+  ${summary ? `<div style="background:#f0f7ff;border:1px solid #91caff;border-radius:6px;padding:12px 16px;margin:0 0 16px"><h3 style="margin:0 0 6px">The week in review</h3>${summary}</div>` : ""}
   <p><b>${r.total}</b> appointments (${r.physical} physical, ${r.phone} phone) &middot; <b>${r.sold} sold</b> &middot; conversion <b>${r.conversion}%</b> &middot; revenue <b>${money(r.revenue)}</b>${r.sold ? " &middot; avg ticket " + money(r.avgTicket) : ""}</p>
   <h3>By rep (week)</h3>
   <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse">
@@ -735,11 +736,11 @@ function renderWeeklyHtml(r) {
   <p style="color:#888;font-size:12px;margin-top:16px">From the Jobber warehouse. Sold = an invoice created for the customer on/after the appointment date. Sold counts firm up after the nightly invoice sync.</p>
   </div>`;
 }
-export async function runWeeklyEmail(start, end, { nomail = false } = {}) {
+export async function runWeeklyEmail(start, end, { nomail = false, summary = "" } = {}) {
   let s0 = start, e0 = end;
   if (!s0 || !e0) { const wr = lastWeekRange(); s0 = s0 || wr[0]; e0 = e0 || wr[1]; }
   const r = buildWeeklyReport(s0, e0);
-  const html = renderWeeklyHtml(r);
+  const html = renderWeeklyHtml(r, summary);
   const lbl = (d) => new Date(d + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric" });
   let sent = false;
   if (!nomail) { await sendMail({ to: SALES_RECIPIENTS, subject: `Local AC - Weekly Sales Report (${lbl(s0)} - ${lbl(e0)})`, html }); sent = true; }
@@ -840,7 +841,7 @@ export function buildJobberWarehouseRouter() {
   // Weekly sales report email (Sun-Sat). ?start=YYYY-MM-DD&end=YYYY-MM-DD&nomail=1 (defaults to last complete week)
   router.get("/admin/jobber/wh/sales-weekly/" + SECRET, async (req, res) => {
     try {
-      const r = await runWeeklyEmail(req.query.start || null, req.query.end || null, { nomail: req.query.nomail === "1" });
+      const r = await runWeeklyEmail(req.query.start || null, req.query.end || null, { nomail: req.query.nomail === "1", summary: req.query.summary || "" });
       res.json({ ok: true, ...r });
     } catch (e) {
       res.status(500).json({ ok: false, error: e.message });
