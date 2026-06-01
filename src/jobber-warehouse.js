@@ -580,6 +580,16 @@ function classifyOutcome(msg) {
   if (t.trim()) return "Other - see notes";
   return "No note yet";
 }
+function scrubPII(s) {
+  if (!s) return "";
+  return String(s)
+    .replace(/\S+@\S+\.\S+/g, "[email]")
+    .replace(/\+?\d[\d\s().\-]{7,}\d/g, "[phone]")
+    .replace(/\b\d{1,6}\s+[A-Z][A-Za-z]+(?:\s+\w+){0,3}\s+(?:St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Blvd|Ct|Court|Way|Cir|Circle|Pl|Place|Ter|Terrace|Hwy|Pkwy|Trail|Trl)\b\.?/gi, "[address]")
+    .replace(/\b\d{3,}\b/g, "[#]")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 function buildSalesReport(dateStr) {
   const jobs = db.prepare(
     `SELECT j.id, j.title, j.status, j.assigned_users, j.client_id, c.name AS client
@@ -601,7 +611,8 @@ function buildSalesReport(dateStr) {
     const note = lastNote.get(j.id) || {};
     return { client: j.client || "(unknown)", rep, type: phone ? "Phone" : "Physical",
       sold, ticket: sold ? (inv.total || 0) : 0,
-      outcome: sold ? "Sold" : classifyOutcome(note.message), noteBy: note.created_by_name || null };
+      outcome: sold ? "Sold" : classifyOutcome(note.message), noteBy: note.created_by_name || null,
+      noteText: sold ? "" : scrubPII(note.message || "").slice(0, 240) };
   });
   const total = rows.length;
   const physical = rows.filter((r) => r.type === "Physical").length;
@@ -625,10 +636,18 @@ function renderSalesEmailHtml(r) {
     `<tr><td>${x.rep}</td><td align="center">${x.jobs}</td><td align="center">${x.physical}</td><td align="center">${x.phone}</td><td align="center">${x.sold}</td><td align="center">${x.jobs ? Math.round((x.sold / x.jobs) * 100) : 0}%</td></tr>`).join("");
   const jobRows = r.rows.map((x) =>
     `<tr><td>${x.client}</td><td>${x.rep}</td><td>${x.type}</td><td>${x.sold ? "Sold" : x.outcome}</td><td align="right">${x.sold ? money(x.ticket) : "-"}</td><td>${x.noteBy ? "note by " + x.noteBy : ""}</td></tr>`).join("");
+  const flags = [];
+  r.byRep.forEach((x) => { if (x.jobs > 0 && x.sold === 0) flags.push(`${x.rep} went 0-for-${x.jobs}`); });
+  const fw = r.rows.filter((x) => x.outcome && x.outcome.indexOf("Financing wall") >= 0).length;
+  if (fw) flags.push(`${fw} lost to financing (not the rep's fault)`);
+  const flagsHtml = flags.length ? `<p style="background:#fff7e6;border:1px solid #ffd591;padding:8px 12px;border-radius:4px"><b>Flags:</b> ${flags.join(" &middot; ")}</p>` : "";
+  const notSold = r.rows.filter((x) => !x.sold);
+  const whatHtml = notSold.length ? `<h3>What happened (not sold)</h3><ul>${notSold.map((x) => `<li><b>${x.client}</b> &middot; ${x.rep} &middot; <i>${x.outcome}</i>${x.noteText ? " &mdash; " + x.noteText : ""}</li>`).join("")}</ul>` : "";
   return `<div style="font-family:Arial,sans-serif;font-size:14px;color:#222">
   <h2 style="margin:0 0 4px">Local AC - Daily Sales Report</h2>
   <p style="color:#666;margin:0 0 12px">${r.date} &middot; HVAC Free Estimate appointments</p>
   <p><b>${r.total}</b> appointments (${r.physical} physical, ${r.phone} phone) &middot; <b>${r.sold} sold</b> &middot; conversion <b>${r.conversion}%</b> &middot; revenue <b>${money(r.revenue)}</b>${r.sold ? " &middot; avg ticket " + money(r.avgTicket) : ""}</p>
+  ${flagsHtml}
   <h3>By rep</h3>
   <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse">
   <tr style="background:#f3f3f3"><th>Rep</th><th>Jobs</th><th>Physical</th><th>Phone</th><th>Sold</th><th>Conv.</th></tr>
@@ -639,6 +658,7 @@ function renderSalesEmailHtml(r) {
   <tr style="background:#f3f3f3"><th>Customer</th><th>Rep</th><th>Type</th><th>Outcome</th><th>Ticket</th><th>Notes</th></tr>
   ${jobRows || '<tr><td colspan="6">No appointments.</td></tr>'}
   </table>
+  ${whatHtml}
   <p style="color:#888;font-size:12px;margin-top:16px">From the Jobber warehouse. Not-sold outcome is classified from the rep's note. Sold = an invoice created for the customer on/after the appointment date.</p>
   </div>`;
 }
@@ -649,7 +669,81 @@ export async function runSalesEmail(dateStr, { nomail = false } = {}) {
   const label = new Date(date + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric" });
   let sent = false;
   if (!nomail) { await sendMail({ to: SALES_RECIPIENTS, subject: `Local AC - Sales Report (${label})`, html }); sent = true; }
-  return { date, sent, recipients: SALES_RECIPIENTS, summary: { total: r.total, sold: r.sold, conversion: r.conversion, revenue: r.revenue, byRep: r.byRep }, htmlLen: html.length };
+  return { date, sent, recipients: SALES_RECIPIENTS, summary: { total: r.total, sold: r.sold, conversion: r.conversion, revenue: r.revenue, byRep: r.byRep }, details: r.rows.map((x) => ({ client: x.client, rep: x.rep, type: x.type, sold: x.sold, outcome: x.outcome, note: x.noteText || "" })), htmlLen: html.length };
+}
+
+function lastWeekRange() {
+  // Most recent complete Sunday..Saturday (relative to ET "today").
+  const todayET = yesterdayET(); // YYYY-MM-DD for "yesterday"; good enough anchor
+  const d = new Date(todayET + "T12:00:00Z");
+  const dow = d.getUTCDay(); // 0=Sun..6=Sat
+  const sat = new Date(d); sat.setUTCDate(d.getUTCDate() - ((dow + 1) % 7)); // last Saturday on/before yesterday
+  const sun = new Date(sat); sun.setUTCDate(sat.getUTCDate() - 6);
+  const f = (x) => x.toISOString().slice(0, 10);
+  return [f(sun), f(sat)];
+}
+function buildWeeklyReport(start, end) {
+  const jobs = db.prepare(
+    `SELECT j.id, j.title, j.assigned_users, j.client_id, c.name AS client, substr(j.start_at,1,10) AS d
+     FROM jw_jobs j LEFT JOIN jw_clients c ON c.id = j.client_id
+     WHERE j.title LIKE '%Free Estimate%' AND substr(j.start_at,1,10) BETWEEN ? AND ?`
+  ).all(start, end);
+  const invForClient = db.prepare(
+    `SELECT total FROM jw_invoices WHERE client_id = ? AND substr(created_at,1,10) >= ? ORDER BY created_at DESC LIMIT 1`
+  );
+  const rows = jobs.map((j) => {
+    const repList = parseAssigned(j.assigned_users);
+    const rep = repList[0] || "Unassigned";
+    const phone = /\(ph\)/i.test(j.title || "");
+    const inv = invForClient.get(j.client_id, j.d);
+    const sold = !!inv;
+    return { date: j.d, client: j.client || "(unknown)", rep, type: phone ? "Phone" : "Physical", sold, ticket: sold ? (inv.total || 0) : 0 };
+  });
+  const agg = (arr) => {
+    const total = arr.length, physical = arr.filter((r) => r.type === "Physical").length;
+    const phone = total - physical, sold = arr.filter((r) => r.sold).length;
+    const revenue = arr.reduce((a, r) => a + (r.ticket || 0), 0);
+    return { total, physical, phone, sold, conversion: total ? Math.round((sold / total) * 100) : 0, revenue, avgTicket: sold ? Math.round(revenue / sold) : 0 };
+  };
+  const byRepMap = {}, byDayMap = {};
+  for (const r of rows) { (byRepMap[r.rep] = byRepMap[r.rep] || []).push(r); (byDayMap[r.date] = byDayMap[r.date] || []).push(r); }
+  const byRep = Object.keys(byRepMap).map((k) => ({ rep: k, ...agg(byRepMap[k]) }));
+  const byDay = Object.keys(byDayMap).sort().map((d) => ({ date: d, ...agg(byDayMap[d]) }));
+  return { start, end, ...agg(rows), byRep, byDay };
+}
+function renderWeeklyHtml(r) {
+  const money = (n) => "$" + (n || 0).toLocaleString("en-US");
+  const dow = (d) => new Date(d + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  const repRows = r.byRep.map((x) =>
+    `<tr><td>${x.rep}</td><td align="center">${x.total}</td><td align="center">${x.physical}</td><td align="center">${x.phone}</td><td align="center">${x.sold}</td><td align="center">${x.total ? Math.round((x.sold / x.total) * 100) : 0}%</td><td align="right">${money(x.revenue)}</td></tr>`).join("");
+  const dayRows = r.byDay.map((x) =>
+    `<tr><td>${dow(x.date)}</td><td align="center">${x.total}</td><td align="center">${x.sold}</td><td align="center">${x.total ? Math.round((x.sold / x.total) * 100) : 0}%</td><td align="right">${money(x.revenue)}</td></tr>`).join("");
+  return `<div style="font-family:Arial,sans-serif;font-size:14px;color:#222">
+  <h2 style="margin:0 0 4px">Local AC - Weekly Sales Report</h2>
+  <p style="color:#666;margin:0 0 12px">${dow(r.start)} &ndash; ${dow(r.end)} &middot; HVAC Free Estimate appointments</p>
+  <p><b>${r.total}</b> appointments (${r.physical} physical, ${r.phone} phone) &middot; <b>${r.sold} sold</b> &middot; conversion <b>${r.conversion}%</b> &middot; revenue <b>${money(r.revenue)}</b>${r.sold ? " &middot; avg ticket " + money(r.avgTicket) : ""}</p>
+  <h3>By rep (week)</h3>
+  <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse">
+  <tr style="background:#f3f3f3"><th>Rep</th><th>Appts</th><th>Physical</th><th>Phone</th><th>Sold</th><th>Conv.</th><th>Revenue</th></tr>
+  ${repRows || '<tr><td colspan="7">No appointments.</td></tr>'}
+  </table>
+  <h3>By day</h3>
+  <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse">
+  <tr style="background:#f3f3f3"><th>Day</th><th>Appts</th><th>Sold</th><th>Conv.</th><th>Revenue</th></tr>
+  ${dayRows || '<tr><td colspan="5">No appointments.</td></tr>'}
+  </table>
+  <p style="color:#888;font-size:12px;margin-top:16px">From the Jobber warehouse. Sold = an invoice created for the customer on/after the appointment date. Sold counts firm up after the nightly invoice sync.</p>
+  </div>`;
+}
+export async function runWeeklyEmail(start, end, { nomail = false } = {}) {
+  let s0 = start, e0 = end;
+  if (!s0 || !e0) { const wr = lastWeekRange(); s0 = s0 || wr[0]; e0 = e0 || wr[1]; }
+  const r = buildWeeklyReport(s0, e0);
+  const html = renderWeeklyHtml(r);
+  const lbl = (d) => new Date(d + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  let sent = false;
+  if (!nomail) { await sendMail({ to: SALES_RECIPIENTS, subject: `Local AC - Weekly Sales Report (${lbl(s0)} - ${lbl(e0)})`, html }); sent = true; }
+  return { start: s0, end: e0, sent, recipients: SALES_RECIPIENTS, summary: { total: r.total, sold: r.sold, conversion: r.conversion, revenue: r.revenue, byRep: r.byRep }, htmlLen: html.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -737,6 +831,16 @@ export function buildJobberWarehouseRouter() {
   router.get("/admin/jobber/wh/sales-email/" + SECRET, async (req, res) => {
     try {
       const r = await runSalesEmail(req.query.date || null, { nomail: req.query.nomail === "1" });
+      res.json({ ok: true, ...r });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+
+  // Weekly sales report email (Sun-Sat). ?start=YYYY-MM-DD&end=YYYY-MM-DD&nomail=1 (defaults to last complete week)
+  router.get("/admin/jobber/wh/sales-weekly/" + SECRET, async (req, res) => {
+    try {
+      const r = await runWeeklyEmail(req.query.start || null, req.query.end || null, { nomail: req.query.nomail === "1" });
       res.json({ ok: true, ...r });
     } catch (e) {
       res.status(500).json({ ok: false, error: e.message });
