@@ -872,37 +872,37 @@ export function buildJobberWarehouseRouter() {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Local AC — Sales Report</title>
 <style>
-  :root{ --blue:#0f4c81; --line:#e0e0e0; }
+  :root{ --blue:#1b57a8; --green:#138a36; --line:#e6e9ef; }
   *{ box-sizing:border-box; }
-  body{ font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; color:#1a1a1a; margin:0; background:#f5f7fa; }
-  .wrap{ max-width:900px; margin:0 auto; padding:18px; }
-  h1{ font-size:22px; margin:0 0 2px; }
-  .sub{ color:#666; margin-bottom:16px; font-size:13px; }
-  .controls{ background:#fff; border:1px solid var(--line); border-radius:10px; padding:14px; display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:18px; }
-  .modes{ display:flex; gap:6px; }
-  .modes button{ border:1px solid var(--blue); background:#fff; color:var(--blue); padding:7px 14px; border-radius:6px; cursor:pointer; font-size:13px; }
-  .modes button.active{ background:var(--blue); color:#fff; }
-  .fld{ display:flex; flex-direction:column; font-size:12px; color:#555; gap:3px; }
-  .fld input{ padding:6px 8px; border:1px solid #ccc; border-radius:6px; font-size:13px; }
-  .run{ background:var(--blue); color:#fff; border:none; padding:9px 20px; border-radius:6px; cursor:pointer; font-size:14px; font-weight:bold; }
+  body{ font-family:-apple-system,system-ui,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; color:#15202b; margin:0; background:#f5f7fa; }
+  .wrap{ max-width:980px; margin:0 auto; padding:18px; }
+  h1{ font-size:22px; font-weight:700; margin:0 0 2px; }
+  .sub{ color:#5a6376; margin-bottom:16px; font-size:13px; }
+  .controls{ background:#eef1f5; border:1px solid #e6e9ef; border-radius:10px; padding:14px 16px; display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end; margin-bottom:18px; }
+  .modes{ display:flex; gap:4px; }
+  .modes button{ border:none; background:transparent; border-bottom:2px solid transparent; color:#5a6376; padding:8px 14px; cursor:pointer; font-size:14px; font-weight:600; }
+  .modes button.active{ color:var(--blue); border-bottom-color:var(--blue); }
+  .fld{ display:flex; flex-direction:column; font-size:12px; color:#5a6376; gap:3px; }
+  .fld input{ padding:8px 10px; border:1px solid #ccd2dd; border-radius:6px; font-size:14px; }
+  .run{ background:var(--green); color:#fff; border:none; padding:9px 18px; border-radius:6px; cursor:pointer; font-size:14px; font-weight:600; }
   .hidden{ display:none; }
-  #out{ background:#fff; border:1px solid var(--line); border-radius:10px; padding:18px; min-height:120px; }
+  #out{ background:#fff; border:1px solid #e6e9ef; border-radius:12px; padding:18px; min-height:120px; box-shadow:0 1px 2px rgba(16,24,40,.04); }
   .band{ background:var(--blue); color:#fff; border-radius:8px; padding:14px 16px; margin-bottom:8px; }
   table{ width:100%; border-collapse:collapse; font-size:12.5px; margin:8px 0 6px; }
-  th,td{ padding:7px; border-bottom:1px solid #eee; }
+  th,td{ padding:7px; border-bottom:1px solid #eef1f5; }
   thead tr{ background:#f0f3f7; }
   .center{ text-align:center; } .right{ text-align:right; }
   .hl{ background:#e3eef8; font-weight:bold; }
   .totrow td{ border-top:2px solid var(--blue); background:#f7f9fc; font-weight:bold; }
-  .muted{ color:#888; font-weight:normal; }
+  .muted{ color:#8a93a6; font-weight:normal; }
   .boxes{ display:flex; gap:12px; margin:14px 0; flex-wrap:wrap; }
-  .box{ flex:1; min-width:240px; border:1px solid var(--line); border-radius:8px; padding:12px; font-size:13px; }
+  .box{ flex:1; min-width:240px; border:1px solid #e6e9ef; border-radius:8px; padding:12px; font-size:13px; }
   h2.rep{ font-size:16px; border-bottom:2px solid var(--blue); padding-bottom:4px; margin-top:24px; }
-  .sold{ color:#1a7a3c; } .notsold{ color:#777; }
+  .sold{ color:#138a36; } .notsold{ color:#777; }
   .lead{ padding:3px 0; border-bottom:1px solid #f2f2f2; font-size:13px; }
   .followbox{ background:#fff4f4; border:1px solid #f3b0b0; border-left:5px solid #d32f2f; border-radius:6px; padding:12px; margin:10px 0 6px; }
   .followbox .hd{ color:#d32f2f; font-weight:bold; margin-bottom:6px; }
-  .err{ color:#b00020; } .loading{ color:#888; }
+  .err{ color:#b00020; } .loading{ color:#8a93a6; }
   .note{ color:#555; font-style:italic; }
 </style>
 </head>
