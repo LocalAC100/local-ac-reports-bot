@@ -510,7 +510,13 @@ export function buildDashboardRouter() {
         padding:8px 10px; border:1px solid #d6dbe5; border-radius:6px; font-size:14px; }
       .dispatch-report { padding:8px 0; }
       #rt-status { margin-left:12px; font-size:13px; color:#5a6376; }
-    </style>`;
+    
+  /* On-screen polish (sales-style) — page only, not in the emailed report */
+  .dispatch-report{ max-width:1000px; margin:0 auto; }
+  .dispatch-report table{ border-collapse:collapse !important; width:100% !important; font-size:12.5px !important; }
+  .dispatch-report th, .dispatch-report td{ padding:7px 9px !important; }
+  .dispatch-report h2, .dispatch-report h3{ margin-top:22px; }
+</style>`;
 
     const script = `<script>
       (function(){
