@@ -258,7 +258,7 @@ async function syncClients() {
     buildQuery: (first, after) => `query { clients(first: ${first}${after ? `, after: "${after}"` : ""}) {
       nodes { id name companyName firstName lastName createdAt updatedAt
         emails { description address } phones { description number }
-        ${notesSelection("ClientNote")} }
+    customFields { __typename ... on CustomFieldDropdown { label valueDropdown } ... on CustomFieldText { label valueText } }     ${notesSelection("ClientNote")} }
       pageInfo { hasNextPage endCursor } } }`,
     extract: (d) => d.clients,
     onNode: (n) => {
