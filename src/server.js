@@ -11,6 +11,7 @@ import { buildDashboardRouter } from "./dashboard.js";
 import { buildDebugRouter } from "./debug.js";
 import { buildFirehoseBackfillRouter } from "./firehose-backfill.js";
 import { buildJobberWarehouseRouter, initJobberWarehouse } from "./jobber-warehouse.js";
+import { buildBridgeRouter } from "./bridge.js";
 import { Alerts, Calls } from "./db.js";
 import { verifyMailer, sendMail, getSendHistory } from "./mailer.js";
 
@@ -282,6 +283,7 @@ export function buildServer() {
   // to /login. The router still gates the OTHER endpoints with requireAdmin.
   app.use(buildFirehoseBackfillRouter());
   app.use(buildJobberWarehouseRouter());
+  app.use(buildBridgeRouter());
   try { initJobberWarehouse(); } catch (e) { console.error("[jw] init failed", e?.message); }
 
   app.use(buildDashboardRouter());
